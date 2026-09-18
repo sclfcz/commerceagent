@@ -1,0 +1,31 @@
+{
+  "name": "CommerceAgent",
+  "short_name": "CommerceAgent",
+  "description": "Personal Claude Assistant",
+  "start_url": "./chat",
+  "display": "standalone",
+  "display_override": ["standalone"],
+  "background_color": "#FAF9F5",
+  "theme_color": "#0d9488",
+  "lang": "zh-CN",
+  "scope": "./",
+  "id": "./",
+  "icons": [
+    {
+      "src": "icons/commerceagent-icon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+# Dependencies
+node_modules/
+happyclaw-resume-skill/
+
+# Build output
+dist/
+
+# Runtime data — databases, encrypted configs, sessions, IPC, env files, agent workspaces
+# All personal data, auto-created at startup, must not be committed.
+/data/
+/logs/
+
+# Legacy directories (migrated into data/ on first startup)
+/store/
+/groups/
+
+# Backup archives from `make backup` — contain the session-secret key, the
+# Claude provider encryption key and the full user SQLite database, i.e. the
+# same secrets as /data/. Written to BACKUP_DIR (repo root by default).
+commerceagent-backup-*.tar.gz
+
+# Environment variables (may contain API keys and secrets)
+.env
+.env.*
+
+# Secrets — catch-all for key/cert files that may appear anywhere
+*.key
+*.pem
+*.keys.json
+
+# Database files outside store/ (safety net)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# npm lockfiles are build inputs and must be version-controlled for reproducible installs.
+bun.lock
+bun.lockb
+
+# Build cache
+.build-sentinel
+*.tsbuildinfo
+coverage/
+playwright-report/
+test-results/
+
+# Local verification artifacts (not product/documentation assets)
+/admin-mail-*.png
+/inbox-after-readall.png
+
+# Local tooling metadata
+.claude/
+.mcp.json
+/.omc/
+.trae/
+.coco/
+.agent/
+.agents/
+skills-lock.json
+--connect
+.playwright-mcp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+/log/
+nohup.out

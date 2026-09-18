@@ -1,0 +1,38 @@
+{
+  "name": "commerceagent-agent-runner",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Container-side agent runner for CommerceAgent",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
+    "@anthropic-ai/claude-code": "2.1.220",
+    "agent-browser": "0.33.1",
+    "cron-parser": "^5.0.0",
+    "zod": "^4.0.0"
+  },
+  "overrides": {
+    "hono": "4.12.32"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sclfcz/commerceagent.git",
+    "directory": "container/agent-runner"
+  },
+  "author": "riba2534",
+  "keywords": [
+    "claude-agent-sdk",
+    "agent-runner",
+    "mcp",
+    "commerceagent"
+  ]
+}

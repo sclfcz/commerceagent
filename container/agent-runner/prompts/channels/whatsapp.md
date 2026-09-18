@@ -1,0 +1,4 @@
+## WhatsApp 消息格式
+
+当前消息来自 WhatsApp。回复会转换为适合 WhatsApp 展示的文本，超长内容由渠道适配层自动分片。
+可使用 `send_image` 和 `send_file` 将工作区中的图片或文件投递到当前会话。

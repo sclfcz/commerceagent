@@ -1,0 +1,330 @@
+.PHONY: dev dev-backend dev-web build build-backend build-web start \
+       typecheck typecheck-backend typecheck-web typecheck-agent-runner \
+       format format-check install install-host-tools clean reset-init update-sdk ensure-latest-sdk sync-types \
+       backup restore help _ensure-docker-image docker-pull logs status stop \
+       _check-sync _ensure-builtin-skills _build-web-if-stale _build-ar-if-stale _build-backend-if-stale
+
+# ─── Runtime ────────────────────────────────────────────────
+# 本项目只用原生 Node 工具链运行（npm / npx / tsx / node），不使用 bun。
+# 原因：主服务的 WebSocket 走 `ws` 包 + @hono/node-server 的 `server.on('upgrade')`
+# 握手，该模式在 bun 的 HTTP server 下不触发，会导致 WS 全部握手失败（HTTP/接口正常，
+# 但前端实时流式卡片/通知全失效，飞书等 stdout 通道不受影响）。
+PORT    ?= $(or $(WEB_PORT),3000)
+export WEB_PORT := $(PORT)
+PKG     := npm
+RUN     := npx
+RUNNER  := npx tsx src/index.ts
+RUNTIME_DATA_DIR ?= data
+BACKUP_DIR ?= .
+CONTAINER_IMAGE ?= riba2534/happyclaw-agent:latest
+export CONTAINER_IMAGE
+
+# ─── Development ─────────────────────────────────────────────
+
+dev: ## 启动前后端（首次自动安装依赖并拉取容器镜像）
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ package-lock.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ web/package-lock.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ] || [ container/agent-runner/package-lock.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+	@$(MAKE) _ensure-builtin-skills
+	@$(MAKE) _ensure-docker-image
+	@$(PKG) --prefix container/agent-runner run build --silent 2>/dev/null || $(PKG) --prefix container/agent-runner run build
+	@echo "🚀 使用 $(PKG) 启动..."
+	$(PKG) run dev:all
+
+dev-backend: ## 仅启动后端（tsx 直跑 TS）
+	$(RUNNER)
+
+dev-web: ## 仅启动前端
+	cd web && $(PKG) run dev
+
+# ─── Build ───────────────────────────────────────────────────
+
+build: sync-types ## 编译前后端及 agent-runner
+	$(PKG) run build:all
+	@touch .build-sentinel
+
+build-backend: ## 仅编译后端
+	$(PKG) run build
+
+build-web: ## 仅编译前端
+	cd web && $(PKG) run build
+
+# ─── Production ──────────────────────────────────────────────
+
+start: ## 一键启动生产环境（前台阻塞运行）
+	@# 生产启动不得隐式改写依赖图；SDK 升级请显式执行 make update-sdk，
+	@# 验证通过后再提交 package.json 与 lockfile。
+	@# 检查端口是否被占用
+	@if lsof -ti:$(PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+	  echo "❌ 端口 $(PORT) 已被占用，请先停掉旧进程：make stop"; \
+	  lsof -ti:$(PORT) -sTCP:LISTEN | xargs ps -fp 2>/dev/null | tail -1; \
+	  exit 1; \
+	fi
+	@if [ ! -d node_modules ] || [ package.json -nt node_modules ] || [ package-lock.json -nt node_modules ] || [ web/package.json -nt web/node_modules ] || [ web/package-lock.json -nt web/node_modules ] || [ container/agent-runner/package.json -nt container/agent-runner/node_modules ] || [ container/agent-runner/package-lock.json -nt container/agent-runner/node_modules ]; then echo "📦 依赖有更新，安装依赖..."; $(MAKE) install; fi
+	@$(MAKE) _ensure-builtin-skills
+	@$(MAKE) _ensure-docker-image
+	@$(MAKE) _check-sync
+	@$(MAKE) _build-backend-if-stale
+	@$(MAKE) _build-web-if-stale
+	@$(MAKE) _build-ar-if-stale
+	@echo "🟢 Node 模式：运行编译后的 dist/index.js（本项目不使用 bun，WebSocket 需要 node）"
+	node dist/index.js
+
+# ─── Internal build checks ────────────────────────────────────
+
+_check-sync: ## (内部) 检测 shared/ 类型变更并同步
+	@NEED_SYNC=0; \
+	for target in src/stream-event.types.ts web/src/stream-event.types.ts container/agent-runner/src/stream-event.types.ts src/image-detector.ts container/agent-runner/src/image-detector.ts src/channel-prefixes.ts container/agent-runner/src/channel-prefixes.ts; do \
+	  if [ ! -f "$$target" ] || [ -n "$$(find shared/ -newer "$$target" -name '*.ts' 2>/dev/null | head -1)" ]; then NEED_SYNC=1; break; fi; \
+	done; \
+	if [ "$$NEED_SYNC" = "1" ]; then echo "🔄 检测到 shared/ 类型变更，同步类型..."; $(MAKE) sync-types; fi
+
+_ensure-builtin-skills: ## (内部) 物化固定版本、Host/Container 共用的内置 Skills
+	@if ! node scripts/builtin-skill-catalog.mjs validate data/builtin-skills; then \
+	  echo "📚 固定版本内置 Skills 缺失，正在物化..."; \
+	  ./scripts/install-host-tools.sh skills; \
+	else \
+	  echo "✅ 内置 Skills catalog 已就绪"; \
+	fi
+
+_build-web-if-stale: ## (内部) 前端变更时重新编译
+	@NEED_WEB=0; \
+	if [ ! -f web/dist/index.html ]; then NEED_WEB=1; \
+	else \
+	  for f in web/package.json web/vite.config.ts web/index.html web/tsconfig.json; do \
+	    if [ -f "$$f" ] && [ "$$f" -nt web/dist/index.html ]; then NEED_WEB=1; break; fi; \
+	  done; \
+	  if [ "$$NEED_WEB" = "0" ] && [ -n "$$(find web/src/ web/public/ -type f -newer web/dist/index.html 2>/dev/null | head -1)" ]; then NEED_WEB=1; fi; \
+	fi; \
+	if [ "$$NEED_WEB" = "1" ]; then echo "🔨 检测到前端变更，重新编译前端..."; cd web && $(PKG) run build; else echo "✅ 前端无变更，跳过编译"; fi
+
+_build-ar-if-stale: ## (内部) agent-runner 变更时重新编译
+	@NEED_AR=0; \
+	if [ ! -f container/agent-runner/dist/.tsbuildinfo ]; then NEED_AR=1; \
+	else \
+	  for f in container/agent-runner/package.json container/agent-runner/tsconfig.json; do \
+	    if [ -f "$$f" ] && [ "$$f" -nt container/agent-runner/dist/.tsbuildinfo ]; then NEED_AR=1; break; fi; \
+	  done; \
+	  if [ "$$NEED_AR" = "0" ] && [ -n "$$(find container/agent-runner/src/ -newer container/agent-runner/dist/.tsbuildinfo -name '*.ts' 2>/dev/null | head -1)" ]; then NEED_AR=1; fi; \
+	fi; \
+	if [ "$$NEED_AR" = "1" ]; then echo "🔨 检测到 agent-runner 变更，重新编译..."; cd container/agent-runner && $(PKG) run build; else echo "✅ agent-runner 无变更，跳过编译"; fi
+
+_build-backend-if-stale: ## (内部) 后端变更时重新编译（Node 模式）
+	@NEED_BACKEND=0; \
+	if [ ! -f dist/index.js ]; then NEED_BACKEND=1; \
+	else \
+	  for f in package.json tsconfig.json; do \
+	    if [ "$$f" -nt dist/index.js ]; then NEED_BACKEND=1; break; fi; \
+	  done; \
+	  if [ "$$NEED_BACKEND" = "0" ] && [ -n "$$(find src/ -newer dist/index.js -name '*.ts' 2>/dev/null | head -1)" ]; then NEED_BACKEND=1; fi; \
+	fi; \
+	if [ "$$NEED_BACKEND" = "1" ]; then echo "🔨 检测到后端源码变更，重新编译后端..."; $(PKG) run build; else echo "✅ 后端无变更，跳过编译"; fi
+
+logs: ## 实时查看日志（需配合手动后台运行：make start > /tmp/commerceagent.log 2>&1 &）
+	@tail -f /tmp/commerceagent.log
+
+stop: ## 停止监听指定端口的服务进程
+	@lsof -ti:$(PORT) -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null && echo "✅ 已停止 CommerceAgent (端口 $(PORT))" || echo "⚠️  端口 $(PORT) 未被占用，无需停止"
+
+status: ## 查看服务运行状态
+	@echo "=== CommerceAgent 服务状态 ==="
+	@if lsof -ti:$(PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+	  echo "✅ 后端进程: 运行中 (端口 $(PORT))"; \
+	  curl -s http://localhost:$(PORT)/api/health 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f\"   健康状态: {d.get('status','unknown')}\")" 2>/dev/null || echo "   健康状态: 无法获取"; \
+	else \
+	  echo "❌ 后端进程: 未运行 (端口 $(PORT) 未占用)"; \
+	fi
+	@echo ""
+	@echo "=== 日志文件 ==="
+	@if [ -f /tmp/commerceagent.log ]; then \
+		echo "✅ /tmp/commerceagent.log 存在 ($$(wc -l < /tmp/commerceagent.log) 行)"; \
+	  echo "   最近 3 行:"; \
+		tail -3 /tmp/commerceagent.log | sed 's/^/   /'; \
+	else \
+		echo "⚠️  /tmp/commerceagent.log 不存在（未用后台模式启动）"; \
+	fi
+	@echo ""
+	@echo "=== Docker 容器 ==="
+	@docker ps --filter "name=commerceagent" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || echo "   Docker 未运行或无 CommerceAgent 容器"
+
+# ─── Quality ─────────────────────────────────────────────────
+
+typecheck: sync-types typecheck-backend typecheck-web typecheck-agent-runner ## 全量类型检查
+	@./scripts/check-stream-event-sync.sh
+	@./scripts/check-agent-runner-prompts.sh
+	@$(PKG) run docs:check
+
+typecheck-backend:
+	$(RUN) tsc --noEmit
+
+typecheck-web:
+	cd web && $(RUN) tsc --noEmit
+
+typecheck-agent-runner:
+	cd container/agent-runner && $(RUN) tsc --noEmit
+
+test: ## 运行单元测试
+	$(RUN) vitest run
+
+format: ## 格式化代码
+	$(PKG) run format
+
+format-check: ## 检查代码格式
+	$(PKG) run format:check
+
+# ─── Docker Image ─────────────────────────────────────────────
+
+_ensure-docker-image: ## (内部) 从镜像仓库拉取 GitHub Actions 发布的容器镜像
+	@if command -v docker >/dev/null 2>&1; then \
+	  $(MAKE) --no-print-directory docker-pull; \
+	fi
+
+docker-pull: ## 拉取 GitHub Actions 发布的 Agent 镜像
+	@echo "🐳 拉取 Docker 镜像 $(CONTAINER_IMAGE)..."
+	@docker pull "$(CONTAINER_IMAGE)"
+	@echo "✅ Docker 镜像已就绪：$(CONTAINER_IMAGE)"
+
+# ─── Shared Types ────────────────────────────────────────────
+
+sync-types: ## 同步 shared/ 下的类型定义到各子项目
+	@./scripts/sync-stream-event.sh
+
+# ─── SDK ─────────────────────────────────────────────────────
+
+update-sdk: ## 显式更新 agent-runner + 主服务的 Claude Agent SDK 到最新版本
+	@SDK_LATEST=$$(npm view @anthropic-ai/claude-agent-sdk version --fetch-timeout=5000); \
+	CLI_LATEST=$$(npm view @anthropic-ai/claude-code version --fetch-timeout=5000); \
+	echo "🔄 更新 Agent SDK → $$SDK_LATEST，Claude Code → $$CLI_LATEST"; \
+	$(PKG) --prefix container/agent-runner install --save-exact \
+	  @anthropic-ai/claude-agent-sdk@$$SDK_LATEST \
+	  @anthropic-ai/claude-code@$$CLI_LATEST; \
+	$(PKG) install --save-exact @anthropic-ai/claude-agent-sdk@$$SDK_LATEST; \
+	$(PKG) --prefix container/agent-runner run build; \
+	echo "✅ SDK/CLI 与 runner lockfile 已更新。请运行 make typecheck && make test 验证。"
+
+ensure-latest-sdk: ## 只读检查 SDK/CLI 最新版本（兼容旧工作流）
+	@LOCAL=$$(node -p "require('./container/agent-runner/node_modules/@anthropic-ai/claude-agent-sdk/package.json').version" 2>/dev/null || echo "0.0.0"); \
+	ROOT_LOCAL=$$(node -p "require('./node_modules/@anthropic-ai/claude-agent-sdk/package.json').version" 2>/dev/null || echo "0.0.0"); \
+	CLI_LOCAL=$$(node -p "require('./container/agent-runner/node_modules/@anthropic-ai/claude-code/package.json').version" 2>/dev/null || echo "0.0.0"); \
+	LATEST=$$(npm view @anthropic-ai/claude-agent-sdk version --fetch-timeout=5000 2>/dev/null || echo "$$LOCAL"); \
+	CLI_LATEST=$$(npm view @anthropic-ai/claude-code version --fetch-timeout=5000 2>/dev/null || echo "$$CLI_LOCAL"); \
+	if [ "$$LOCAL" = "$$LATEST" ] && [ "$$ROOT_LOCAL" = "$$LATEST" ] && [ "$$CLI_LOCAL" = "$$CLI_LATEST" ]; then \
+		echo "✅ Agent SDK/CLI 已是最新（SDK $$LOCAL，CLI $$CLI_LOCAL）"; \
+	else \
+		echo "ℹ️  可更新：runner SDK $$LOCAL、host SDK $$ROOT_LOCAL → $$LATEST；CLI $$CLI_LOCAL → $$CLI_LATEST"; \
+		echo "   请显式执行 make update-sdk，验证后提交 package.json 与 lockfile。"; \
+	fi
+
+# ─── Setup ───────────────────────────────────────────────────
+
+install-host-tools: ## 安装宿主工具 + 刷新 Host/Container 共用的固定版本 builtin-skills Manifest 源
+	@./scripts/install-host-tools.sh
+
+install: ## 安装全部依赖并编译 agent-runner
+	$(PKG) ci
+	@# node-pty 的 spawn-helper 预构建二进制可能缺少可执行权限，导致 PTY 模式失败
+	@chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true
+	cd container/agent-runner && $(PKG) ci
+	cd container/agent-runner && $(PKG) run build
+	cd web && $(PKG) ci
+	@$(MAKE) _ensure-builtin-skills
+	@# 更新目录 mtime 以配合 start 中的依赖变更检测（[ package.json -nt node_modules ]）
+	@touch node_modules web/node_modules container/agent-runner/node_modules
+
+clean: ## 清理构建产物
+	rm -rf dist
+	rm -rf web/dist
+	rm -rf container/agent-runner/dist
+	rm -f .build-sentinel
+
+reset-init: ## 完全重置为首装状态（清空所有运行时数据）
+	rm -rf data store groups
+	@echo "✅ 已完全重置为首装状态（数据库、配置、工作区、记忆、会话全部清除）"
+
+# ─── Backup / Restore ────────────────────────────────────────
+
+backup: ## 备份运行时数据到 commerceagent-backup-{date}.tar.gz
+	@set -eu; \
+	DATE=$$(date +%Y%m%d-%H%M%S); \
+	mkdir -p "$(BACKUP_DIR)"; \
+	FILE="$(BACKUP_DIR)/commerceagent-backup-$$DATE.tar.gz"; \
+	if [ -e "$$FILE" ]; then FILE="$(BACKUP_DIR)/commerceagent-backup-$$DATE-$$$$.tar.gz"; fi; \
+	TMP_FILE="$$FILE.tmp-$$$$"; \
+	TMP_ROOT=$$(mktemp -d "$${TMPDIR:-/tmp}/commerceagent-backup.XXXXXX"); \
+	trap 'rm -rf "$$TMP_ROOT" "$$TMP_FILE"' EXIT INT TERM; \
+	mkdir -p "$$TMP_ROOT/data/db"; \
+	echo "📦 正在创建 SQLite 一致性快照..."; \
+	node scripts/sqlite-snapshot.mjs \
+	  "$(RUNTIME_DATA_DIR)/db/messages.db" \
+	  "$$TMP_ROOT/data/db/messages.db"; \
+	for DIR in config groups sessions skills mcp-servers plugins memory avatars extra builtin-skills; do \
+	  if [ -d "$(RUNTIME_DATA_DIR)/$$DIR" ]; then \
+	    mkdir -p "$$TMP_ROOT/data/$$DIR"; \
+	    cp -a "$(RUNTIME_DATA_DIR)/$$DIR/." "$$TMP_ROOT/data/$$DIR/"; \
+	  fi; \
+	done; \
+	node scripts/prepare-backup-tree.mjs "$$TMP_ROOT/data"; \
+	UNSAFE_ENTRY=$$(find "$$TMP_ROOT/data" \( -type l -o \( ! -type f ! -type d \) \) -print -quit); \
+	if [ -n "$$UNSAFE_ENTRY" ]; then \
+	  echo "❌ 运行时数据包含不安全的链接或特殊文件，拒绝创建不可安全恢复的备份：$$UNSAFE_ENTRY"; \
+	  exit 1; \
+	fi; \
+	HARDLINK_ENTRY=$$(find "$$TMP_ROOT/data" -type f -links +1 -print -quit); \
+	if [ -n "$$HARDLINK_ENTRY" ]; then \
+	  echo "❌ 运行时数据包含硬链接文件，tar 会将其存为不完整的链接条目导致备份无法恢复，拒绝创建：$$HARDLINK_ENTRY"; \
+	  exit 1; \
+	fi; \
+	if [ -d "$$TMP_ROOT/data/groups" ]; then \
+	  find "$$TMP_ROOT/data/groups" -mindepth 2 -maxdepth 2 -type d -name logs \
+	    -prune -exec rm -rf {} +; \
+	fi; \
+	node scripts/backup-manifest.mjs "$$TMP_ROOT/data"; \
+	echo "📦 正在打包备份到 $$FILE ..."; \
+	tar -czf "$$TMP_FILE" -C "$$TMP_ROOT" data; \
+	mv "$$TMP_FILE" "$$FILE"; \
+	chmod 600 "$$FILE"; \
+	echo "✅ 备份完成：$$FILE ($$(du -sh "$$FILE" | cut -f1))"
+
+restore: ## 从 commerceagent-backup-*.tar.gz 恢复数据（用法：make restore 或 make restore FILE=xxx.tar.gz）
+	@set -eu; \
+	if [ -n "$(FILE)" ]; then \
+	  BACKUP="$(FILE)"; \
+	elif [ $$(find "$(BACKUP_DIR)" -maxdepth 1 -type f -name 'commerceagent-backup-*.tar.gz' 2>/dev/null | wc -l) -eq 1 ]; then \
+	  BACKUP=$$(find "$(BACKUP_DIR)" -maxdepth 1 -type f -name 'commerceagent-backup-*.tar.gz' | head -1); \
+	elif [ $$(find "$(BACKUP_DIR)" -maxdepth 1 -type f -name 'commerceagent-backup-*.tar.gz' 2>/dev/null | wc -l) -gt 1 ]; then \
+	  echo "❌ 发现多个备份文件，请用 make restore FILE=xxx.tar.gz 指定："; \
+	  find "$(BACKUP_DIR)" -maxdepth 1 -type f -name 'commerceagent-backup-*.tar.gz' -print; \
+	  exit 1; \
+	else \
+	  echo "❌ 未找到备份文件，请将 commerceagent-backup-*.tar.gz 放到当前目录"; \
+	  exit 1; \
+	fi; \
+	if [ ! -f "$$BACKUP" ]; then \
+	  echo "❌ 备份文件不存在：$$BACKUP"; \
+	  exit 1; \
+	fi; \
+	if ! node scripts/restore-backup.mjs assert-port-free "$(PORT)"; then \
+	  echo "❌ 检测到运行中的服务，拒绝覆盖数据库"; \
+	  exit 1; \
+	fi; \
+	echo "📂 正在从 $$BACKUP 恢复..."; \
+	if [ -d "$(RUNTIME_DATA_DIR)" ] && [ "$$(ls -A "$(RUNTIME_DATA_DIR)" 2>/dev/null)" ]; then \
+	  echo "⚠️  $(RUNTIME_DATA_DIR)/ 目录已存在数据，继续将覆盖。是否继续？[y/N] "; \
+	  read CONFIRM; \
+	  [ "$$CONFIRM" = "y" ] || [ "$$CONFIRM" = "Y" ] || { echo "已取消"; exit 1; }; \
+	fi; \
+	node scripts/restore-backup.mjs restore "$$BACKUP" "$(RUNTIME_DATA_DIR)" "$(PORT)"; \
+	if [ ! -f "$(RUNTIME_DATA_DIR)/config/session-secret.key" ]; then \
+	  echo "⚠️  警告：备份中缺少 session-secret.key，用户登录 cookie 将失效，需重新登录"; \
+	fi; \
+	echo "✅ 数据恢复完成"; \
+	echo ""; \
+	echo "后续步骤："; \
+	echo "  1. 拉取 Agent 镜像：docker pull $(CONTAINER_IMAGE)"; \
+	echo "  2. 启动服务：make start"
+
+# ─── Help ────────────────────────────────────────────────────
+
+help: ## 显示帮助
+	@echo "运行时: 🟢 Node.js（本项目不使用 bun）"
+	@echo ""
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'

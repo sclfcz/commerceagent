@@ -1,0 +1,91 @@
+{
+  "name": "commerceagent",
+  "version": "1.0.0",
+  "description": "Self-hosted, multi-user Claude Code agent workspace.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "self-test": "npm run build:all && npm run self-test:agent-runner && npm test -- --run",
+    "self-test:agent-runner": "tsx scripts/self-test-agent-runner.ts",
+    "reset:admin": "tsx src/reset-admin.ts",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "node scripts/check-format-changed.mjs",
+    "format:changed": "node scripts/check-format-changed.mjs --write",
+    "docs:check": "node scripts/check-docs.mjs",
+    "test": "vitest",
+    "test:real-model": "tsx scripts/test-real-model-smoke.ts",
+    "dev:all": "npx concurrently --timestamp-format \"yyyy-MM-dd HH:mm:ss.SSS\" -n backend,frontend -c blue,green \"npm run dev\" \"npm run dev:web\"",
+    "dev:web": "cd web && npm run dev",
+    "build:web": "cd web && npm run build",
+    "build:all": "npx concurrently --group -n backend,web,agent-runner \"npm run build\" \"npm run build:web\" \"npm --prefix container/agent-runner run build\""
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.205",
+    "@hono/node-server": "^2.0.12",
+    "@larksuiteoapi/node-sdk": "^1.58.0",
+    "adm-zip": "^0.6.0",
+    "baileys": "^7.0.0-rc13",
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.10.0",
+    "cron-parser": "^5.5.0",
+    "dingtalk-stream": "2.1.6-beta.1",
+    "discord.js": "^14.26.2",
+    "grammy": "^1.40.0",
+    "hono": "^4.12.25",
+    "node-pty": "^1.1.0",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "proxy-agent": "^6.5.0",
+    "qrcode": "^1.5.4",
+    "undici": "6.27.0",
+    "ws": "^8.19.0",
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^9.2.1",
+    "happy-dom": "^20.11.1",
+    "prettier": "3.8.3",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.1"
+  },
+  "overrides": {
+    "libsignal": "6.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sclfcz/commerceagent.git"
+  },
+  "homepage": "https://github.com/sclfcz/commerceagent#readme",
+  "bugs": {
+    "url": "https://github.com/sclfcz/commerceagent/issues"
+  },
+  "author": "riba2534",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "ai-agent",
+    "self-hosted",
+    "feishu",
+    "lark",
+    "telegram",
+    "chatbot",
+    "docker",
+    "mcp"
+  ]
+}

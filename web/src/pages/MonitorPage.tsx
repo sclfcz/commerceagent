@@ -1,0 +1,391 @@
+import { useEffect, useRef, useState } from 'react';
+import { useMonitorStore } from '../stores/monitor';
+import { useAuthStore } from '../stores/auth';
+import { ContainerStatus } from '../components/monitor/ContainerStatus';
+import { QueueStatus } from '../components/monitor/QueueStatus';
+import { SystemInfo } from '../components/monitor/SystemInfo';
+import { GroupStatusCard } from '../components/monitor/GroupStatusCard';
+import {
+  ProviderSwitcher,
+  type SimpleProvider,
+} from '../components/monitor/ProviderSwitcher';
+import {
+  RefreshCw,
+  AlertTriangle,
+  CheckCircle,
+  Download,
+  Loader2,
+  ExternalLink,
+} from 'lucide-react';
+import { PageHeader } from '@/components/common/PageHeader';
+import { SkeletonStatCards } from '@/components/common/Skeletons';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent } from '@/components/ui/card';
+import { wsManager } from '../api/ws';
+import { api } from '@/api/client';
+
+export function MonitorPage() {
+  const {
+    status,
+    loading,
+    loadStatus,
+    pulling,
+    pullLogs,
+    pullResult,
+    pullDockerImage,
+    clearPullResult,
+  } = useMonitorStore();
+  const canManageSystem = useAuthStore((s) =>
+    s.hasPermission('manage_system_config'),
+  );
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const [providers, setProviders] = useState<SimpleProvider[]>([]);
+  const [claudeStatus, setClaudeStatus] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadStatus();
+
+    const interval = setInterval(() => {
+      loadStatus();
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [loadStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadClaudeStatus = async () => {
+      try {
+        const response = await fetch(
+          'https://status.claude.com/api/v2/status.json',
+        );
+        if (!response.ok) return;
+        const data = (await response.json()) as {
+          status?: { indicator?: string; description?: string };
+        };
+        if (!cancelled) {
+          setClaudeStatus(
+            data.status?.description || data.status?.indicator || null,
+          );
+        }
+      } catch {
+        if (!cancelled) setClaudeStatus(null);
+      }
+    };
+    void loadClaudeStatus();
+    const timer = window.setInterval(loadClaudeStatus, 5 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  // WebSocket listeners for Docker Hub pull progress
+  useEffect(() => {
+    const unsubLog = wsManager.on(
+      'docker_pull_log',
+      (data: { line: string }) => {
+        useMonitorStore.setState((s) => ({
+          pullLogs: [...s.pullLogs.slice(-199), data.line],
+        }));
+      },
+    );
+    const unsubComplete = wsManager.on(
+      'docker_pull_complete',
+      (data: { success: boolean; error?: string }) => {
+        useMonitorStore.setState({
+          pulling: false,
+          pullResult: { success: data.success, error: data.error },
+        });
+        loadStatus();
+      },
+    );
+
+    return () => {
+      unsubLog();
+      unsubComplete();
+    };
+  }, [loadStatus]);
+
+  // Fetch providers once for all ProviderSwitcher instances
+  useEffect(() => {
+    api
+      .get<{
+        providers: Array<{ id: string; name: string; enabled: boolean }>;
+      }>('/api/config/claude/providers')
+      .then((data) =>
+        setProviders(
+          data.providers
+            .filter((p) => p.enabled)
+            .map(({ id, name }) => ({ id, name })),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
+  // Auto-scroll pull logs to bottom
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [pullLogs]);
+
+  const handlePull = async () => {
+    clearPullResult();
+    await pullDockerImage();
+  };
+
+  return (
+    <div className="min-h-full bg-background p-4 lg:p-8">
+      <div className="max-w-7xl mx-auto">
+        <PageHeader
+          title="系统监控"
+          subtitle="实时监控系统状态（10秒自动刷新）"
+          className="mb-6"
+          actions={
+            <Button variant="outline" onClick={loadStatus} disabled={loading}>
+              <RefreshCw
+                className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`}
+              />
+              刷新
+            </Button>
+          }
+        />
+
+        {loading && !status && <SkeletonStatCards />}
+
+        {status && (
+          <div className="space-y-6">
+            <Card>
+              <CardContent className="flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-sm font-semibold text-foreground">
+                    Anthropic 服务状态
+                  </h2>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {claudeStatus ||
+                      '暂时无法读取外部状态，请打开官方状态页确认。'}
+                  </p>
+                </div>
+                <a
+                  href="https://status.claude.com"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-lg border border-border px-3 text-xs font-medium text-foreground hover:bg-muted"
+                >
+                  官方状态页
+                  <ExternalLink className="size-3.5" />
+                </a>
+              </CardContent>
+            </Card>
+
+            {/* Docker 镜像状态 */}
+            {status.dockerRequired === false ? (
+              <Card>
+                <CardContent>
+                  <h2 className="text-lg font-semibold text-foreground mb-2">
+                    Docker 镜像
+                  </h2>
+                  <div className="flex items-center gap-3">
+                    <CheckCircle className="w-5 h-5 text-success" />
+                    <span className="text-sm text-muted-foreground">
+                      {status.adminHostOnlyMode
+                        ? '管理员纯宿主机模式已开启，当前工作区无需 Docker。'
+                        : '当前没有 Docker 模式的工作区，无需检查镜像。'}
+                    </span>
+                  </div>
+                </CardContent>
+              </Card>
+            ) : (
+              <Card>
+                <CardContent>
+                  <h2 className="text-lg font-semibold text-foreground mb-4">
+                    Docker 镜像
+                  </h2>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      {status.dockerImageExists ? (
+                        <>
+                          <CheckCircle className="w-5 h-5 text-success" />
+                          <span className="text-sm text-success font-medium">
+                            镜像已就绪
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="w-5 h-5 text-error" />
+                          <span className="text-sm text-error font-medium">
+                            镜像不存在，Docker 模式的工作区将无法运行
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <Button
+                      onClick={handlePull}
+                      disabled={pulling || !canManageSystem}
+                      title={!canManageSystem ? '需要系统配置权限' : undefined}
+                    >
+                      {pulling ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          拉取中...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="w-4 h-4" />
+                          {status.dockerImageExists
+                            ? '拉取最新镜像'
+                            : '拉取镜像'}
+                        </>
+                      )}
+                    </Button>
+                  </div>
+
+                  {/* Pull logs */}
+                  {pulling && pullLogs.length > 0 && (
+                    <div className="mt-4">
+                      <div className="bg-[#0f172a] dark:bg-[#0a0f1a] rounded-lg p-3 max-h-64 overflow-y-auto font-mono text-xs text-green-400">
+                        {pullLogs.map((line, i) => (
+                          <div
+                            key={i}
+                            className="whitespace-pre-wrap break-all"
+                          >
+                            {line}
+                          </div>
+                        ))}
+                        <div ref={logEndRef} />
+                      </div>
+                    </div>
+                  )}
+
+                  {pullResult && (
+                    <div
+                      className={`mt-4 p-4 rounded-lg border ${pullResult.success ? 'bg-success-bg border-success/20' : 'bg-error-bg border-error/20'}`}
+                    >
+                      <div className="flex items-center gap-2 mb-2">
+                        {pullResult.success ? (
+                          <CheckCircle className="w-4 h-4 text-success" />
+                        ) : (
+                          <AlertTriangle className="w-4 h-4 text-error" />
+                        )}
+                        <span
+                          className={`text-sm font-medium ${pullResult.success ? 'text-success' : 'text-error'}`}
+                        >
+                          {pullResult.success ? '镜像拉取成功' : '镜像拉取失败'}
+                        </span>
+                      </div>
+                      {pullResult.error && (
+                        <pre className="text-xs text-error bg-error-bg rounded p-3 mt-2 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap">
+                          {pullResult.error}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* 统计卡片 */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <ContainerStatus status={status} />
+              <QueueStatus status={status} />
+              <SystemInfo status={status} />
+            </div>
+
+            {/* 群组详情 */}
+            {status.groups && status.groups.length > 0 && (
+              <Card>
+                <CardContent>
+                  <h2 className="text-lg font-semibold text-foreground mb-4">
+                    群组状态
+                  </h2>
+
+                  {/* 移动端：卡片列表 */}
+                  <div className="lg:hidden space-y-3">
+                    {status.groups.map((group) => (
+                      <GroupStatusCard
+                        key={group.jid}
+                        group={group}
+                        providers={providers}
+                      />
+                    ))}
+                  </div>
+
+                  {/* 桌面端：表格 */}
+                  <div className="hidden lg:block overflow-x-auto">
+                    <table className="min-w-full divide-y divide-border">
+                      <thead>
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
+                            群组
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
+                            账号
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
+                            队列
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
+                            运行状态
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
+                            进程标识
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-medium text-muted-foreground uppercase">
+                            Provider
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {status.groups.map((group) => (
+                          <tr key={group.jid} className="hover:bg-muted/50">
+                            <td className="px-4 py-3 text-sm font-medium text-foreground">
+                              {group.jid}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-muted-foreground">
+                              {group.ownerUsername || '-'}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-muted-foreground">
+                              {group.pendingTasks} 个任务 /{' '}
+                              {group.pendingMessages ? '有新消息' : '无新消息'}
+                            </td>
+                            <td className="px-4 py-3 text-sm">
+                              {group.active ? (
+                                <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-success-bg text-success">
+                                  运行中
+                                </span>
+                              ) : (
+                                <span className="inline-flex px-2 py-0.5 rounded-full text-xs font-medium bg-muted text-muted-foreground">
+                                  空闲
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-muted-foreground font-mono text-xs">
+                              {group.displayName || group.containerName || '-'}
+                            </td>
+                            <td className="px-4 py-3 text-sm">
+                              {group.active ? (
+                                <ProviderSwitcher
+                                  groupFolder={group.groupFolder}
+                                  currentProviderId={group.selectedProviderId}
+                                  currentProviderName={
+                                    group.selectedProviderName
+                                  }
+                                  providers={providers}
+                                />
+                              ) : (
+                                <span className="text-muted-foreground">-</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
