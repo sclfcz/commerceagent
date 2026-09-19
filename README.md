@@ -46,7 +46,26 @@ CommerceAgent 是一个基于 [Claude Agent SDK for TypeScript](https://github.c
 
 ## 页面预览
 
-![CommerceAgent 登录页](docs/screenshots/login.png)
+### 登录页
+
+[![CommerceAgent 登录页](docs/screenshots/login.png)](docs/screenshots/login.png)
+
+### 进入之后
+
+| 运营工作台 | 运营智能体 |
+| --- | --- |
+| [![运营工作台](docs/screenshots/workbench.png)](docs/screenshots/workbench.png) | [![运营智能体](docs/screenshots/agents.png)](docs/screenshots/agents.png) |
+| 与智能体协作的工作区：会话、工作区文件与执行环境 | 管理智能体身份、模型与能力边界 |
+
+| 运营能力（Skills / MCP / Plugins） | 任务中心（定时任务） |
+| --- | --- |
+| [![运营能力](docs/screenshots/capabilities.png)](docs/screenshots/capabilities.png) | [![任务中心](docs/screenshots/tasks.png)](docs/screenshots/tasks.png) |
+| 按工作区装配 Skill、MCP Server 与插件 | 定义定时任务并把结果投递回渠道 |
+
+| 数据分析（用量与成本） | 系统设置 |
+| --- | --- |
+| [![数据分析](docs/screenshots/usage.png)](docs/screenshots/usage.png) | [![系统设置](docs/screenshots/settings.png)](docs/screenshots/settings.png) |
+| 用量、成本与运行状态统计 | 模型提供商、渠道、用户与安全配置 |
 
 CommerceAgent 不是一个简单的聊天 API Wrapper。智能体运行在真实的 Claude Code 环境中，可以读写项目文件、执行终端命令、使用浏览器、调用 MCP、加载 Skills，并在多个独立工作区和会话之间保持清晰的权限与上下文边界。
 
