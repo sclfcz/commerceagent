@@ -82,6 +82,9 @@ jobs:
       - name: Install desktop dependencies
         run: npm --prefix desktop ci
 
+      - name: Build the desktop shell
+        run: npm --prefix desktop run build
+
       - name: Vendor the Node runtime for this target
         run: node desktop/scripts/fetch-node.mjs --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
 

@@ -53,6 +53,8 @@ const stageDir = join(desktopDir, `.runtime-${target}`);
 const nodeDir = join(desktopDir, 'vendor', `node-${target}`);
 const nodeBinary = join(nodeDir, platform === 'win32' ? 'node.exe' : 'node');
 const npmCli = join(nodeDir, 'npm', 'bin', 'npm-cli.js');
+// npm that invoked this script, used only to locate npm-cli.js as a fallback.
+const npmCliFallback = process.env.npm_execpath ?? 'npm';
 const pathKey = platform === 'win32' ? 'Path' : 'PATH';
 
 if (!existsSync(nodeBinary)) {
@@ -78,7 +80,26 @@ const installEnv = {
   npm_config_update_notifier: 'false',
 };
 
+/**
+ * npm CLI to run under the vendored Node: the copy shipped with the vendored
+ * runtime when present, otherwise the npm that invoked this script (older
+ * Windows Node archives keep npm outside lib/node_modules).
+ */
+function resolveNpmCli() {
+  if (existsSync(npmCli)) return npmCli;
+  const globalRoot = execFileSync(npmCliFallback, ['root', '-g'], {
+    encoding: 'utf8',
+  }).trim();
+  const fallback = join(globalRoot, 'npm', 'bin', 'npm-cli.js');
+  if (!existsSync(fallback)) {
+    throw new Error(`npm CLI not found: neither ${npmCli} nor ${fallback}`);
+  }
+  console.log(`vendored npm missing, using ${fallback}`);
+  return fallback;
+}
+
 function installProductionDeps(directory, label) {
+  const cli = resolveNpmCli();
   console.log(
     `installing ${label} production dependencies with ${execFileSync(nodeBinary, ['--version']).toString().trim()}`,
   );

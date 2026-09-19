@@ -97,8 +97,12 @@ if (!existsSync(sourceBinary)) {
 cpSync(sourceBinary, join(targetDir, binaryName));
 // npm travels with the runtime so packaging always installs production
 // dependencies with exactly this Node ABI (avoids NODE_MODULE_VERSION drift).
-const npmDir = join(extracted, 'lib', 'node_modules', 'npm');
-if (existsSync(npmDir))
+// Windows archives keep npm at the archive root instead of under lib/.
+const npmDir = [
+  join(extracted, 'lib', 'node_modules', 'npm'),
+  join(extracted, 'node_modules', 'npm'),
+].find((candidate) => existsSync(candidate));
+if (npmDir !== undefined)
   cpSync(npmDir, join(targetDir, 'npm'), { recursive: true });
 // Keep the license next to the runtime: redistributing Node requires it.
 const licenseSource =
