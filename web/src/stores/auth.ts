@@ -91,6 +91,17 @@ interface AuthState {
 
 let checkAuthInFlight: Promise<void> | null = null;
 
+/**
+ * 丢弃 HTML 阶段预发的 /api/auth/me（见 web/index.html）。
+ *
+ * /login 不在 AuthGuard 内，所以那条预发请求（未登录 → 401）不会在登录页被消费。
+ * 登录成功后 AuthGuard 才去消费它，就会用「登录前的 401」覆盖刚建立的会话，
+ * 表现为「第一次登录闪一下、被弹回登录页，第二次才成功」。
+ */
+function discardAuthPrewarm() {
+  (window as { __authPrewarm?: unknown }).__authPrewarm = undefined;
+}
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   authenticated: false,
   user: null,
@@ -110,6 +121,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       setupStatus?: SetupStatus;
       appearance?: AppearanceConfig;
     }>('/api/auth/login', { username, password });
+    // 登录成功后，登录前的预发结果已过期，必须丢弃。
+    discardAuthPrewarm();
     set({
       authenticated: true,
       user: data.user,
@@ -127,6 +140,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       '/api/auth/register',
       payload,
     );
+    discardAuthPrewarm();
     set({
       authenticated: true,
       user: data.user,
@@ -207,14 +221,18 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             return;
           }
           if (res?.status === 401) {
-            await get().checkStatus();
-            set({
-              authenticated: false,
-              user: null,
-              setupStatus: null,
-              checking: false,
-            });
-            return;
+            if (!get().authenticated) {
+              await get().checkStatus();
+              set({
+                authenticated: false,
+                user: null,
+                setupStatus: null,
+                checking: false,
+              });
+              return;
+            }
+            // 预发请求可能早于一次成功登录；它的 401 不能清掉刚建立的会话，
+            // 下面用一次新请求重新确认真实状态。
           }
         } catch {
           /* fall through to the regular retry flow */
