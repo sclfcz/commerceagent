@@ -1,0 +1,81 @@
+appId: com.commerceagent.desktop
+productName: CommerceAgent
+copyright: Copyright © 2026 CommerceAgent
+
+directories:
+  output: release
+  buildResources: build
+
+# Only the shell's own compiled code lives in the asar; the backend ships as
+# extraResources below because it must stay a real directory tree (native
+# modules, `web/dist`, `container/` assets) and be writable-adjacent for Node.
+files:
+  - dist/**/*
+  - package.json
+
+# The backend payload is staged by `scripts/stage-runtime.mjs` so its native
+# modules are installed with the same Node runtime that runs them at runtime.
+extraResources:
+  - from: .runtime/dist
+    to: app/dist
+  - from: .runtime/web/dist
+    to: app/web/dist
+  - from: .runtime/config
+    to: app/config
+  - from: .runtime/container
+    to: app/container
+  - from: .runtime/package.json
+    to: app/package.json
+  - from: .runtime/node_modules
+    to: app/node_modules
+  # Stock Node runtime for the sidecar (run `npm run fetch-node` first).
+  - from: vendor/node-${platform}-${arch}/node
+    to: node/node
+  - from: vendor/node-${platform}-${arch}/LICENSE
+    to: node/LICENSE
+
+# Never rebuild dependencies with Electron's ABI: the shell has no native
+# dependencies of its own, and the staged backend must keep the vendored Node ABI.
+npmRebuild: false
+
+asarUnpack:
+  - dist/preload/**
+
+mac:
+  category: public.app-category.productivity
+  icon: ../web/public/icons/logo-1024.png
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  # No Apple Developer account is configured yet: ship unsigned and document the
+  # Gatekeeper override. Flip these once signing/notarization credentials exist.
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  entitlementsInherit: build/entitlements.mac.plist
+
+dmg:
+  contents:
+    - x: 140
+      y: 180
+    - x: 400
+      y: 180
+      type: link
+      path: /Applications
+
+win:
+  icon: ../web/public/icons/logo-1024.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # Unsigned Windows builds trigger SmartScreen once; that is expected until a
+  # code signing certificate is available.
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false

@@ -20,7 +20,17 @@ export const MOUNT_ALLOWLIST_PATH = path.resolve(
   'config',
   'mount-allowlist.json',
 );
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+/**
+ * 可写数据根目录。
+ *
+ * 默认仍是项目下的 `data/`（本地开发、Docker 部署的行为不变）；桌面端把应用
+ * 资源放在只读的 .app/Resources 里，需要把状态目录指到用户可写的位置，
+ * 因此支持 COMMERCEAGENT_DATA_DIR 覆盖。DB、上传、workspace、session secret
+ * 等运行时状态都从 DATA_DIR 派生。
+ */
+export const DATA_DIR = path.resolve(
+  process.env.COMMERCEAGENT_DATA_DIR || path.join(PROJECT_ROOT, 'data'),
+);
 export const STORE_DIR = path.join(DATA_DIR, 'db');
 export const GROUPS_DIR = path.join(DATA_DIR, 'groups');
 export const MAIN_GROUP_FOLDER = 'main';

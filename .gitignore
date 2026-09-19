@@ -73,3 +73,8 @@ Thumbs.db
 
 /log/
 nohup.out
+desktop/.runtime/
+desktop/vendor/
+desktop/release/
+desktop/node_modules/
+desktop/dist/

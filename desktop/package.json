@@ -1,0 +1,23 @@
+{
+  "name": "commerceagent-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Electron shell for CommerceAgent (bundles the Node sidecar backend + web UI).",
+  "type": "module",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-preload.mjs",
+    "dev": "npm run build && electron .",
+    "fetch-node": "node scripts/fetch-node.mjs",
+    "dist:mac": "npm run build && npm run stage && electron-builder --mac",
+    "dist:win": "npm run build && npm run stage && electron-builder --win",
+    "dist:dir": "npm run build && npm run stage && electron-builder --dir",
+    "stage": "node scripts/stage-runtime.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2"
+  }
+}
