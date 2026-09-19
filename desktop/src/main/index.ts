@@ -14,6 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { startSidecar, type SidecarHandle } from './sidecar.js';
+import { setupAutoUpdate } from './updater.js';
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -129,6 +130,7 @@ if (!app.requestSingleInstanceLock()) {
         logFile: path.join(app.getPath('userData'), 'backend.log'),
       });
       mainWindow = await createWindow(sidecar.origin);
+      setupAutoUpdate();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       mainWindow = new BrowserWindow({

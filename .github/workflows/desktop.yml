@@ -1,0 +1,115 @@
+name: Desktop
+
+# Packages the Electron shell for macOS (arm64 + x64) and Windows (x64).
+#
+# Each runner builds only its own target architecture: the backend payload and the
+# vendored Node runtime are architecture specific (`stage-runtime.mjs` writes
+# `.runtime-<platform>-<arch>/`), and building on a matching runner keeps the
+# native modules ABI-correct without emulation.
+#
+# Tag pushes (`v*`) attach the installers to a GitHub Release. Signing and
+# notarization stay disabled until the repository has the credentials; see the
+# commented block at the end of the mac steps.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS arm64
+            runner: macos-14
+            target: mac
+            platform: darwin
+            arch: arm64
+            artifact: desktop-mac-arm64
+          - label: macOS x64
+            runner: macos-13
+            target: mac
+            platform: darwin
+            arch: x64
+            artifact: desktop-mac-x64
+          - label: Windows x64
+            runner: windows-latest
+            target: win
+            platform: win32
+            arch: x64
+            artifact: desktop-win-x64
+
+    env:
+      # No code signing certificate yet: keep electron-builder from trying to
+      # auto-discover an identity on the runner. See the signing block below.
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install backend dependencies
+        run: npm ci
+
+      - name: Build backend, web UI and agent-runner
+        run: npm run build:all
+
+      - name: Install desktop dependencies
+        run: npm --prefix desktop ci
+
+      - name: Vendor the Node runtime for this target
+        run: node desktop/scripts/fetch-node.mjs --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+
+      - name: Stage the backend payload
+        run: node desktop/scripts/stage-runtime.mjs --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+
+      - name: Package
+        working-directory: desktop
+        run: npx electron-builder --${{ matrix.target }} --${{ matrix.arch }} --publish never
+
+      # Signing + notarization become active as soon as the secrets exist:
+      #   mac:     CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID
+      #   windows: WIN_CSC_LINK, WIN_CSC_KEY_PASSWORD
+      # Remove `identity: null` from electron-builder.yml at the same time.
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.exe
+            desktop/release/*.yml
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach installers to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/release/*.dmg
+            desktop/release/*.exe
+            desktop/release/*.yml
+          draft: false
+          generate_release_notes: true

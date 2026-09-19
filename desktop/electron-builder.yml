@@ -2,6 +2,11 @@ appId: com.commerceagent.desktop
 productName: CommerceAgent
 copyright: Copyright © 2026 CommerceAgent
 
+publish:
+  provider: github
+  owner: sclfcz
+  repo: commerceagent
+
 directories:
   output: release
   buildResources: build
