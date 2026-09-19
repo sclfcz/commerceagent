@@ -16,17 +16,17 @@ files:
 # The backend payload is staged by `scripts/stage-runtime.mjs` so its native
 # modules are installed with the same Node runtime that runs them at runtime.
 extraResources:
-  - from: .runtime/dist
+  - from: .runtime-${platform}-${arch}/dist
     to: app/dist
-  - from: .runtime/web/dist
+  - from: .runtime-${platform}-${arch}/web/dist
     to: app/web/dist
-  - from: .runtime/config
+  - from: .runtime-${platform}-${arch}/config
     to: app/config
-  - from: .runtime/container
+  - from: .runtime-${platform}-${arch}/container
     to: app/container
-  - from: .runtime/package.json
+  - from: .runtime-${platform}-${arch}/package.json
     to: app/package.json
-  - from: .runtime/node_modules
+  - from: .runtime-${platform}-${arch}/node_modules
     to: app/node_modules
   # Stock Node runtime for the sidecar (run `npm run fetch-node` first).
   - from: vendor/node-${platform}-${arch}/node

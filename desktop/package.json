@@ -9,10 +9,14 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-preload.mjs",
     "dev": "npm run build && electron .",
     "fetch-node": "node scripts/fetch-node.mjs",
-    "dist:mac": "npm run build && npm run stage && electron-builder --mac",
-    "dist:win": "npm run build && npm run stage && electron-builder --win",
+    "dist:mac": "npm run build && npm run fetch-node:all && npm run stage:arm64 && npm run stage:x64 && electron-builder --mac",
+    "dist:win": "npm run build && npm run fetch-node:all && npm run stage:win && electron-builder --win",
     "dist:dir": "npm run build && npm run stage && electron-builder --dir",
-    "stage": "node scripts/stage-runtime.mjs"
+    "stage": "node scripts/stage-runtime.mjs",
+    "fetch-node:all": "node scripts/fetch-node.mjs --platform darwin --arch arm64 && node scripts/fetch-node.mjs --platform darwin --arch x64 && node scripts/fetch-node.mjs --platform win32 --arch x64",
+    "stage:arm64": "node scripts/stage-runtime.mjs --arch arm64",
+    "stage:x64": "node scripts/stage-runtime.mjs --arch x64",
+    "stage:win": "node scripts/stage-runtime.mjs --platform win32 --arch x64"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

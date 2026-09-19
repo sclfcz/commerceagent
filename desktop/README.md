@@ -65,6 +65,30 @@ is why `npmRebuild: false` is set for electron-builder: the shell has no native
 dependencies of its own, and rebuilding the backend tree with Electron's ABI would
 break the sidecar.
 
+## Per-architecture staging
+
+Native modules and the Node runtime are per-architecture, so staging is too:
+`stage:arm64` / `stage:x64` write `.runtime-darwin-<arch>/`, and
+`electron-builder.yml` selects the matching tree with `${platform}-${arch}`.
+`dist:mac` therefore fetches the Node runtime for every architecture it packs
+(`fetch-node:all`) before staging, which is what prevents the classic
+"packaged app silently misses `Resources/node/node` for the second arch".
+
+Sizes measured on this machine (macOS 15, arm64):
+
+| Artifact                                         | Size    |
+| ------------------------------------------------ | ------- |
+| Staged backend payload (`.runtime-darwin-arm64`) | ~945 MB |
+| `CommerceAgent-1.0.0-arm64.dmg`                  | 471 MB  |
+| `CommerceAgent-1.0.0.dmg` (x64)                  | 421 MB  |
+| Unpacked `.app`                                  | ~1.6 GB |
+
+Most of the payload is the product, not tooling: `@anthropic-ai/claude-code`
+(~245 MB), the platform build of the agent SDK (~245 MB), `agent-browser`
+(~86 MB before pruning other platforms), the stock Node runtime (~120 MB) and the
+backend's production dependencies. Pruning removes artifacts the target can never
+load — prebuilt binaries for other operating systems and source maps (~166 MB).
+
 ## Verification
 
 | Check                                                               | Result                                                                                            |
