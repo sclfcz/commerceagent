@@ -243,9 +243,10 @@ export function UnifiedSidebar({
             const isChatItem = path === '/chat';
             const isActive = location.pathname.startsWith(path);
             const baseClass =
-              'w-12 h-12 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-colors';
+              // 固定宽高：最宽标签 5 个汉字（10px）需要 50px，w-12 会折行导致图标列不对齐。
+              'w-14 h-12 rounded-xl flex flex-col items-center justify-center gap-0.5 transition-colors';
             const activeClass = isActive
-              ? 'bg-[#f26b2b] text-white shadow-[0_8px_18px_rgba(242,107,43,0.24)]'
+              ? 'bg-[#0891b2] text-white shadow-[0_8px_18px_rgba(8,145,178,0.24)]'
               : 'text-slate-400 hover:bg-white/10 hover:text-white';
 
             return (
@@ -260,7 +261,9 @@ export function UnifiedSidebar({
                         className="w-[20px] h-[20px]"
                         strokeWidth={isActive ? 2 : 1.75}
                       />
-                      <span className="text-[10px] leading-tight">{label}</span>
+                      <span className="text-[10px] leading-tight whitespace-nowrap text-center">
+                        {label}
+                      </span>
                     </button>
                   ) : (
                     <NavLink to={path} className={cn(baseClass, activeClass)}>
@@ -268,7 +271,9 @@ export function UnifiedSidebar({
                         className="w-[20px] h-[20px]"
                         strokeWidth={isActive ? 2 : 1.75}
                       />
-                      <span className="text-[10px] leading-tight">{label}</span>
+                      <span className="text-[10px] leading-tight whitespace-nowrap text-center">
+                        {label}
+                      </span>
                     </NavLink>
                   )}
                 </TooltipTrigger>
@@ -342,15 +347,15 @@ export function UnifiedSidebar({
         >
           <div className="w-[16.5rem] h-full flex flex-col">
             <div className="flex items-center gap-2 px-4 pt-6 pb-3 mb-3 flex-shrink-0">
-             <img
-               src={`${import.meta.env.BASE_URL}icons/commerceagent-icon.png`}
-               alt={appearance?.appName || 'CommerceAgent'}
-               className="h-10 w-10 rounded-xl object-cover"
-             />
+              <img
+                src={`${import.meta.env.BASE_URL}icons/commerceagent-icon.png`}
+                alt={appearance?.appName || 'CommerceAgent'}
+                className="h-10 w-10 rounded-xl object-cover"
+              />
               <span className="text-base font-semibold tracking-tight text-white">
                 CommerceAgent
               </span>
-             <div className="flex-1" />
+              <div className="flex-1" />
               <button
                 onClick={onToggleCollapse}
                 className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white/10 text-slate-400 hover:text-white transition-colors cursor-pointer"
