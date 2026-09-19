@@ -140,7 +140,6 @@ export function LoginPage() {
 
   return (
     <div className="commerce-login min-h-screen overflow-y-auto">
-
       {/* ── Top nav bar ── */}
       <header className="commerce-login-header relative z-10 flex items-center justify-between px-6 py-4 lg:px-12">
         <div className="flex items-center gap-3">
@@ -174,7 +173,7 @@ export function LoginPage() {
         <div className="mx-auto max-w-6xl w-full">
           <div className="commerce-login-grid flex flex-col lg:grid lg:grid-cols-2 gap-8 lg:gap-12 items-stretch">
             {/* Left: Hero text — below card on mobile */}
-            <div className="commerce-login-hero text-center lg:text-left">
+            <div className="commerce-login-hero ecom-hero-glow text-center lg:text-left">
               <div className="landing-badge commerce-login-badge">
                 <Sparkles className="size-3.5" />
                 <span>CommerceAgent 电商运营智能体</span>
@@ -194,39 +193,21 @@ export function LoginPage() {
               <div className="commerce-login-capabilities mt-8 grid grid-cols-3 gap-2 text-left">
                 <div>
                   <span className="commerce-login-capability-value">商品</span>
-                  <span className="commerce-login-capability-label">策略协同</span>
+                  <span className="commerce-login-capability-label">
+                    策略协同
+                  </span>
                 </div>
                 <div>
                   <span className="commerce-login-capability-value">订单</span>
-                  <span className="commerce-login-capability-label">履约跟进</span>
+                  <span className="commerce-login-capability-label">
+                    履约跟进
+                  </span>
                 </div>
                 <div>
                   <span className="commerce-login-capability-value">客户</span>
-                  <span className="commerce-login-capability-label">增长分析</span>
-                </div>
-              </div>
-
-              {/* Stats — hidden on small mobile to save space */}
-              <div className="mt-6 lg:mt-8 hidden sm:flex items-center justify-center lg:justify-start gap-6 lg:gap-8">
-                <div>
-                  <div className="text-xl lg:text-2xl font-bold text-foreground">
-                    5+
-                  </div>
-                    <div className="text-xs text-muted-foreground">经营渠道</div>
-                </div>
-                <div className="w-px h-8 bg-border" />
-                <div>
-                  <div className="text-xl lg:text-2xl font-bold text-foreground">
-                    Docker
-                  </div>
-                    <div className="text-xs text-muted-foreground">安全运行</div>
-                </div>
-                <div className="w-px h-8 bg-border" />
-                <div>
-                  <div className="text-xl lg:text-2xl font-bold text-foreground">
-                    24/7
-                  </div>
-                    <div className="text-xs text-muted-foreground">持续协同</div>
+                  <span className="commerce-login-capability-label">
+                    增长分析
+                  </span>
                 </div>
               </div>
             </div>
@@ -309,7 +290,7 @@ export function LoginPage() {
                       <Button
                         type="submit"
                         disabled={loading}
-                        className="w-full h-9"
+                        className="ecom-cta w-full h-9"
                       >
                         {loading && <Loader2 className="size-4 animate-spin" />}
                         {loading ? '登录中...' : '登录'}
@@ -415,7 +396,7 @@ export function LoginPage() {
                       <Button
                         type="submit"
                         disabled={loading}
-                        className="w-full h-9"
+                        className="ecom-cta w-full h-9"
                       >
                         {loading && <Loader2 className="size-4 animate-spin" />}
                         {loading ? '注册中...' : '注册'}

@@ -199,7 +199,7 @@ export function ProviderList({
                         className={`text-[11px] px-1.5 py-0.5 rounded shrink-0 ${
                           provider.type === 'official'
                             ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300'
-                            : 'bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300'
+                            : 'bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300'
                         }`}
                       >
                         {provider.type === 'official' ? '官方' : '第三方'}

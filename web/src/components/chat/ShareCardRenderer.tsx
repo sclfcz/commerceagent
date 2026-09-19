@@ -39,14 +39,14 @@ const LIGHT_BASE_VARS: Record<string, string> = {
 
 /** Default brand fallbacks (classic orange) in case CSS vars are unavailable. */
 const BRAND_DEFAULTS: Record<string, string> = {
-  '--brand-50': '#fff7ed',
-  '--brand-100': '#ffedd5',
-  '--brand-200': '#fed7aa',
-  '--brand-300': '#fdba74',
-  '--brand-400': '#fb923c',
-  '--brand-500': '#f97316',
-  '--brand-600': '#ea580c',
-  '--brand-700': '#c2410c',
+  '--brand-50': '#ecfeff',
+  '--brand-100': '#cffafe',
+  '--brand-200': '#a5f3fc',
+  '--brand-300': '#a5f3fc',
+  '--brand-400': '#67e8f9',
+  '--brand-500': '#22d3ee',
+  '--brand-600': '#06b6d4',
+  '--brand-700': '#0891b2',
 };
 
 /**

@@ -1,20 +1,42 @@
 import { useEffect } from 'react';
-import { Sparkles, Check, Zap, Clock, Layers } from 'lucide-react';
+import {
+  Sparkles,
+  Check,
+  Zap,
+  Clock,
+  Layers,
+  CreditCard,
+  RefreshCcw,
+  Gift,
+  ShieldCheck,
+} from 'lucide-react';
 import { useBillingStore, type BillingPlan } from '../../stores/billing';
 import { useCurrency, formatTokens } from './utils';
 
-function PlanCard({ plan, isCurrent, fmt }: { plan: BillingPlan; isCurrent: boolean; fmt: (n: number) => string }) {
+function PlanCard({
+  plan,
+  isCurrent,
+  fmt,
+}: {
+  plan: BillingPlan;
+  isCurrent: boolean;
+  fmt: (n: number) => string;
+}) {
   const isHighlighted = plan.highlight;
 
   // Collect resource limits
   const resources: { label: string; value: string }[] = [];
-  if (plan.max_groups != null) resources.push({ label: '工作区', value: `${plan.max_groups}` });
+  if (plan.max_groups != null)
+    resources.push({ label: '工作区', value: `${plan.max_groups}` });
   if (plan.max_im_channels != null)
     resources.push({ label: 'IM 通道', value: `${plan.max_im_channels}` });
   if (plan.max_mcp_servers != null)
     resources.push({ label: 'MCP Server', value: `${plan.max_mcp_servers}` });
   if (plan.max_concurrent_containers != null)
-    resources.push({ label: '并发容器', value: `${plan.max_concurrent_containers}` });
+    resources.push({
+      label: '并发容器',
+      value: `${plan.max_concurrent_containers}`,
+    });
   if (plan.max_storage_mb != null)
     resources.push({ label: '存储', value: `${plan.max_storage_mb} MB` });
 
@@ -27,17 +49,26 @@ function PlanCard({ plan, isCurrent, fmt }: { plan: BillingPlan; isCurrent: bool
   if (plan.daily_cost_quota != null)
     quotas.push({ label: '日度费用', value: fmt(plan.daily_cost_quota) });
   if (plan.monthly_token_quota != null)
-    quotas.push({ label: '月度 Token', value: formatTokens(plan.monthly_token_quota) });
+    quotas.push({
+      label: '月度 Token',
+      value: formatTokens(plan.monthly_token_quota),
+    });
   if (plan.weekly_token_quota != null)
-    quotas.push({ label: '周度 Token', value: formatTokens(plan.weekly_token_quota) });
+    quotas.push({
+      label: '周度 Token',
+      value: formatTokens(plan.weekly_token_quota),
+    });
   if (plan.daily_token_quota != null)
-    quotas.push({ label: '日度 Token', value: formatTokens(plan.daily_token_quota) });
+    quotas.push({
+      label: '日度 Token',
+      value: formatTokens(plan.daily_token_quota),
+    });
 
   return (
     <div
-      className={`relative rounded-lg border p-5 flex flex-col transition-shadow ${
+      className={`relative rounded-lg border p-5 flex flex-col transition-shadow ecom-card-lift ${
         isHighlighted
-          ? 'border-brand-500 dark:border-brand-400 shadow-[0_0_12px_rgba(249,115,22,0.25)] dark:shadow-[0_0_12px_rgba(251,146,60,0.2)]'
+          ? 'border-brand-500 dark:border-brand-400 shadow-[0_0_12px_rgba(8,145,178,0.25)] dark:shadow-[0_0_12px_rgba(34,211,238,0.2)]'
           : 'border-zinc-200 dark:border-zinc-700'
       } bg-white dark:bg-zinc-800`}
     >
@@ -69,7 +100,9 @@ function PlanCard({ plan, isCurrent, fmt }: { plan: BillingPlan; isCurrent: bool
           </p>
         ) : (
           <p className="text-xl font-bold text-primary dark:text-brand-400 mt-1">
-            {plan.monthly_cost_usd === 0 ? '免费' : `${fmt(plan.monthly_cost_usd)}/月`}
+            {plan.monthly_cost_usd === 0
+              ? '免费'
+              : `${fmt(plan.monthly_cost_usd)}/月`}
           </p>
         )}
         {plan.description && (
@@ -130,7 +163,9 @@ function PlanCard({ plan, isCurrent, fmt }: { plan: BillingPlan; isCurrent: bool
             {resources.map((r) => (
               <div key={r.label} className="flex justify-between">
                 <span className="text-zinc-400">{r.label}</span>
-                <span className="text-zinc-600 dark:text-zinc-300">{r.value}</span>
+                <span className="text-zinc-600 dark:text-zinc-300">
+                  {r.value}
+                </span>
               </div>
             ))}
           </div>
@@ -141,7 +176,12 @@ function PlanCard({ plan, isCurrent, fmt }: { plan: BillingPlan; isCurrent: bool
 }
 
 export default function PricingGrid() {
-  const { plans, plan: currentPlan, loadPlans, loadMySubscription } = useBillingStore();
+  const {
+    plans,
+    plan: currentPlan,
+    loadPlans,
+    loadMySubscription,
+  } = useBillingStore();
   const fmt = useCurrency();
 
   useEffect(() => {
@@ -163,15 +203,37 @@ export default function PricingGrid() {
   }
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      {activePlans.map((plan) => (
-        <PlanCard
-          key={plan.id}
-          plan={plan}
-          isCurrent={currentPlan?.id === plan.id}
-          fmt={fmt}
-        />
-      ))}
+    <div>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {activePlans.map((plan) => (
+          <PlanCard
+            key={plan.id}
+            plan={plan}
+            isCurrent={currentPlan?.id === plan.id}
+            fmt={fmt}
+          />
+        ))}
+      </div>
+
+      {/* Storefront reassurance strip */}
+      <div className="ecom-trust-row text-xs">
+        <span className="inline-flex items-center gap-1.5">
+          <CreditCard className="w-3.5 h-3.5 text-brand-500" />
+          线上支付 · 额度即时到账
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <RefreshCcw className="w-3.5 h-3.5 text-brand-500" />
+          随时升级 / 降级
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <Gift className="w-3.5 h-3.5 text-brand-500" />
+          新套餐支持试用天数
+        </span>
+        <span className="inline-flex items-center gap-1.5">
+          <ShieldCheck className="w-3.5 h-3.5 text-brand-500" />
+          账单明细可审计
+        </span>
+      </div>
     </div>
   );
 }

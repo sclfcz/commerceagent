@@ -48,9 +48,9 @@ const SCHEME_OPTIONS: {
     preview: { bg: '#f8fafc', accent: '#0d9488', text: '#0f172a' },
   },
   {
-    value: 'orange',
-    label: '暖橙',
-    preview: { bg: '#faf9f5', accent: '#f97316', text: '#141413' },
+    value: 'cyber',
+    label: '赛博青',
+    preview: { bg: '#eef1f7', accent: '#0891b2', text: '#0e1626' },
   },
   {
     value: 'neutral',

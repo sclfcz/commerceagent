@@ -1203,7 +1203,7 @@ export function MessageInput({
                 showStop && !disabled && !stopping
                   ? 'bg-foreground text-background hover:bg-foreground/90'
                   : canSend && !disabled && !sending
-                    ? 'bg-primary text-white hover:bg-primary/90 max-lg:shadow-[0_2px_8px_rgba(249,115,22,0.3)]'
+                    ? 'bg-primary text-white hover:bg-primary/90 max-lg:shadow-[0_2px_8px_rgba(8,145,178,0.3)]'
                     : 'bg-muted text-muted-foreground'
               } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2`}
             >

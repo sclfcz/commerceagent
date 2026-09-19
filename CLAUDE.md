@@ -346,3 +346,13 @@ git diff --check
 
 真实 Provider 测试使用 `npm run test:real-model`，会产生真实请求和可能的费用，
 不要把凭据、Endpoint、模型名或未脱敏回复写入日志。
+
+## 电商视觉风格基线（E-commerce storefront baseline）
+
+页面观感对标主流电商（淘宝/京东/SHEIN 一类），统一要求：
+
+- **转化导向**：强 CTA（优先用渐变主按钮 `.ecom-cta`）、商品/服务卡片用 `.ecom-card-lift` 悬浮抬升。
+- **商品化表达**：价格行可用 `.ecom-price-line`（划线原价 + 促销价 `.ecom-overline` / `.ecom-hot-price`），热卖角标用 `.ecom-hot-ribbon`。
+- **信任感**：关键页（定价/登录/申请）放置 `.ecom-trust-row`（支付安全、隐私、售后、审计等）。
+- **品牌感**：hero 区可用 `.ecom-hero-glow` 品牌光晕；正文 line-length ≤ 80 字符；避免"一眼 AI"的默认撞色（如奶油底+陶土橙）与单一词高亮。
+- 设计决策参考 `.agents/skills/frontend-design/SKILL.md`（官方 Anthropic frontend-design，Apache-2.0）。

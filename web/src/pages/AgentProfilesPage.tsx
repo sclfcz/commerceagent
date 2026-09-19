@@ -1498,7 +1498,7 @@ export function AgentProfilesPage() {
                 <div className="space-y-5">
                   <section
                     hidden={draftMode && draftStep !== 1}
-                    className="overflow-hidden rounded-xl border border-border bg-card"
+                    className="overflow-hidden rounded-xl border border-border bg-card ecom-card-lift"
                   >
                     <div className="border-b border-border px-5 py-4">
                       <h2 className="text-sm font-semibold text-foreground">
@@ -1734,13 +1734,14 @@ export function AgentProfilesPage() {
                   </section>
 
                   {draftMode && draftStep === 3 && (
-                    <section className="overflow-hidden rounded-xl border border-border bg-card">
+                    <section className="overflow-hidden rounded-xl border border-border bg-card ecom-card-lift">
                       <div className="border-b px-5 py-4">
                         <h2 className="text-sm font-semibold">宿主机配置</h2>
                         <p className="mt-1 text-xs leading-5 text-muted-foreground">
                           决定是否将管理员的 ~/.claude 作为完整用户配置层叠加；
-                          工作区仍是运行目录。宿主机 MCP 随配置加载，CommerceAgent
-                          MCP 与宿主机 Skills 在“能力配置”中独立设置。
+                          工作区仍是运行目录。宿主机 MCP
+                          随配置加载，CommerceAgent MCP 与宿主机 Skills
+                          在“能力配置”中独立设置。
                         </p>
                       </div>
                       <div
@@ -1777,7 +1778,8 @@ export function AgentProfilesPage() {
                           <span className="mt-1 block text-xs leading-5 text-muted-foreground">
                             加载设置、提示词、Rules、Agents、Commands、Hooks、
                             Workflows、Output Styles、Plugins 与宿主机 MCP；
-                              CommerceAgent MCP 和宿主机 Skills 仍由下一步单独控制。
+                            CommerceAgent MCP 和宿主机 Skills
+                            仍由下一步单独控制。
                           </span>
                         </button>
                       </div>
@@ -1829,7 +1831,7 @@ export function AgentProfilesPage() {
                   )}
 
                   {draftMode && draftStep === 5 && (
-                    <section className="overflow-hidden rounded-xl border border-border bg-card">
+                    <section className="overflow-hidden rounded-xl border border-border bg-card ecom-card-lift">
                       <div className="border-b px-5 py-4">
                         <h2 className="text-sm font-semibold">确认创建</h2>
                         <p className="mt-1 text-xs text-muted-foreground">
@@ -1969,7 +1971,7 @@ export function AgentProfilesPage() {
                             CommerceAgent MCP
                           </h3>
                           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                              控制 CommerceAgent 额外附加的 MCP；宿主机 MCP
+                            控制 CommerceAgent 额外附加的 MCP；宿主机 MCP
                             仍由上一步的宿主机配置控制。
                           </p>
                         </div>

@@ -62,7 +62,7 @@ export function EmojiAvatar({
     return (
       <div
         className={base}
-        style={{ backgroundColor: color || '#f97316' }}
+        style={{ backgroundColor: color || '#22d3ee' }}
       >
         <span>{emoji}</span>
       </div>

@@ -57,7 +57,8 @@
         )
           d.classList.add('dark');
         var c = localStorage.getItem('commerceagent-color-scheme');
-        if (c === 'orange') d.classList.add('theme-orange');
+        if (c === 'orange' || c === 'cyber')
+          d.classList.add('theme-cyber');
         if (c === 'neutral') d.classList.add('theme-neutral');
         if (localStorage.getItem('commerceagent-font-style') === 'anthropic')
           d.classList.add('font-anthropic');
