@@ -78,3 +78,4 @@ desktop/vendor/
 desktop/release/
 desktop/node_modules/
 desktop/dist/
+desktop/.metadata_never_index
