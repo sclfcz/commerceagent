@@ -91,6 +91,13 @@ jobs:
       - name: Stage the backend payload
         run: node desktop/scripts/stage-runtime.mjs --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
 
+      - name: Stamp the desktop version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        # electron-builder names the installers after desktop/package.json, and
+        # electron-updater compares that version with latest*.yml, so a tagged
+        # build must carry the tag's version or in-app updates never match.
+        run: node -e "const fs=require('fs');const p='desktop/package.json';const j=JSON.parse(fs.readFileSync(p));j.version=process.env.GITHUB_REF_NAME.replace(/^v/,'');fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n');console.log('desktop version ->',j.version)"
+
       - name: Package
         working-directory: desktop
         run: npx electron-builder --${{ matrix.target }} --${{ matrix.arch }} --publish never
