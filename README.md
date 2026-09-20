@@ -17,6 +17,7 @@
   <a href="https://github.com/sclfcz/commerceagent/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/sclfcz/commerceagent/ci.yml?branch=main&style=for-the-badge&label=CI" alt="CI" /></a>
   <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%3E%3D20-339933?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="Node.js" /></a>
   <img src="https://img.shields.io/badge/TypeScript-5.9-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
+  <a href="https://github.com/sclfcz/commerceagent/releases/latest"><img src="https://img.shields.io/github/v/release/sclfcz/commerceagent?style=for-the-badge&color=0891b2&label=下载" alt="Release" /></a>
   <a href="https://github.com/sclfcz/commerceagent/stargazers"><img src="https://img.shields.io/github/stars/sclfcz/commerceagent?style=for-the-badge&color=f5a623" alt="GitHub Stars" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-0F766E?style=for-the-badge" alt="MIT License" /></a>
 </p>
@@ -43,6 +44,36 @@
 ## CommerceAgent 是什么
 
 CommerceAgent 是一个基于 [Claude Agent SDK for TypeScript](https://github.com/anthropics/claude-agent-sdk-typescript) 的自托管 AI 智能体系统。它把完整的 Claude Code 运行时封装成一个可持续运行的多用户服务，让你可以从浏览器、飞书、Telegram、QQ、钉钉、微信、Discord 或 WhatsApp 使用同一套智能体、工作区、能力和自动化任务。
+
+## 下载桌面端
+
+桌面端把后端与 Web 界面打包成一个应用（Electron 外壳 + 内置 Node 运行时），**双击即用，无需自己装 Node 或数据库**。
+
+前往 [**Releases**](https://github.com/sclfcz/commerceagent/releases/latest) 下载对应平台的安装包：
+
+| 你的电脑                       | 下载                             |
+| ------------------------------ | -------------------------------- |
+| Mac（Apple 芯片：M1/M2/M3/M4） | `CommerceAgent-<版本>-arm64.dmg` |
+| Mac（Intel 芯片）              | `CommerceAgent-<版本>.dmg`       |
+| Windows 64 位                  | `CommerceAgent-<版本>-setup.exe` |
+
+> 不确定 Mac 芯片型号？左上角 → 「关于本机」→ 看「芯片」一栏（Apple M 系列选 arm64，Intel 选另一个）。
+
+### 首次打开
+
+安装包**尚未签名**，所以系统会拦一次，放行后即可正常使用：
+
+- **macOS**：右键点应用 → **打开** → 再点**打开**；或「系统设置 → 隐私与安全性 → 仍要打开」；或执行 `xattr -dr com.apple.quarantine /Applications/CommerceAgent.app`
+- **Windows**：SmartScreen 提示「Windows 已保护你的电脑」→ **更多信息** → **仍要运行**（只需一次）
+
+### 首次配置
+
+桌面端首次启动是**全新状态**，按向导走两步即可：
+
+1. 创建管理员账号
+2. 「系统接入初始化」里填模型渠道：官方渠道（Anthropic）或第三方渠道（`ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL` / `ANTHROPIC_AUTH_TOKEN`）
+
+之后在「系统设置」里可继续配置消息渠道、Skills、MCP 与定时任务。运行本身不需要 Docker；只有想用容器沙箱模式时才需要安装 Docker。
 
 ## 页面预览
 
