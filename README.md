@@ -552,13 +552,16 @@ Claude Code，并把实际版本写入
 
 ## 贡献
 
-欢迎提交 Issue 和 Pull Request：
+欢迎提交 Issue 与 Pull Request —— 完整的开发环境、命令、代码规范与 PR 流程见 **[CONTRIBUTING.md](CONTRIBUTING.md)**。简要版：
 
-1. Fork 本仓库并从 `main` 创建功能分支。
+1. Fork 本仓库并从 `main` 创建功能分支（`fix/<简述>` 或 `feat/<简述>`）。
 2. 完成修改并补充相应测试。
-3. 运行 `make typecheck && make test && make build`。
-4. 确认 `make format-check` 通过。
-5. 提交 Pull Request，说明用户影响、验证方式和兼容性变化。
+3. 本地跑通 `make typecheck && make test && make format-check`。
+4. 按 PR 模板提交，说明改动、验证方式与兼容性影响；首次贡献者的 CI 需维护者批准后运行。
+5. 请遵循 [行为准则](CODE_OF_CONDUCT.md)；安全问题按 [SECURITY.md](SECURITY.md) 私下报告。
+
+反馈入口：[Bug 报告](https://github.com/sclfcz/commerceagent/issues/new?template=bug_report.yml) ·
+[功能建议](https://github.com/sclfcz/commerceagent/issues/new?template=feature_request.yml)
 
 提交信息建议使用 [Conventional Commits](https://www.conventionalcommits.org/)：
 

@@ -1,0 +1,76 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+title: '[Bug] '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量把「复现步骤」写清楚——能稳定复现的问题修复得最快。
+        ⚠️ 粘贴日志前请先脱敏（Token、App Secret、账号、内网地址）。
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: 部署方式
+      options:
+        - 桌面端（macOS）
+        - 桌面端（Windows）
+        - 自托管（源码 / make start）
+        - Docker
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 桌面端在「关于」里看；自托管填 commit 或 tag
+      placeholder: v1.0.2 / commit 7f3a1c2
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 系统与运行时
+      placeholder: macOS 15.2 (Apple M2) / Node 24.0.0 / Docker 27
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 …
+        2. 输入 …
+        3. 观察 …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 有报错信息、截图或日志请贴在这里（记得脱敏）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 智能体运行模式
+      options:
+        - 宿主模式（host）
+        - 容器沙箱模式（Docker）
+        - 不确定
+    validations:
+      required: false

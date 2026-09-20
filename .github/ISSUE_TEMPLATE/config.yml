@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 安全漏洞（请勿公开）
+    url: https://github.com/sclfcz/commerceagent/security/policy
+    about: 请按 SECURITY.md 私下报告安全问题，不要开公开 Issue。
+  - name: 使用文档与常见问题
+    url: https://github.com/sclfcz/commerceagent#readme
+    about: 安装、配置渠道与模型、桌面端使用等问题，先看 README 与 docs/。

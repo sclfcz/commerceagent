@@ -1,0 +1,36 @@
+name: 功能建议
+description: 提出一个新功能或改进
+title: '[Feature] '
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 先描述场景与痛点，再描述期望的方案
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你期望的做法
+      description: 如果有替代方案或取舍，也一并说明
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及范围
+      options:
+        - 智能体与工作区
+        - 能力（Skills / MCP / Plugins）
+        - 消息渠道
+        - 模型与提供商
+        - 定时任务
+        - 桌面端
+        - 文档
+        - 其它
+    validations:
+      required: true
