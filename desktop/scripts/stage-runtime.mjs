@@ -29,7 +29,7 @@ import {
   statSync,
   unlinkSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -125,23 +125,25 @@ cpSync(join(repoRoot, 'web', 'dist'), join(stageDir, 'web', 'dist'), {
   recursive: true,
 });
 
-// `container/` payload: the Docker assets plus the agent-runner that host mode
-// spawns. Its dependencies are installed below rather than copied, so the
-// packaged app does not carry devDependencies (TypeScript, tests, …).
-mkdirSync(join(stageDir, 'container'), { recursive: true });
-for (const entry of ['Dockerfile', 'entrypoint.sh', 'prompts']) {
-  const source = join(repoRoot, 'container', entry);
-  if (existsSync(source))
-    cpSync(source, join(stageDir, 'container', entry), { recursive: true });
-}
-const runnerSource = join(repoRoot, 'container', 'agent-runner');
+// `container/` payload: the Docker assets, the session helper scripts, the
+// shared skills tree and the agent-runner that host mode spawns. Copied as a
+// whole tree — the runner resolves its prompts and helpers relative to itself, so
+// cherry-picking files silently breaks host mode (a missing prompts/*.md shows up
+// as `ENOENT ... agent-runner/prompts/security-rules.md` at runtime).
+// The runner's node_modules is excluded and installed below with the vendored
+// Node, so the app does not ship devDependencies.
+const runnerNodeModules = join(
+  repoRoot,
+  'container',
+  'agent-runner',
+  'node_modules',
+);
+cpSync(join(repoRoot, 'container'), join(stageDir, 'container'), {
+  recursive: true,
+  filter: (source) =>
+    source !== runnerNodeModules && !source.startsWith(runnerNodeModules + sep),
+});
 const runnerStage = join(stageDir, 'container', 'agent-runner');
-mkdirSync(runnerStage, { recursive: true });
-for (const entry of ['package.json', 'package-lock.json', 'dist', 'src']) {
-  const source = join(runnerSource, entry);
-  if (existsSync(source))
-    cpSync(source, join(runnerStage, entry), { recursive: true });
-}
 
 installProductionDeps(stageDir, 'backend');
 if (existsSync(join(runnerStage, 'package.json'))) {

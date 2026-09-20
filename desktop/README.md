@@ -89,6 +89,25 @@ Most of the payload is the product, not tooling: `@anthropic-ai/claude-code`
 backend's production dependencies. Pruning removes artifacts the target can never
 load — prebuilt binaries for other operating systems and source maps (~166 MB).
 
+## Payload pitfalls
+
+`container/` must be copied as a **whole tree** (minus the runner's
+`node_modules`). The agent-runner resolves its prompts, session helper scripts and
+skills relative to itself, so cherry-picking files breaks host mode in a way that
+only shows up at runtime:
+
+```
+Host Agent exited with code 1
+ENOENT: .../Resources/app/container/agent-runner/prompts/security-rules.md
+```
+
+which the UI reports as "处理失败，已达最大重试次数" — a chat that accepts messages
+and never answers.
+
+Packaged builds also set `COMMERCEAGENT_RUNNER_PREBUILT=1` so the backend does not
+try to recompile the runner at startup (a packaged app has no npm/tsc, and copying
+the tree refreshes `src` mtimes so the staleness check would otherwise fire).
+
 ## Verification
 
 | Check                                                               | Result                                                                                            |

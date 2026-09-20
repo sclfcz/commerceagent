@@ -116,6 +116,9 @@ export async function startSidecar(
       NODE_ENV: 'production',
       WEB_PORT: String(port),
       COMMERCEAGENT_DATA_DIR: config.dataDir,
+      // The packaged app ships a prebuilt agent-runner dist and has no npm/tsc,
+      // so the backend must not try to rebuild it on startup.
+      COMMERCEAGENT_RUNNER_PREBUILT: '1',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

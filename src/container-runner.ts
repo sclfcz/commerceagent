@@ -2605,7 +2605,9 @@ export async function runContainerAgent(
       workspaceMemoryRunnerInstanceId,
     );
     try {
-      releaseCommerceAgentOwnerIntroductionLease(workspaceMemoryRunnerInstanceId);
+      releaseCommerceAgentOwnerIntroductionLease(
+        workspaceMemoryRunnerInstanceId,
+      );
     } catch (err) {
       logger.warn(
         { err, runnerInstanceId: workspaceMemoryRunnerInstanceId },
@@ -3200,9 +3202,14 @@ export async function runHostAgent(
       );
     }
 
-    // Auto-rebuild if dist is stale (src newer than dist)
+    // Auto-rebuild if dist is stale (src newer than dist). Packaged deployments
+    // (desktop app, container image) ship a prebuilt dist and have no npm/tsc on
+    // disk, so they opt out through COMMERCEAGENT_RUNNER_PREBUILT.
+    const runnerPrebuilt = process.env.COMMERCEAGENT_RUNNER_PREBUILT === '1';
     try {
-      const distMtime = fs.statSync(agentRunnerDist).mtimeMs;
+      const distMtime = runnerPrebuilt
+        ? Infinity
+        : fs.statSync(agentRunnerDist).mtimeMs;
       const srcDir = path.join(agentRunnerRoot, 'src');
       const srcFiles = fs.readdirSync(srcDir);
       const newestSrc = Math.max(
@@ -3547,7 +3554,9 @@ export async function runHostAgent(
       workspaceMemoryRunnerInstanceId,
     );
     try {
-      releaseCommerceAgentOwnerIntroductionLease(workspaceMemoryRunnerInstanceId);
+      releaseCommerceAgentOwnerIntroductionLease(
+        workspaceMemoryRunnerInstanceId,
+      );
     } catch (err) {
       logger.warn(
         { err, runnerInstanceId: workspaceMemoryRunnerInstanceId },
