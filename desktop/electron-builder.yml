@@ -49,11 +49,11 @@ asarUnpack:
 mac:
   category: public.app-category.productivity
   icon: ../web/public/icons/logo-1024.png
+  # Architecture comes from the CLI (`--arm64` / `--x64`) so each CI job builds
+  # exactly one dmg; listing both here made every mac job emit both files, and the
+  # parallel release uploads then raced on identical asset names.
   target:
-    - target: dmg
-      arch:
-        - arm64
-        - x64
+    - dmg
   # No Apple Developer account is configured yet: ship unsigned and document the
   # Gatekeeper override. Flip these once signing/notarization credentials exist.
   identity: null
@@ -73,9 +73,7 @@ dmg:
 win:
   icon: ../web/public/icons/logo-1024.png
   target:
-    - target: nsis
-      arch:
-        - x64
+    - nsis
   # Unsigned Windows builds trigger SmartScreen once; that is expected until a
   # code signing certificate is available.
 

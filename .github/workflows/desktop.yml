@@ -107,7 +107,7 @@ jobs:
           path: |
             desktop/release/*.dmg
             desktop/release/*.exe
-            desktop/release/*.yml
+            desktop/release/latest*.yml
           if-no-files-found: error
           retention-days: 14
 
@@ -118,6 +118,6 @@ jobs:
           files: |
             desktop/release/*.dmg
             desktop/release/*.exe
-            desktop/release/*.yml
+            desktop/release/latest*.yml
           draft: false
           generate_release_notes: true
