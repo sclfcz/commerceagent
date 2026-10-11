@@ -9,6 +9,7 @@ import { assertSpike } from '../benchmarks/assertions/spike.js';
 import {
   assessAttempt,
   rotateCandidates,
+  summarizeCandidates,
 } from '../benchmarks/lib/assessment.js';
 import {
   FreshStateTracker,
@@ -210,6 +211,40 @@ describe('official identity policy and matrix', () => {
         'qwen-synthetic',
       ),
     ).toBe(true);
+  });
+  test('summarizes identity per candidate when a smoke mixes official and gateway providers', () => {
+    const gateway = {
+      candidate: 'candidate-a',
+      measurementValid: true,
+      businessPass: false,
+      qualityEligible: false,
+      sdkModelMatches: true,
+      gatewayVerificationRequired: true,
+      gates: { modelIdentity: false },
+    };
+    const official = {
+      candidate: 'candidate-b',
+      measurementValid: true,
+      businessPass: true,
+      qualityEligible: true,
+      sdkModelMatches: true,
+      gatewayVerificationRequired: false,
+      gates: { modelIdentity: true },
+    };
+    const report = summarizeCandidates([gateway, official, gateway, official]);
+    expect(report['candidate-a']).toMatchObject({
+      attempts: 2,
+      businessPassAttempts: 0,
+      identityVerified: false,
+      identityStatus: 'gateway_pending',
+    });
+    expect(report['candidate-b']).toMatchObject({
+      attempts: 2,
+      businessPassAttempts: 2,
+      qualityEligibleAttempts: 2,
+      identityVerified: true,
+      identityStatus: 'verified',
+    });
   });
   test('rotates two candidates and selects a different Go model', () => {
     const a: Candidate = {

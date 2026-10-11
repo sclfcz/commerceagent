@@ -114,3 +114,34 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 `passed=false` 是 smoke 阶段保留完整 spike 验收门槛的设计；正式 5 × 3 尚未执行。
 此前两个网关候选的外部模型身份核验仍是独立待办，不由本次官方验证替代。
 临时服务凭据已清理，逐文件检查结果未保留本次输入密钥原文。
+
+### 官方 + 网关组合 smoke（阶段 1 最终矩阵）
+
+记录编号：`spike-2026-10-11T15-14-36-717Z`。同一轮包含两条退款/空订单用例，
+每个候选各执行两次，顺序为 `candidate-1 → candidate-official → candidate-official → candidate-1`。
+候选级结果存于私有 `summary.reassessed-b73d19bbcd50.json`，没有覆盖原始 summary：
+
+| 匿名候选           | 尝试 | 测量有效 | 业务通过 | 身份状态       |
+| ------------------ | ---: | -------: | -------: | -------------- |
+| candidate-1        |    2 |        2 |        1 | 网关待核验     |
+| candidate-official |    2 |        2 |        2 | SDK 身份已核验 |
+
+官方候选两次均满足测量与身份门槛，Profile/Provider 绑定和用量对账通过。
+网关候选两次 SDK 上报模型名匹配，但身份仍待网关日志核验；它们不进入已核验排名。
+整体 smoke 的 `identityVerified` 不代替候选级状态。官方端点上游 request-id 本次仍未提供，
+不作为门槛证据。完整 5 × 3 多候选运行尚未执行。
+
+### 阶段 1 最终验收
+
+- 官方 Qwen + 网关的同轮组合 smoke：候选级状态已分开记录，官方身份通过，网关待日志核验。
+  这是阶段 1 所需的官方路径真实验证；不代表已完成 5 × 3 或正式排名。
+- 将分散在多轮聊天与 smoke 的总身份状态拆为 `identityByCandidate`：官方候选的两次
+  实际尝试均 `verified`；网关的两次尝试均 `gateway_pending`。整体 spike 仍不声称全部身份已核验。
+- 备份硬链接回归在 macOS `cp -a` 会将链接展开为独立文件，Linux 等环境可能保留链接。
+  测试现先测 staging 行为：保留时断言备份拒绝；展开时断言归档无硬链接条目；另外直接
+  验证 staging 安全检查仍拒绝硬链接。只改测试，备份实现未改，提交 `6f71f01`。
+- 最终 `make test`：**343 个测试文件通过，2974 项通过、24 项跳过、0 项失败**。
+  macOS ARM64、Node v26.0.0。另有 `make typecheck`、`make build`、benchmark 类型检查、
+  `npm run format:check`、`npm run docs:check` 与 `git diff --check` 全部通过。
+
+按阶段门槛，阶段 1 验收完成；后续阶段尚未开始。

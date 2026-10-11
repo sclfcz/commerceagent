@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertSpike } from '../assertions/spike.js';
-import { assessAttempt } from '../lib/assessment.js';
+import { assessAttempt, summarizeCandidates } from '../lib/assessment.js';
 import { FreshStateTracker } from '../lib/fresh-state.js';
 import {
   hash,
@@ -109,6 +109,7 @@ export function reassessSpike(directory: string) {
     businessPassedAttempts: results.filter(
       (r: Record<string, any>) => r.businessPass,
     ).length,
+    identityByCandidate: summarizeCandidates(results),
     results,
   };
   privateJson(path.join(directory, reassessmentArtifact), report);

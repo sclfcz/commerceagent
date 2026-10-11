@@ -1,5 +1,9 @@
 import { auditFixtureCalls } from '../assertions/audit.js';
-import { assessAttempt, rotateCandidates } from '../lib/assessment.js';
+import {
+  assessAttempt,
+  rotateCandidates,
+  summarizeCandidates,
+} from '../lib/assessment.js';
 import { FreshStateTracker } from '../lib/fresh-state.js';
 import { officialVendor } from '../lib/identity.js';
 import { openCodeGoCandidate } from '../lib/opencode-go.js';
@@ -447,6 +451,7 @@ export async function main() {
     schemaVersion: 3,
     chainPassed,
     identityVerified,
+    identityByCandidate: summarizeCandidates(results as any),
     stage: smoke ? 'smoke' : 'spike',
     cancelled,
     scope: 'synthetic-query-analysis',
@@ -469,6 +474,7 @@ export async function main() {
       passed,
       chainPassed,
       identityVerified,
+      identityByCandidate: report.identityByCandidate,
       businessPassedAttempts: report.businessPassedAttempts,
       contextReproducible,
       attempts: report.attempts,

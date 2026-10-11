@@ -55,3 +55,51 @@ export function rotateCandidates(
   const offset = (caseIndex + repetition) % candidates.length;
   return [...candidates.slice(offset), ...candidates.slice(0, offset)];
 }
+
+export type CandidateAttemptEvidence = {
+  candidate: string;
+  measurementValid: boolean;
+  businessPass: boolean;
+  qualityEligible: boolean;
+  sdkModelMatches: boolean;
+  gatewayVerificationRequired: boolean;
+  gates: { modelIdentity?: boolean };
+};
+
+// A smoke may contain both a verified official candidate and a pending gateway.
+// Keep identity status candidate-scoped instead of reducing the matrix to `every()`.
+export function summarizeCandidates(results: CandidateAttemptEvidence[]) {
+  const aliases = [...new Set(results.map((row) => row.candidate))].sort();
+  return Object.fromEntries(
+    aliases.map((candidate) => {
+      const rows = results.filter((row) => row.candidate === candidate);
+      const gatewayVerificationRequired = rows.some(
+        (row) => row.gatewayVerificationRequired,
+      );
+      const identityVerified =
+        !gatewayVerificationRequired &&
+        rows.every(
+          (row) => row.measurementValid && row.gates.modelIdentity === true,
+        );
+      return [
+        candidate,
+        {
+          attempts: rows.length,
+          measurementValidAttempts: rows.filter((row) => row.measurementValid)
+            .length,
+          businessPassAttempts: rows.filter((row) => row.businessPass).length,
+          qualityEligibleAttempts: rows.filter((row) => row.qualityEligible)
+            .length,
+          sdkModelMatches: rows.every((row) => row.sdkModelMatches),
+          gatewayVerificationRequired,
+          identityVerified,
+          identityStatus: identityVerified
+            ? 'verified'
+            : gatewayVerificationRequired
+              ? 'gateway_pending'
+              : 'unverified',
+        },
+      ];
+    }),
+  );
+}
