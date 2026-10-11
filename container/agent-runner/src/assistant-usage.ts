@@ -172,45 +172,27 @@ export class AssistantUsageCollector {
       const stream = this.streams.get(key);
       if (!stream || !event.usage || this.flushedIds.has(stream.id)) return;
       const patch = this.usagePatch(event.usage as Record<string, unknown>);
-      const previousInput = nonNegative(stream.usage.input_tokens);
-      const nextInput =
-        patch.input_tokens === undefined
-          ? previousInput
-          : nonNegative(patch.input_tokens);
       const cacheKeys = [
         'cache_read_input_tokens',
         'cache_creation_input_tokens',
       ];
-      const cacheIncrease = cacheKeys.reduce(
-        (total, key) =>
-          total +
-          nonNegative(patch[key] ?? stream.usage[key]) -
-          nonNegative(stream.usage[key]),
+      const inputKeys = ['input_tokens', ...cacheKeys];
+      const previousInputTotal = inputKeys.reduce(
+        (total, key) => total + nonNegative(stream.usage[key]),
         0,
       );
-      const cacheDecrease = cacheKeys.reduce(
-        (total, key) =>
-          total +
-          Math.max(
-            0,
-            nonNegative(stream.usage[key]) -
-              nonNegative(patch[key] ?? stream.usage[key]),
-          ),
+      const nextInputTotal = inputKeys.reduce(
+        (total, key) => total + nonNegative(patch[key] ?? stream.usage[key]),
         0,
       );
-      const inputIncrease = Math.max(0, nextInput - previousInput);
-      if (
-        (nextInput < previousInput &&
-          cacheIncrease < previousInput - nextInput) ||
-        cacheDecrease > inputIncrease
-      ) {
+      if (nextInputTotal < previousInputTotal) {
         // Some proxies send explicit zero placeholders in any input bucket.
-        // Input decreases need cache growth; cache decreases share one budget
-        // of ordinary input growth (never fund read and creation twice).
-        // Keep the entire previous input/cache snapshot if inconsistent;
-        // output/reasoning deltas are still authoritative.
-        delete patch.input_tokens;
-        for (const key of cacheKeys) delete patch[key];
+        // Accept any input/cache reclassification only when the total is
+        // conserved. A read-to-write cache move can shift priced buckets, so
+        // usage totals remain accurate while the cache cost split may differ.
+        // Keep the prior group if the proposed total decreases; output and
+        // reasoning deltas remain authoritative.
+        for (const key of inputKeys) delete patch[key];
       }
       stream.usage = { ...stream.usage, ...patch };
       const current = parseAssistantUsage({

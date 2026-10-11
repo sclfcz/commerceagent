@@ -256,6 +256,44 @@ describe('Kaboo-compatible assistant usage collection', () => {
       expect(collector.drain('s')).toBeUndefined();
     },
   );
+  test('accepts conserved reclassification between cache read and cache creation buckets', () => {
+    const collector = new AssistantUsageCollector();
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_start',
+        message: {
+          id: 'cache-read-to-create',
+          model: 'candidate',
+          usage: {
+            input_tokens: 100,
+            cache_read_input_tokens: 500,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      },
+    });
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_delta',
+        usage: {
+          input_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 600,
+          output_tokens: 20,
+        },
+      },
+    });
+    expect(collector.drain('s')).toMatchObject({
+      tokens: {
+        inputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 600,
+        outputTokens: 20,
+      },
+    });
+  });
   test('a later valid cache counter still updates after a rejected zero placeholder', () => {
     const collector = new AssistantUsageCollector();
     collector.ingest({
