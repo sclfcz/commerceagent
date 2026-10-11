@@ -1,0 +1,8 @@
+# Copy to candidates.local.yaml (gitignored), then replace values.
+# Credentials are read from environment variables, never from this YAML.
+# Repeat this entry for each candidate; aliases stay anonymous in summaries.
+- alias: candidate-a
+  model: REPLACE_WITH_EXACT_MODEL_ID
+  baseUrl: https://replace.invalid/anthropic
+  apiKeyEnv: BENCH_CANDIDATE_A_API_KEY
+  gateway: false

@@ -360,6 +360,8 @@ export interface StreamEvent {
   isTeammate?: boolean;
   toolInput?: Record<string, unknown>;
   rawEvent?: Record<string, unknown>;
+  /** Upstream HTTP request ID exposed by SDK assistant metadata, when provided. */
+  apiRequestId?: string;
   contextAudit?: ClaudeContextAudit;
   todos?: Array<{
     id: string;

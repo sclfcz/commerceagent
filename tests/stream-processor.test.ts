@@ -12,6 +12,23 @@ function makeProcessor() {
 }
 
 describe('StreamEventProcessor observability mapping', () => {
+  test('emits only SDK-provided upstream request IDs without message content', () => {
+    const { processor, outputs } = makeProcessor();
+    processor.processAssistantMessage({
+      request_id: 'req_synthetic_1',
+      message: { id: 'api-message-1', content: [] },
+    });
+    expect(outputs[0].streamEvent).toMatchObject({
+      rawType: 'assistant/request_id',
+      apiRequestId: 'req_synthetic_1',
+      messageUuid: 'api-message-1',
+    });
+    expect(outputs[0].streamEvent).not.toHaveProperty('rawEvent');
+    processor.processAssistantMessage({
+      message: { id: 'api-message-2', content: [] },
+    });
+    expect(outputs).toHaveLength(1);
+  });
   test('emits assistant message boundaries for host-side answer-lane classification', () => {
     const { processor, outputs } = makeProcessor();
 

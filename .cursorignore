@@ -1,0 +1,5 @@
+
+# Private benchmark state and credentials
+benchmarks/results/
+benchmarks/*.local.yaml
+benchmarks/*.local.json

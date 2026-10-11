@@ -15860,6 +15860,7 @@ async function processAgentConversation(
             sdk_message_uuid: output.sdkMessageUuid ?? null,
             source_kind: output.sourceKind || 'sdk_final',
             finalization_reason: output.finalizationReason || 'completed',
+            ...(output.providerFailure ? { provider_failure: true } : {}),
             workflow_runs: holdReason
               ? activeAgentWorkflowRuns
               : completedAgentWorkflowRuns,
@@ -21383,6 +21384,8 @@ async function main(): Promise<void> {
   setInterval(() => {
     void checkImBindingsHealth();
   }, IM_BINDING_HEALTH_CHECK_INTERVAL);
+  // Parent-managed instances provision only after startup cleanup and queue wiring.
+  process.send?.({ type: 'commerceagent_ready' });
 }
 
 async function checkImBindingsHealth(): Promise<void> {

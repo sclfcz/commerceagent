@@ -25,6 +25,7 @@ export default defineConfig({
       '**/node_modules/**',
       '**/dist/**',
       'data/**',
+      'benchmarks/results/**',
       '.claude/**',
       'web/tests/e2e/**',
     ],

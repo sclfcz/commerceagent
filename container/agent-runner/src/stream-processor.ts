@@ -1637,6 +1637,20 @@ export class StreamEventProcessor {
    * Process an assistant message for Skill/Task fallback extraction and pending tracker cleanup.
    */
   processAssistantMessage(message: any): void {
+    if (
+      typeof message.request_id === 'string' &&
+      /^[A-Za-z0-9_.:-]{1,256}$/.test(message.request_id)
+    ) {
+      this.emitStreamEvent({
+        eventType: 'raw_sdk_event',
+        rawType: 'assistant/request_id',
+        displayLevel: 'debug',
+        apiRequestId: message.request_id,
+        messageUuid: message.message?.id,
+        sessionId: message.session_id,
+        parentToolUseId: message.parent_tool_use_id ?? undefined,
+      });
+    }
     const content = message.message?.content;
     if (!Array.isArray(content)) return;
 

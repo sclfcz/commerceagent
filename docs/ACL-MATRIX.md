@@ -65,6 +65,9 @@
 | `/api/usage/*`                                      | Login；普通用户只见本人，管理视图再按角色过滤 |
 | `/api/billing/my/*`                                 | Login，仅本人                                 |
 
+`effective-capabilities` 的 `runtime_session_id` 只允许查询本人 Profile 工作区内的 Session；
+不能利用 Session ID 跨工作区读取运行上下文。省略该字段沿用主会话行为。
+
 产品级 Agent 删除前必须先迁移其工作区。渠道账号删除、登出或断开时必须清理/更新
 自身连接和绑定，不能影响其他用户或其他账号。
 
