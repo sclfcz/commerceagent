@@ -2888,6 +2888,10 @@ async function runQueryAttempt(
 
       // 流式事件处理
       if (message.type === 'stream_event') {
+        // Account for final SDK usage even when presentation is suppressed.
+        assistantUsageCollector.ingest(
+          message as unknown as Record<string, unknown>,
+        );
         // 重放消息是完整消息、不产生 partial stream_event——见到 stream_event
         // 即说明新 turn 的 LLM 调用已开始。
         sawLiveTurnActivity = true;
