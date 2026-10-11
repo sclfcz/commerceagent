@@ -503,7 +503,7 @@ commerceagent/
 
 | 文档                                                                  | 用途                                               |
 | --------------------------------------------------------------------- | -------------------------------------------------- |
-| [模型评测 spike](docs/BENCHMARK.md)                                   | 隔离 Container、fixture 审计、用量与上下文核验     |
+| [模型评测与 Promptfoo benchmark](docs/BENCHMARK.md)                   | 隔离 Container、fixture 审计、用量与上下文核验     |
 | [Web API](docs/API.md)                                                | REST API、认证、任务、渠道账号、智能体、用量等接口 |
 | [ACL 权限矩阵](docs/ACL-MATRIX.md)                                    | HTTP、WebSocket 与 IM 命令的权限要求               |
 | [Workspace Memory v2](docs/workspace-memory-v2.md)                    | Workspace 知识边界、数据模型、并发和 UI 语义       |

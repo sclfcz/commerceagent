@@ -122,7 +122,7 @@ describe('runtime backup and restore safety', () => {
     ).toHaveLength(0);
   });
 
-  test('refuses to create an unrestorable archive from hard-linked runtime files', async () => {
+  test('stages hard-linked files safely across platform-specific cp behavior', async () => {
     // A regular file with nlink > 1 is stored by tar as a link-type ('h')
     // entry pointing at its first-seen sibling instead of a full copy.
     // restore-backup.mjs's validateArchiveEntries rejects link-type entries

@@ -1,0 +1,5 @@
+# Candidate aliases only. Missing or incomplete entries produce null cost.
+# Rates are currency units per million tokens.
+effective_date: 2026-10-11
+currency: USD
+candidates: {}

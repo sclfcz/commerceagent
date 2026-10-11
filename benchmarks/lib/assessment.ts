@@ -103,3 +103,16 @@ export function summarizeCandidates(results: CandidateAttemptEvidence[]) {
     }),
   );
 }
+
+export function countClassifications(
+  results: Array<Record<string, unknown>>,
+  field: 'failure' | 'measurementFailure' | 'businessFailure',
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const result of results) {
+    const value = result[field];
+    if (typeof value !== 'string') continue;
+    counts[value] = (counts[value] || 0) + 1;
+  }
+  return counts;
+}

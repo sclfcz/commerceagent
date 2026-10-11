@@ -1,13 +1,8 @@
-import { auditFixtureCalls } from '../assertions/audit.js';
+import { rotateCandidates, summarizeCandidates } from '../lib/assessment.js';
 import {
-  assessAttempt,
-  rotateCandidates,
-  summarizeCandidates,
-} from '../lib/assessment.js';
-import { FreshStateTracker } from '../lib/fresh-state.js';
-import { officialVendor } from '../lib/identity.js';
-import { openCodeGoCandidate } from '../lib/opencode-go.js';
-import { buildAgentProfilePrompt } from '../../src/agent-profile-prompts.js';
+  importOpenCodeGoKey,
+  openCodeGoCandidate,
+} from '../lib/opencode-go.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,29 +11,19 @@ import { promisify } from 'node:util';
 import { parse } from 'yaml';
 import {
   hash,
-  renderCasePrompt,
   parseCandidates,
   privateJson,
-  workspaceBaseline,
   type Candidate,
   type SpikeCase,
 } from '../lib/contracts.js';
-import { startFixtureServer } from '../mcp-fixture-server/server.js';
-import { observeTurn } from '../providers/commerceagent-provider.js';
-import { assertSpike } from '../assertions/spike.js';
-import { readUsage } from '../lib/usage.js';
+import { stopOwnedServices } from '../lib/service.js';
 import {
-  profilePromptHashes,
-  verifyContext,
-  type ContextEvidence,
-} from '../lib/context.js';
-import {
-  startService,
-  stopService,
-  EvalApi,
-  bootstrap,
-  stopOwnedServices,
-} from '../lib/service.js';
+  attempt,
+  CollectionFailure,
+  ContextFailure,
+  createAttemptContext,
+  runtimeSourceHash,
+} from '../lib/attempt.js';
 import { importExisting } from '../lib/existing.js';
 
 const exec = promisify(execFile);
@@ -48,24 +33,10 @@ const image =
   process.env.BENCH_CONTAINER_IMAGE || 'riba2534/happyclaw-agent:latest';
 let pinnedImage = image;
 let expectedRuntimeSourceHash: string | null = null;
-function runtimeSourceHash(): string {
-  return hash({
-    host: workspaceBaseline(path.join(repository, 'src')),
-    runner: workspaceBaseline(
-      path.join(repository, 'container/agent-runner/src'),
-    ),
-    prompts: workspaceBaseline(
-      path.join(repository, 'container/agent-runner/prompts'),
-    ),
-  });
-}
-const freshStates = new FreshStateTracker();
 const timeoutMs = Number(process.env.BENCH_TIMEOUT_MS || 180000);
-class CollectionFailure extends Error {}
-class ContextFailure extends Error {}
 
-async function preflight(runDirectory: string) {
-  expectedRuntimeSourceHash = runtimeSourceHash();
+export async function preflight(runDirectory: string) {
+  expectedRuntimeSourceHash = runtimeSourceHash(repository);
   let docker = false;
   let imagePresent = false;
   let imageHash: string | null = null;
@@ -115,6 +86,7 @@ async function preflight(runDirectory: string) {
     /* don't print endpoint/config parse errors */
   }
   if (process.argv.includes('--with-opencode-go')) {
+    importOpenCodeGoKey(repository);
     const go = openCodeGoCandidate(candidates);
     if (!process.env[go.apiKeyEnv]?.trim()) credentials = false;
     candidates = parseCandidates([...candidates, go]);
@@ -134,198 +106,6 @@ async function preflight(runDirectory: string) {
       timeoutMs >= 1000 &&
       timeoutMs <= 1800000,
   };
-}
-
-async function attempt(
-  candidate: Candidate,
-  test: SpikeCase,
-  directory: string,
-  candidates: Candidate[],
-) {
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const sourceHash = runtimeSourceHash();
-  if (sourceHash !== expectedRuntimeSourceHash) throw new ContextFailure();
-  const fixtureData = JSON.parse(
-    fs.readFileSync(path.join(bench, 'fixtures/commerce.json'), 'utf8'),
-  );
-  const profile = parse(
-    fs.readFileSync(path.join(bench, 'profile.yaml'), 'utf8'),
-  );
-  const fixture = await startFixtureServer({
-    data: fixtureData,
-    scenario: test.scenario,
-    ledgerFile: path.join(directory, 'fixture.jsonl'),
-    host: process.env.BENCH_FIXTURE_BIND_HOST || '127.0.0.1',
-  });
-  let service: Awaited<ReturnType<typeof startService>> | null = null;
-  let turnObserved = false;
-  try {
-    service = await startService({
-      repository,
-      directory: path.join(directory, 'service'),
-      image: pinnedImage,
-      timeoutMs,
-    });
-    const api = new EvalApi(service.baseUrl);
-    const runtime = await bootstrap(
-      api,
-      candidate,
-      profile,
-      service.data,
-      candidates,
-    );
-    fs.copyFileSync(
-      path.join(bench, 'mcp-fixture-server/bridge.mjs'),
-      path.join(runtime.groupDir, 'fixture-bridge.mjs'),
-    );
-    const workspaceBaselineHash = workspaceBaseline(runtime.groupDir);
-    const freshStateEvidence = {
-      ...service.creationEvidence,
-      initialDatabase: runtime.initialDatabase,
-      dataDirectory: service.data,
-      userId: runtime.userId,
-      sessionId: runtime.sessionId,
-      workspaceJid: runtime.workspaceJid,
-      userAbsentBeforeSetup: runtime.userAbsentBeforeSetup,
-      sessionAbsentBeforeCreate: runtime.sessionAbsentBeforeCreate,
-      sessionOwned: runtime.sessionOwned,
-      sessionEmpty: runtime.sessionEmpty,
-      workspaceBaselineHash,
-    };
-    const freshState = freshStates.verify(freshStateEvidence);
-    privateJson(path.join(directory, 'fresh-state.json'), freshStateEvidence);
-    privateJson(path.join(runtime.groupDir, '.fixture-connection.json'), {
-      url: `http://host.docker.internal:${fixture.port}/rpc`,
-      token: fixture.token,
-    });
-    const route = `/api/agent-profiles/${runtime.profile.id}/effective-capabilities`;
-    const preview = await api.request(route, {
-      workspace_jid: runtime.workspaceJid,
-      runtime_session_id: runtime.sessionId,
-    });
-    const observation = await observeTurn({
-      baseUrl: service.baseUrl,
-      cookie: api.cookie,
-      workspaceJid: runtime.workspaceJid,
-      sessionId: runtime.sessionId,
-      prompt: renderCasePrompt(test),
-      timeoutMs,
-    });
-    turnObserved = true;
-    privateJson(path.join(directory, 'trace.json'), observation);
-    const after = await api.request(route, {
-      workspace_jid: runtime.workspaceJid,
-      runtime_session_id: runtime.sessionId,
-    });
-    const context = verifyContext(after.run_context as ContextEvidence | null, {
-      ...profilePromptHashes(
-        {
-          id: runtime.profile.id,
-          name: runtime.profile.name,
-          version: runtime.profile.version,
-          identityHash: runtime.profile.identity_hash,
-          identityPrompt: buildAgentProfilePrompt(runtime.profile),
-        },
-        runtime.profile.prompt_mode === 'append',
-      ),
-      profileId: runtime.profile.id,
-      version: runtime.profile.version,
-      identityHash: runtime.profile.identity_hash,
-      runtimePolicyHash: hash(runtime.profile.runtime_policy),
-      skillsHash: preview.preview.skills.manifestHash,
-      mcpHash: preview.preview.mcp.manifestHash,
-      sessionId: runtime.sessionId,
-      turnId: observation.turnId,
-    });
-    const usage = readUsage(
-      path.join(service.data, 'db/messages.db'),
-      {
-        userId: runtime.userId,
-        groupFolder: runtime.folder,
-        sessionId: runtime.sessionId,
-      },
-      candidate.model,
-    );
-    const business = assertSpike(
-      observation.output,
-      test,
-      fixture.ledger,
-      observation.tools,
-    );
-    const audit = auditFixtureCalls(fixture.ledger, observation.tools);
-    const usageComplete =
-      usage.known &&
-      !!usage.usage &&
-      usage.usage.inputTokens +
-        usage.usage.cacheReadInputTokens +
-        usage.usage.cacheCreationInputTokens >
-        0 &&
-      (!observation.output || usage.usage.outputTokens > 0);
-    if (runtimeSourceHash() !== sourceHash) throw new ContextFailure();
-    const assessment = assessAttempt({
-      transportFailure: observation.failure,
-      usageComplete,
-      scopeIsolated: usage.scopeIsolated,
-      sdkModelMatches: usage.identityVerified,
-      contextVerified: context.verified,
-      freshState,
-      auditMatched: audit.matched,
-      onlyAllowedTools: business.checks.onlyAllowedTools,
-      businessPass: business.pass,
-      gateway: candidate.gateway,
-    });
-    const result = {
-      candidate: candidate.alias,
-      caseId: test.id,
-      ...assessment,
-      businessPass: business.pass,
-      gatewayVerificationRequired: candidate.gateway,
-      sdkModelMatches: usage.identityVerified,
-      identityBasis:
-        officialVendor(candidate.baseUrl) && !candidate.gateway
-          ? 'official_endpoint_sdk'
-          : 'gateway_pending',
-      upstreamRequestIdCount: observation.apiRequests.length,
-      profileBindingVerified:
-        runtime.profile.model_config_id === runtime.providerId,
-      provisionedBindings: runtime.bindings,
-      unexpectedUsageRecords: usage.unexpectedRecordCount,
-      gates: {
-        modelIdentity: usage.identityVerified && !candidate.gateway,
-        independentFixture: audit.matched,
-        freshState,
-        terminalClassified: observation.reason !== null,
-        usageReconciled: usageComplete && usage.scopeIsolated,
-        contextVerified: context.verified,
-      },
-      contextFingerprint: context.fingerprint,
-      observedPromptHashes: context.observedPromptHashes,
-      caseHash: hash(test),
-      requestPromptHash: hash(renderCasePrompt(test)),
-      runtimeSourceHash: sourceHash,
-      workspaceBaselineHash,
-      profileContentHash: hash(profile),
-      fixtureHash: hash(fixtureData),
-      toolSchemaHash: hash(
-        (await import('../mcp-fixture-server/server.js')).toolDefinitions,
-      ),
-      usage: usageComplete ? usage.usage : null,
-      ledgerReconciled: usage.known,
-      elapsedMs: observation.elapsedMs,
-      logicalRunMs: observation.logicalRunMs,
-      business: business.checks,
-    };
-    // Private synthetic response artifact, never echoed or published.
-    privateJson(path.join(directory, 'result.json'), result);
-    return result;
-  } catch (error) {
-    if (error instanceof ContextFailure) throw error;
-    if (turnObserved) throw new CollectionFailure();
-    throw error;
-  } finally {
-    if (service) await stopService(service.child);
-    await fixture.close();
-  }
 }
 
 export async function main() {
@@ -376,6 +156,12 @@ export async function main() {
   process.once('SIGINT', cancel);
   process.once('SIGTERM', cancel);
   const results: Array<Record<string, any>> = [];
+  const attemptContext = createAttemptContext({
+    repository,
+    pinnedImage,
+    timeoutMs,
+    expectedRuntimeSourceHash: checks.runtimeSourceHash!,
+  });
   // Three independent repetitions. Rotate candidates per case/repetition.
   attempts: for (let repetition = 0; repetition < repetitions; repetition++)
     for (let caseIndex = 0; caseIndex < cases.length; caseIndex++) {
@@ -392,10 +178,16 @@ export async function main() {
           `${test.id}-${candidate.alias}-${repetition + 1}`,
         );
         try {
-          results.push({
-            ...(await attempt(candidate, test, directory, checks.candidates)),
-            repetition: repetition + 1,
-          });
+          results.push(
+            await attempt(
+              candidate,
+              test,
+              directory,
+              checks.candidates,
+              attemptContext,
+              repetition + 1,
+            ),
+          );
         } catch (error) {
           const result = {
             candidate: candidate.alias,

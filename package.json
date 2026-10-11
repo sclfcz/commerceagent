@@ -19,6 +19,8 @@
     "test": "vitest",
     "test:real-model": "tsx scripts/test-real-model-smoke.ts",
     "bench:spike": "tsx benchmarks/scripts/spike.ts",
+    "bench:run": "tsx benchmarks/scripts/run-promptfoo.ts",
+    "bench:report": "tsx benchmarks/scripts/report.ts",
     "bench:typecheck": "tsc -p benchmarks/tsconfig.json",
     "dev:all": "npx concurrently --timestamp-format \"yyyy-MM-dd HH:mm:ss.SSS\" -n backend,frontend -c blue,green \"npm run dev\" \"npm run dev:web\"",
     "dev:web": "cd web && npm run dev",
@@ -63,6 +65,7 @@
     "concurrently": "^9.2.1",
     "happy-dom": "^20.11.1",
     "prettier": "3.8.3",
+    "promptfoo": "0.121.20",
     "tsx": "^4.19.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"

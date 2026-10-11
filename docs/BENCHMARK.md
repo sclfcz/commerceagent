@@ -4,7 +4,8 @@
 矛盾政策、商品描述提示注入和广告指标计算。每个候选执行 3 次，按用例和重复轮次轮换顺序。
 调用次数上限、输出字段类型、ROAS 倍数口径和 evidence_id 引用规则明确写入任务；
 正确答案仅保存在驱动器中。每轮保存用例快照、case hash 和实际请求 Prompt hash。
-尚未接入 Promptfoo、Judge 或模型排名；六项真实 Container 验收通过后再扩展。
+Promptfoo 已接入为编排和私有结果保存层；被测对象仍是独立 CommerceAgent Container 的真实运行。
+当前仍是 5 条链路用例，不用于模型排名，也未接入 Judge 或正式业务集。
 历史链路验证见 [验证记录](BENCHMARK-VALIDATION.md)；问题修复与双候选 smoke 见
 [验收修订记录](BENCHMARK-REVISION.md)。
 
@@ -21,6 +22,41 @@ npm run bench:spike -- --existing --smoke
 npm run bench:spike -- --existing
 ```
 
+Promptfoo 入口复用同一套 `attempt()` 驱动，可运行两条 smoke 用例或完整 5 条用例，默认
+每条用例重复 3 次：
+
+```bash
+npm run bench:run -- --existing --smoke
+npm run bench:run -- --existing
+npm run bench:report -- promptfoo-<run-id>
+```
+
+`bench:report` 会再次校验实际顺序，并分别汇总测量失败、业务失败和候选身份状态；它不会
+打印模型回复或 Provider 私有配置。
+
+可像 spike 一样通过 `BENCH_CANDIDATES_FILE` 配置多个候选；`--existing --with-opencode-go`
+会附加已配置的 Go 候选。Promptfoo 测试行在运行前生成，按重复轮次、用例批次及
+`rotateCandidates` 轮换候选；运行时逐项记录实际顺序，顺序不符或尝试数不符会使整次运行无效。
+Provider 返回每次尝试的最终回复、usage ledger 汇总、成本（定价完整时）、gates、失败分类、
+fixture 账本摘要、上下文 hash、耗时和执行序号。测量失败会保留 metadata 且输出空字符串，
+不会伪装成 Promptfoo provider error。Spike 与 Promptfoo 共用完全相同的端到端 `attempt()`；
+执行结束还会逐条校验 Promptfoo 结果中的 gates 与失败分类和私有 attempt 结果一致；不一致时整次
+运行无效。没有 SDK 直连备援。
+
+Promptfoo 固定为 `0.121.20`，该版本要求 Node `^20.20.0 || >=22.22.0`；产品其他部分的
+Node 支持范围不因此改变。执行器在 Promptfoo 載入前设置 `PROMPTFOO_CONFIG_DIR`、
+`PROMPTFOO_CACHE_PATH`、`PROMPTFOO_CACHE_ENABLED=false`、
+`PROMPTFOO_DISABLE_TELEMETRY=1`、`PROMPTFOO_DISABLE_UPDATE=1` 和
+`PROMPTFOO_DISABLE_SHARING=1`，配置同时设 `sharing: false`、`noShare: true`、
+`evaluateOptions.cache: false`、`maxConcurrency: 1`。这是 Node API 对应 `--no-cache` 的
+明确 `cache: false` 设置；程序不调用 `promptfoo share`。Promptfoo 数据库、缓存、resolved
+config、结果和原始输出都放在被忽略的 `benchmarks/results/<run-id>/promptfoo/`；
+只可在本机执行 `promptfoo view` 查看。
+
+候選價格填在 `benchmarks/pricing.yaml`，以 `candidate-*` 別名配置，各欄是每百萬 token 單價。
+某候選沒有價格或缺少任何計費欄位時，成本為 `null`，不以零代替未知。第一版沒有預設真實
+候選價格，因此通常只會提供 usage 和 `null` 成本。
+
 该模式先复制 `data/config/claude-provider.json` 与加密密钥到私有结果目录，再在隔离子进程
 读取副本，生产配置不会被迁移或修改。`BENCH_EXISTING_DATA_DIR` 可指定源数据目录。
 解密凭据通过进程 IPC 传入内存，候选映射文件不含明文凭据。只有 OAuth 的配置暂不支持。
@@ -33,6 +69,8 @@ smoke 的退出状态表示链路是否有效，不表示完整身份验收通�
 Ctrl-C 会停止本命令创建的服务，并由服务关闭自己的 Runner。
 额外注入 `BENCH_OPENCODE_GO_API_KEY` 后，可用 `--existing --with-opencode-go --smoke`
 添加一个不同于现有候选、使用 Messages API 的 Go 模型。密钥不要写入命令参数或历史。
+也可暂存为 `benchmarks/opencode-go.local.json`（`{"apiKey":"..."}`），并将权限设为
+`0600`；预检读入内存后立即删除该文件。此本地文件已被 Git 与 Cursor 忽略。
 
 也可单独配置候选：
 
@@ -76,10 +114,11 @@ npm run bench:spike
 - 用量从已去重的 `usage_events` 与 `usage_records` 一致快照读取，按用户、工作区和独立
   Session 过滤，逐事件核对 token 合计。缺失、不一致或 `unknown` 模型不会通过。
   同一隔离实例若出现其他 Session 的用量，也会判为采集不完整。
-  Runner 使用 SDK 原生 message_delta 的最终用量；输入下降必须有足够的缓存增长佐证，
-  缓存下降则必须有足够的普通输入增长，读取与创建缓存共用这一份增长额度。
-  任一方向缺乏佐证时保留上一份完整输入/缓存快照，仍更新有效输出用量；
-  后续有效 delta 仍可继续更新。同一 message ID 仍交给现有账本去重。计费修复独立提交。
+  Runner 使用 SDK 原生 message_delta 的最终用量；普通输入、缓存读取和缓存创建的合计
+  不允许下降。若新 delta 提出的三类合计下降，就保留上一份完整输入/缓存快照，仍更新
+  有效输出和 reasoning 用量；后续有效 delta 仍可继续更新。同一 message ID 仍交给现有
+  账本去重。合计守恒时允许桶之间重新分类，例如缓存读取转为缓存创建；总 token 数保持
+  不变，但读取与创建的单价不同，因此成本分类可能有偏差。
   不使用现有 Kaboo 费用字段估算其他候选的成本，不从 StreamEvent 重建用量账本。
 - 实际上下文从 `effective-capabilities` 的 Runtime Session 快照读取，核验 Container 模式、
   turn、Profile 版本、identity hash、Skill/MCP manifest hash，并比较平台/Profile Prompt 内容 hash。
@@ -150,9 +189,8 @@ Provider 导入无论成功或失败均立即删除 `provider-snapshot`。每个
 网关模型名改写与隐藏子请求仍需网关侧日志证明。真实链路未运行时，不得将离线测试当作
 Container 验收或模型质量结论。
 
-后续门槛通过后，才添加 Promptfoo 自定义 Provider 包装、dev/holdout、版本化定价、
-pass³ 与配对区间、盲评 Judge 和约 60 条分层人工校准。Promptfoo 届时必须关闭缓存、
-遥测和共享，配置/数据库位于私有结果目录；第一版不引入 Langfuse。
+后续阶段才添加 dev/holdout、完整指标报表、配对区间、盲评 Judge 和约 60 条分层人工校准。
+第一版不引入 Langfuse；线上观测仍需先定义脱敏和保留期限。
 
 ## 开发验证
 
