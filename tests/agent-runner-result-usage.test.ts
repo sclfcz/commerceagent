@@ -142,6 +142,152 @@ describe('Kaboo-compatible assistant usage collection', () => {
     },
   );
 
+  test.each([
+    { input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 20 },
+    { inputTokens: 100, cacheReadInputTokens: 0, outputTokens: 20 },
+    { cache_read_input_tokens: 0, output_tokens: 20 },
+  ])(
+    'preserves cached input when a proxy resets it without compensating input: %j',
+    (usage) => {
+      const collector = new AssistantUsageCollector();
+      collector.ingest({
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: {
+            id: 'cached-zero',
+            model: 'candidate',
+            usage: { input_tokens: 100, cache_read_input_tokens: 500 },
+          },
+        },
+      });
+      collector.ingest({
+        type: 'stream_event',
+        event: { type: 'message_delta', usage },
+      });
+      expect(collector.drain('s')).toMatchObject({
+        tokens: {
+          inputTokens: 100,
+          cacheReadInputTokens: 500,
+          outputTokens: 20,
+        },
+      });
+    },
+  );
+
+  test.each([
+    {
+      delta: { input_tokens: 100, cache_creation_input_tokens: 0 },
+      expected: {
+        inputTokens: 100,
+        cacheReadInputTokens: 500,
+        cacheCreationInputTokens: 200,
+      },
+    },
+    {
+      delta: { input_tokens: 350, cache_read_input_tokens: 0 },
+      expected: {
+        inputTokens: 100,
+        cacheReadInputTokens: 500,
+        cacheCreationInputTokens: 200,
+      },
+    },
+    {
+      delta: { input_tokens: 600, cache_read_input_tokens: 0 },
+      expected: {
+        inputTokens: 600,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 200,
+      },
+    },
+    {
+      delta: {
+        input_tokens: 600,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      expected: {
+        inputTokens: 100,
+        cacheReadInputTokens: 500,
+        cacheCreationInputTokens: 200,
+      },
+    },
+    {
+      delta: {
+        input_tokens: 800,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      expected: {
+        inputTokens: 800,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+    },
+  ])(
+    'protects both cache buckets and permits only funded reclassification: %j',
+    ({ delta, expected }) => {
+      const collector = new AssistantUsageCollector();
+      collector.ingest({
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: {
+            id: 'cache-budget',
+            model: 'candidate',
+            usage: {
+              input_tokens: 100,
+              cache_read_input_tokens: 500,
+              cache_creation_input_tokens: 200,
+            },
+          },
+        },
+      });
+      collector.ingest({
+        type: 'stream_event',
+        event: {
+          type: 'message_delta',
+          usage: { ...delta, output_tokens: 20 },
+        },
+      });
+      expect(collector.drain('s')).toMatchObject({
+        tokens: { ...expected, outputTokens: 20 },
+      });
+      expect(collector.drain('s')).toBeUndefined();
+    },
+  );
+  test('a later valid cache counter still updates after a rejected zero placeholder', () => {
+    const collector = new AssistantUsageCollector();
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_start',
+        message: {
+          id: 'cache-recovery',
+          model: 'candidate',
+          usage: { input_tokens: 100, cache_read_input_tokens: 500 },
+        },
+      },
+    });
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_delta',
+        usage: { cache_read_input_tokens: 0, output_tokens: 10 },
+      },
+    });
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_delta',
+        usage: { cache_read_input_tokens: 600, output_tokens: 20 },
+      },
+    });
+    expect(collector.drain('s')).toMatchObject({
+      tokens: { inputTokens: 100, cacheReadInputTokens: 600, outputTokens: 20 },
+    });
+  });
+
   test('interleaved main and subagent streams keep final usage tied to the right message IDs', () => {
     const collector = new AssistantUsageCollector();
     const event = (parent: string | null, value: unknown) =>

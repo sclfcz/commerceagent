@@ -188,13 +188,26 @@ export class AssistantUsageCollector {
           nonNegative(stream.usage[key]),
         0,
       );
+      const cacheDecrease = cacheKeys.reduce(
+        (total, key) =>
+          total +
+          Math.max(
+            0,
+            nonNegative(stream.usage[key]) -
+              nonNegative(patch[key] ?? stream.usage[key]),
+          ),
+        0,
+      );
+      const inputIncrease = Math.max(0, nextInput - previousInput);
       if (
-        nextInput < previousInput &&
-        cacheIncrease < previousInput - nextInput
+        (nextInput < previousInput &&
+          cacheIncrease < previousInput - nextInput) ||
+        cacheDecrease > inputIncrease
       ) {
-        // Some compatible proxies send explicit zero placeholders. A decrease
-        // needs compensating cache reclassification, not merely cache keys.
-        // Keep the last input/cache snapshot if that patch is inconsistent;
+        // Some proxies send explicit zero placeholders in any input bucket.
+        // Input decreases need cache growth; cache decreases share one budget
+        // of ordinary input growth (never fund read and creation twice).
+        // Keep the entire previous input/cache snapshot if inconsistent;
         // output/reasoning deltas are still authoritative.
         delete patch.input_tokens;
         for (const key of cacheKeys) delete patch[key];
