@@ -61,7 +61,7 @@
 | `/api/skills/*`                                     | Login，仅本人用户 Skills                      |
 | 用户级 `/api/mcp-servers/*`                         | Login，仅本人配置                             |
 | Workspace Memory v2                                 | Login + Workspace owner ACL，见 4.5           |
-| CommerceAgent Owner Profile                             | Home actual owner + runtime exact-turn gate   |
+| CommerceAgent Owner Profile                         | Home actual owner + runtime exact-turn gate   |
 | `/api/usage/*`                                      | Login；普通用户只见本人，管理视图再按角色过滤 |
 | `/api/billing/my/*`                                 | Login，仅本人                                 |
 
@@ -160,13 +160,13 @@ Workspace，且目标必须绑定内置默认 CommerceAgent。admin 不具有跨
 
 Runtime 的权限更严格：
 
-| 上下文                                       | 投影                | 修改                  |
-| -------------------------------------------- | ------------------- | --------------------- |
-| Home 内置 CommerceAgent + actual owner turn      | 允许                | 当前 active turn 允许 |
-| Home 内置 CommerceAgent + 非 owner 群成员 turn   | 拒绝                | 拒绝                  |
-| Home 内置 CommerceAgent 普通 Runtime Session     | actual owner 时允许 | 当前 active turn 允许 |
-| 自定义 AgentProfile / Scheduled / Task/Spawn | 拒绝                | 拒绝                  |
-| SDK Sub-Agent                                | 拒绝                | 拒绝                  |
+| 上下文                                         | 投影                | 修改                  |
+| ---------------------------------------------- | ------------------- | --------------------- |
+| Home 内置 CommerceAgent + actual owner turn    | 允许                | 当前 active turn 允许 |
+| Home 内置 CommerceAgent + 非 owner 群成员 turn | 拒绝                | 拒绝                  |
+| Home 内置 CommerceAgent 普通 Runtime Session   | actual owner 时允许 | 当前 active turn 允许 |
+| 自定义 AgentProfile / Scheduled / Task/Spawn   | 拒绝                | 拒绝                  |
+| SDK Sub-Agent                                  | 拒绝                | 拒绝                  |
 
 read-only 投影按 host-issued turn ID 精确匹配当前或已接纳的 queued batch；queued owner
 身份不能为其他 turn 授权。set/clear/skip 必须匹配当前 active batch。Web sender 必须

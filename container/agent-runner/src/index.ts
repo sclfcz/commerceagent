@@ -130,7 +130,10 @@ import {
   AssistantUsageCollector,
   type AssistantUsageBatch,
 } from './assistant-usage.js';
-import { buildCommerceAgentPromptPlan, type PromptPlan } from './prompt-plan.js';
+import {
+  buildCommerceAgentPromptPlan,
+  type PromptPlan,
+} from './prompt-plan.js';
 import { withCommerceAgentSubagentContract } from './sdk-compat.js';
 import { assessContextBudget } from './context-budget.js';
 import {
@@ -152,7 +155,8 @@ import {
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP =
   process.env.COMMERCEAGENT_WORKSPACE_GROUP || '/workspace/group';
-const WORKSPACE_IPC = process.env.COMMERCEAGENT_WORKSPACE_IPC || '/workspace/ipc';
+const WORKSPACE_IPC =
+  process.env.COMMERCEAGENT_WORKSPACE_IPC || '/workspace/ipc';
 
 // 第三方端点必须显式配置模型，官方 Claude 则允许 SDK/CLI 选择默认模型。
 // host/docker runner 会注入权威端点类型；旧运行环境仍可由 base URL 兼容推断。
@@ -273,7 +277,9 @@ const PROACTIVE_DELIVERY_CONTRACT = loadPrompt(
 const AGENT_BUILDER_GUIDELINES = loadPrompt('agent-builder.md');
 const MEMORY_SYSTEM_WORKSPACE = loadPrompt('memory-system.workspace.md');
 const COMMERCEAGENT_PLATFORM_IDENTITY = loadPrompt('identity.commerceagent.md');
-const COMMERCEAGENT_PLATFORM_BOOTSTRAP = loadPrompt('bootstrap.commerceagent.md');
+const COMMERCEAGENT_PLATFORM_BOOTSTRAP = loadPrompt(
+  'bootstrap.commerceagent.md',
+);
 
 // 各渠道共用的格式说明：Web 端始终可看完整渲染，不因来源降级输出。
 // Mermaid 渲染说明已在模式专属 output prompt 中讲过，此处不重复，
@@ -2672,7 +2678,7 @@ async function runQueryAttempt(
         : {}),
       mcpServers: {
         ...userMcpServers,
-      commerceagent: mcpServerConfig,
+        commerceagent: mcpServerConfig,
       },
       hooks: {
         PreToolUse: [
@@ -3956,7 +3962,8 @@ async function main(): Promise<void> {
     isHome,
     isAdminHome,
     agentBuilderEnabled,
-    ownerProfileEnabled: containerInput.commerceAgentOwnerProfileEnabled === true,
+    ownerProfileEnabled:
+      containerInput.commerceAgentOwnerProfileEnabled === true,
     interactionMode: containerInput.interactionMode ?? 'assistant',
     isScheduledTask: containerInput.isScheduledTask || false,
     currentTaskId: containerInput.messageTaskId ?? null,
