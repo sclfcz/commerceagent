@@ -3,6 +3,7 @@ import {
   importOpenCodeGoKey,
   openCodeGoCandidate,
 } from '../lib/opencode-go.js';
+import { importCandidateCredentials } from '../lib/local-credentials.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,28 +71,26 @@ export async function preflight(runDirectory: string) {
     if (process.argv.includes('--existing')) {
       candidates = await importExisting(repository, runDirectory);
       configured = true;
-      credentials = candidates.every(
-        (candidate) => !!process.env[candidate.apiKeyEnv]?.trim(),
-      );
     } else if (process.env.BENCH_CANDIDATES_FILE) {
       candidates = parseCandidates(
         parse(fs.readFileSync(process.env.BENCH_CANDIDATES_FILE, 'utf8')),
       );
       configured = true;
-      credentials = candidates.every(
-        (candidate) => !!process.env[candidate.apiKeyEnv]?.trim(),
-      );
     }
   } catch {
     /* don't print endpoint/config parse errors */
   }
+  importCandidateCredentials(repository, candidates);
   if (process.argv.includes('--with-opencode-go')) {
     importOpenCodeGoKey(repository);
     const go = openCodeGoCandidate(candidates);
-    if (!process.env[go.apiKeyEnv]?.trim()) credentials = false;
     candidates = parseCandidates([...candidates, go]);
     privateJson(path.join(runDirectory, 'candidates.json'), candidates);
   }
+  credentials =
+    configured &&
+    candidates.length > 0 &&
+    candidates.every((candidate) => !!process.env[candidate.apiKeyEnv]?.trim());
   privateJson(path.join(runDirectory, 'candidates.json'), candidates);
   return {
     docker,

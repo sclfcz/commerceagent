@@ -1,0 +1,17 @@
+{
+  "name": "commerceagent-benchmarks",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^20.20.0 || >=22.22.0"
+  },
+  "scripts": {
+    "run": "tsx scripts/run-promptfoo.ts",
+    "report": "tsx scripts/report.ts"
+  },
+  "devDependencies": {
+    "promptfoo": "0.121.20",
+    "tsx": "4.19.0"
+  }
+}

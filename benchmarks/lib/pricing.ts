@@ -61,3 +61,46 @@ export function calculateCost(
     1_000_000
   );
 }
+
+export function aggregatePromptfooCosts(
+  pricing: {
+    effective_date?: string;
+    currency?: string;
+    candidates?: Record<string, Partial<CandidatePrice>>;
+  },
+  results: Array<Record<string, any>>,
+) {
+  const aliases = [
+    ...new Set(
+      results
+        .map((result) => result.response?.metadata?.candidate)
+        .filter((alias): alias is string => typeof alias === 'string'),
+    ),
+  ].sort();
+  return Object.fromEntries(
+    aliases.map((alias) => {
+      const rows = results.filter(
+        (result) => result.response?.metadata?.candidate === alias,
+      );
+      const costs = rows.map((result) => result.response.metadata.cost);
+      const known =
+        costs.length > 0 &&
+        costs.every(
+          (cost) => typeof cost === 'number' && Number.isFinite(cost),
+        );
+      return [
+        alias,
+        {
+          attempts: rows.length,
+          currency: pricing.currency ?? null,
+          effectiveDate: pricing.effective_date ?? null,
+          source: pricing.candidates?.[alias]?.source ?? null,
+          totalCost: known
+            ? costs.reduce((total, cost) => total + cost, 0)
+            : null,
+          known,
+        },
+      ];
+    }),
+  );
+}

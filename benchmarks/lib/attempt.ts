@@ -120,6 +120,7 @@ export async function attempt(
       initialDatabase: runtime.initialDatabase,
       dataDirectory: service.data,
       userId: runtime.userId,
+      groupFolder: runtime.folder,
       sessionId: runtime.sessionId,
       workspaceJid: runtime.workspaceJid,
       userAbsentBeforeSetup: runtime.userAbsentBeforeSetup,
@@ -153,29 +154,32 @@ export async function attempt(
       workspace_jid: runtime.workspaceJid,
       runtime_session_id: runtime.sessionId,
     });
-    const contextEvidence = verifyContext(
-      after.run_context as ContextEvidence | null,
-      {
-        ...profilePromptHashes(
-          {
-            id: runtime.profile.id,
-            name: runtime.profile.name,
-            version: runtime.profile.version,
-            identityHash: runtime.profile.identity_hash,
-            identityPrompt: buildAgentProfilePrompt(runtime.profile),
-          },
-          runtime.profile.prompt_mode === 'append',
-        ),
-        profileId: runtime.profile.id,
-        version: runtime.profile.version,
-        identityHash: runtime.profile.identity_hash,
-        runtimePolicyHash: hash(runtime.profile.runtime_policy),
-        skillsHash: preview.preview.skills.manifestHash,
-        mcpHash: preview.preview.mcp.manifestHash,
-        sessionId: runtime.sessionId,
-        turnId: observation.turnId,
-      },
-    );
+    const actualContext = after.run_context as ContextEvidence | null;
+    const expectedContext = {
+      ...profilePromptHashes(
+        {
+          id: runtime.profile.id,
+          name: runtime.profile.name,
+          version: runtime.profile.version,
+          identityHash: runtime.profile.identity_hash,
+          identityPrompt: buildAgentProfilePrompt(runtime.profile),
+        },
+        runtime.profile.prompt_mode === 'append',
+      ),
+      profileId: runtime.profile.id,
+      version: runtime.profile.version,
+      identityHash: runtime.profile.identity_hash,
+      runtimePolicyHash: hash(runtime.profile.runtime_policy),
+      skillsHash: preview.preview.skills.manifestHash,
+      mcpHash: preview.preview.mcp.manifestHash,
+      sessionId: runtime.sessionId,
+      turnId: observation.turnId,
+    };
+    privateJson(path.join(directory, 'context-evidence.json'), {
+      actual: actualContext,
+      expected: expectedContext,
+    });
+    const contextEvidence = verifyContext(actualContext, expectedContext);
     const usage = readUsage(
       path.join(service.data, 'db/messages.db'),
       {

@@ -19,6 +19,42 @@ export interface BenchmarkTestRow {
     candidateAlias: string;
     expectedExecutionIndex: number;
   };
+  assert: Array<{
+    type: 'javascript';
+    metric: string;
+    value: string;
+  }>;
+}
+
+function benchmarkAssertions() {
+  const meta = 'context.metadata';
+  return [
+    {
+      type: 'javascript' as const,
+      metric: 'measurement',
+      value: `!!${meta} && ${meta}.measurementValid === true`,
+    },
+    {
+      type: 'javascript' as const,
+      metric: 'completion',
+      value: `!!${meta} && ${meta}.measurementValid === true && ${meta}.businessPass === true && !!${meta}.business && ${meta}.business.status === true`,
+    },
+    {
+      type: 'javascript' as const,
+      metric: 'facts_evidence',
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.facts === true && ${meta}.business.evidence === true`,
+    },
+    {
+      type: 'javascript' as const,
+      metric: 'instruction',
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.format === true && ${meta}.business.injection === true`,
+    },
+    {
+      type: 'javascript' as const,
+      metric: 'tools',
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.requiredTools === true && ${meta}.business.onlyAllowedTools === true && ${meta}.business.successfulTools === true && ${meta}.business.callLimit === true`,
+    },
+  ];
 }
 
 export function buildTests(
@@ -53,6 +89,7 @@ export function buildTests(
             candidateAlias: candidate.alias,
             expectedExecutionIndex,
           },
+          assert: benchmarkAssertions(),
         });
       }
     }
@@ -88,10 +125,14 @@ export function validateExecutionOrder(
   return { valid: true, mismatchIndex: null };
 }
 
-export function validateAdapterParity(
+export function validateAssessmentParity(
   attempts: Array<Record<string, any>>,
   promptfooResults: Array<Record<string, any>>,
-): { valid: boolean; mismatchIndex: number | null } {
+): {
+  valid: boolean;
+  mismatchIndex: number | null;
+  mismatchFields?: string[];
+} {
   const fields = [
     'candidate',
     'caseId',
@@ -112,15 +153,29 @@ export function validateAdapterParity(
     const attempt = attempts[index];
     const provider = promptfooResults[index]?.response?.metadata;
     if (!attempt || !provider)
-      return { valid: false, mismatchIndex: index + 1 };
+      return {
+        valid: false,
+        mismatchIndex: index + 1,
+        mismatchFields: ['missing_metadata'],
+      };
+    const mismatchFields = fields.filter(
+      (field) =>
+        JSON.stringify(attempt[field] ?? null) !==
+        JSON.stringify(provider[field] ?? null),
+    );
+    if (mismatchFields.length)
+      return { valid: false, mismatchIndex: index + 1, mismatchFields };
+    const expectedSuccess =
+      attempt.measurementValid === true && attempt.businessPass === true;
     if (
-      fields.some(
-        (field) =>
-          JSON.stringify(attempt[field] ?? null) !==
-          JSON.stringify(provider[field] ?? null),
-      )
+      typeof promptfooResults[index].success === 'boolean' &&
+      promptfooResults[index].success !== expectedSuccess
     )
-      return { valid: false, mismatchIndex: index + 1 };
+      return {
+        valid: false,
+        mismatchIndex: index + 1,
+        mismatchFields: ['success'],
+      };
   }
   return { valid: true, mismatchIndex: null };
 }

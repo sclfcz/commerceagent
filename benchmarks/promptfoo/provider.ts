@@ -62,7 +62,7 @@ export function providerResponse(
               usage.cacheReadInputTokens +
               usage.cacheCreationInputTokens,
             completion: usage.outputTokens,
-            cached: usage.cacheReadInputTokens + usage.cacheCreationInputTokens,
+            cached: usage.cacheReadInputTokens,
             total:
               usage.inputTokens +
               usage.cacheReadInputTokens +
@@ -83,6 +83,7 @@ export function providerResponse(
       expectedExecutionIndex,
       orderValid: actualExecutionIndex === expectedExecutionIndex,
       cost,
+      costStatus: cost === null ? 'unknown' : 'known',
       fixtureLedgerSummary: result.fixtureLedgerSummary || null,
     },
   };

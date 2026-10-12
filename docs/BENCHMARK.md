@@ -13,6 +13,8 @@ Promptfoo 已接入为编排和私有结果保存层；被测对象仍是独立 
 
 要求 Node/npm、运行中的 Docker daemon、本地已准备的 CommerceAgent Runner 镜像、
 Anthropic 相容的候选端点及凭据。spike 不会自动启动 Docker 或下载镜像。
+首次安装时先运行根项目的 `npm ci`，再运行 `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci
+--prefix benchmarks`；Promptfoo 依赖和 lockfile 仅属于 benchmark 子项目。评测不使用浏览器。
 
 复用本地已配置、已启用且具备 API Key/Auth Token 的候选：
 
@@ -31,6 +33,9 @@ npm run bench:run -- --existing
 npm run bench:report -- promptfoo-<run-id>
 ```
 
+Promptfoo 及其依赖安装在独立的 `benchmarks/` npm 项目和 lockfile 中；根目录 lockfile 保持
+产品依赖版本，不会被 benchmark 工具链重新解析。
+
 `bench:report` 会再次校验实际顺序，并分别汇总测量失败、业务失败和候选身份状态；它不会
 打印模型回复或 Provider 私有配置。
 
@@ -40,8 +45,13 @@ npm run bench:report -- promptfoo-<run-id>
 Provider 返回每次尝试的最终回复、usage ledger 汇总、成本（定价完整时）、gates、失败分类、
 fixture 账本摘要、上下文 hash、耗时和执行序号。测量失败会保留 metadata 且输出空字符串，
 不会伪装成 Promptfoo provider error。Spike 与 Promptfoo 共用完全相同的端到端 `attempt()`；
-执行结束还会逐条校验 Promptfoo 结果中的 gates 与失败分类和私有 attempt 结果一致；不一致时整次
-运行无效。没有 SDK 直连备援。
+执行结束由独立重判路径重新计算门槛和分类，与 Promptfoo metadata 逐项核对；不一致时整次运行无效。
+没有 SDK 直连备援。
+
+每条测试行都带有基于 `context.metadata` 的 JavaScript 断言，按 `measurement`、`completion`、
+`facts_evidence`、`instruction` 和 `tools` 分组。`bench:report` 从私有的 `trace.json`、
+fixture 账本、`messages.db`、Context 与 fresh-state 证据重新计算业务和测量分类，再与 Promptfoo
+metadata 比较；重判只写 `reassessed.json`，不覆盖原始 `result.json`。
 
 Promptfoo 固定为 `0.121.20`，该版本要求 Node `^20.20.0 || >=22.22.0`；产品其他部分的
 Node 支持范围不因此改变。执行器在 Promptfoo 載入前设置 `PROMPTFOO_CONFIG_DIR`、
@@ -53,9 +63,10 @@ Node 支持范围不因此改变。执行器在 Promptfoo 載入前设置 `PROMP
 config、结果和原始输出都放在被忽略的 `benchmarks/results/<run-id>/promptfoo/`；
 只可在本机执行 `promptfoo view` 查看。
 
-候選價格填在 `benchmarks/pricing.yaml`，以 `candidate-*` 別名配置，各欄是每百萬 token 單價。
-某候選沒有價格或缺少任何計費欄位時，成本為 `null`，不以零代替未知。第一版沒有預設真實
-候選價格，因此通常只會提供 usage 和 `null` 成本。
+候选价格填在 `benchmarks/pricing.yaml`，以 `candidate-*` 别名配置，各栏是每百万 token 单价。
+某候选没有价格或缺少任何计费字段时，成本为 `null`，不以零代替未知。第一版没有预设真实
+候选价格，因此通常只会提供 usage 和 `null` 成本。Promptfoo 的聚合成本列在 Provider 未提供
+cost 时会显示 `0`，这不代表免费，也不用于分析；应以 `bench:report` 的成本汇总为准。
 
 该模式先复制 `data/config/claude-provider.json` 与加密密钥到私有结果目录，再在隔离子进程
 读取副本，生产配置不会被迁移或修改。`BENCH_EXISTING_DATA_DIR` 可指定源数据目录。

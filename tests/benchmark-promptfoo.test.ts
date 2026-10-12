@@ -2,12 +2,16 @@ import { describe, expect, test } from 'vitest';
 import type { Candidate, SpikeCase } from '../benchmarks/lib/contracts.js';
 import {
   buildTests,
-  validateAdapterParity,
+  validateAssessmentParity,
   validateExecutionOrder,
 } from '../benchmarks/promptfoo/build-tests.js';
 import { providerResponse } from '../benchmarks/promptfoo/provider.js';
-import { calculateCost } from '../benchmarks/lib/pricing.js';
+import {
+  aggregatePromptfooCosts,
+  calculateCost,
+} from '../benchmarks/lib/pricing.js';
 import { importOpenCodeGoKey } from '../benchmarks/lib/opencode-go.js';
+import { importCandidateCredentials } from '../benchmarks/lib/local-credentials.js';
 import { configurePromptfooStorage } from '../benchmarks/promptfoo/runtime.js';
 import { parse } from 'yaml';
 import { countClassifications } from '../benchmarks/lib/assessment.js';
@@ -15,6 +19,9 @@ import { persistAttemptResult } from '../benchmarks/lib/attempt.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+import Database from 'better-sqlite3';
+import { reassessPromptfoo } from '../benchmarks/lib/reassess-promptfoo.js';
 
 const candidates = [
   { alias: 'candidate-a' },
@@ -27,6 +34,22 @@ const cases = [
 ] as SpikeCase[];
 
 describe('Promptfoo benchmark adapter', () => {
+  test('adds metadata-backed javascript assertions grouped by benchmark dimension', () => {
+    const row = buildTests(cases.slice(0, 1), candidates.slice(0, 1), 1)[0];
+    expect(row.assert.map((assertion) => assertion.metric)).toEqual([
+      'measurement',
+      'completion',
+      'facts_evidence',
+      'instruction',
+      'tools',
+    ]);
+    expect(
+      row.assert.every((assertion) => assertion.type === 'javascript'),
+    ).toBe(true);
+    expect(row.assert[0].value).toContain('context.metadata.measurementValid');
+    expect(row.assert[1].value).toContain('context.metadata.businessPass');
+  });
+
   test('persists repetition before comparing Promptfoo result metadata', () => {
     const directory = fs.mkdtempSync(
       path.join(os.tmpdir(), 'commerceagent-attempt-result-test-'),
@@ -52,7 +75,7 @@ describe('Promptfoo benchmark adapter', () => {
       );
       expect(fromDisk.repetition).toBe(2);
       expect(
-        validateAdapterParity(
+        validateAssessmentParity(
           [fromDisk],
           [{ response: { metadata: persisted } }],
         ),
@@ -169,6 +192,31 @@ describe('Promptfoo benchmark adapter', () => {
     }
   });
 
+  test('imports candidate-specific credentials only for recognized aliases', () => {
+    const repository = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'commerceagent-qwen-key-test-'),
+    );
+    const directory = path.join(repository, 'benchmarks');
+    const file = path.join(directory, 'qwen.local.json');
+    const previous = process.env.BENCH_QWEN_API_KEY;
+    fs.mkdirSync(directory, { mode: 0o700 });
+    fs.writeFileSync(file, JSON.stringify({ apiKey: 'test-only-key' }), {
+      mode: 0o600,
+    });
+    try {
+      delete process.env.BENCH_QWEN_API_KEY;
+      importCandidateCredentials(repository, [
+        { apiKeyEnv: 'BENCH_QWEN_API_KEY' },
+      ]);
+      expect(process.env.BENCH_QWEN_API_KEY).toBe('test-only-key');
+      expect(fs.existsSync(file)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.BENCH_QWEN_API_KEY;
+      else process.env.BENCH_QWEN_API_KEY = previous;
+      fs.rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
   test('runs an in-memory provider without network calls and returns its metadata', async () => {
     const directory = fs.mkdtempSync(
       path.join(os.tmpdir(), 'commerceagent-promptfoo-test-'),
@@ -196,7 +244,19 @@ describe('Promptfoo benchmark adapter', () => {
       IS_TESTING: 'true',
     });
     try {
-      const { evaluate, loadApiProvider } = await import('promptfoo');
+      const benchmarkRequire = createRequire(
+        path.join(process.cwd(), 'benchmarks/package.json'),
+      );
+      const promptfooEntry = benchmarkRequire.resolve('promptfoo');
+      expect(promptfooEntry).toContain(
+        path.join('benchmarks', 'node_modules', 'promptfoo'),
+      );
+      const { evaluate, loadApiProvider } = await import(promptfooEntry);
+      const benchmarkTest = buildTests(
+        cases.slice(0, 1),
+        candidates.slice(0, 1),
+        1,
+      )[0];
       const evaluation = await evaluate(
         {
           prompts: ['{{prompt}}'],
@@ -205,11 +265,26 @@ describe('Promptfoo benchmark adapter', () => {
               id: () => 'synthetic-provider',
               callApi: async () => ({
                 output: 'synthetic response',
-                metadata: { gates: { contextVerified: true } },
+                metadata: {
+                  gates: { contextVerified: true },
+                  measurementValid: true,
+                  businessPass: false,
+                  business: {
+                    status: true,
+                    facts: true,
+                    evidence: true,
+                    format: true,
+                    injection: true,
+                    requiredTools: true,
+                    onlyAllowedTools: true,
+                    successfulTools: true,
+                    callLimit: true,
+                  },
+                },
               }),
             },
           ],
-          tests: [{ vars: { prompt: 'synthetic prompt' } }],
+          tests: [benchmarkTest],
           sharing: false,
           writeLatestResults: false,
         },
@@ -221,11 +296,35 @@ describe('Promptfoo benchmark adapter', () => {
         },
       );
       expect(evaluation.results).toHaveLength(1);
-      expect(evaluation.results[0].toEvaluateResult()).toMatchObject({
+      const evaluationResult = evaluation.results[0].toEvaluateResult();
+      expect(evaluationResult).toMatchObject({
+        success: false,
         response: {
           output: 'synthetic response',
-          metadata: { gates: { contextVerified: true } },
+          metadata: {
+            gates: { contextVerified: true },
+            measurementValid: true,
+            businessPass: false,
+            business: {
+              status: true,
+              facts: true,
+              evidence: true,
+              format: true,
+              injection: true,
+              requiredTools: true,
+              onlyAllowedTools: true,
+              successfulTools: true,
+              callLimit: true,
+            },
+          },
         },
+      });
+      expect(evaluationResult.namedScores).toMatchObject({
+        measurement: 1,
+        completion: 0,
+        facts_evidence: 1,
+        instruction: 1,
+        tools: 1,
       });
       const previousRunDirectory = process.env.BENCH_RUN_DIRECTORY;
       delete process.env.BENCH_RUN_DIRECTORY;
@@ -327,15 +426,16 @@ describe('Promptfoo benchmark adapter', () => {
         },
       },
     };
-    expect(validateAdapterParity([attempt], [promptfooResult])).toEqual({
+    expect(validateAssessmentParity([attempt], [promptfooResult])).toEqual({
       valid: true,
       mismatchIndex: null,
     });
     promptfooResult.response.metadata.measurementFailure =
       'collection_incomplete';
-    expect(validateAdapterParity([attempt], [promptfooResult])).toEqual({
+    expect(validateAssessmentParity([attempt], [promptfooResult])).toEqual({
       valid: false,
       mismatchIndex: 1,
+      mismatchFields: ['measurementFailure'],
     });
   });
 
@@ -367,7 +467,7 @@ describe('Promptfoo benchmark adapter', () => {
     expect(response.tokenUsage).toEqual({
       prompt: 13,
       completion: 4,
-      cached: 3,
+      cached: 2,
       total: 17,
       completionDetails: {
         reasoning: 0,
@@ -382,6 +482,7 @@ describe('Promptfoo benchmark adapter', () => {
       expectedExecutionIndex: 2,
       orderValid: false,
       cost: null,
+      costStatus: 'unknown',
       elapsedMs: 12,
       logicalRunMs: 9,
       gates: { freshState: false },
@@ -417,5 +518,301 @@ describe('Promptfoo benchmark adapter', () => {
         source: 'synthetic test rate',
       }),
     ).toBeCloseTo(1.00025);
+  });
+
+  test('keeps aggregate candidate cost unknown if any attempt is unpriced', () => {
+    const results = [
+      { response: { metadata: { candidate: 'candidate-a', cost: 0.25 } } },
+      { response: { metadata: { candidate: 'candidate-a', cost: null } } },
+      { response: { metadata: { candidate: 'candidate-b', cost: 0.5 } } },
+    ];
+    expect(
+      aggregatePromptfooCosts(
+        {
+          effective_date: '2026-10-12',
+          currency: 'USD',
+          candidates: {},
+        },
+        results,
+      ),
+    ).toEqual({
+      'candidate-a': {
+        attempts: 2,
+        currency: 'USD',
+        effectiveDate: '2026-10-12',
+        source: null,
+        totalCost: null,
+        known: false,
+      },
+      'candidate-b': {
+        attempts: 1,
+        currency: 'USD',
+        effectiveDate: '2026-10-12',
+        source: null,
+        totalCost: 0.5,
+        known: true,
+      },
+    });
+  });
+
+  test('reassesses classifications from trace, fixture ledger, usage database and context evidence', () => {
+    const runDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'commerceagent-independent-reassess-'),
+    );
+    fs.mkdirSync(path.join(runDirectory, 'promptfoo'), { recursive: true });
+    const attemptDirectory = path.join(runDirectory, 'promptfoo-0001');
+    const dataDirectory = path.join(attemptDirectory, 'service/data-eval');
+    fs.mkdirSync(path.join(dataDirectory, 'db'), { recursive: true });
+    const writeJson = (file: string, value: unknown) =>
+      fs.writeFileSync(file, JSON.stringify(value) + '\n');
+    const caseRow = {
+      id: 'policy-check',
+      scenario: 'normal',
+      prompt: 'What is the return rule?',
+      expected: {
+        status: 'answered',
+        facts: { days: 30 },
+        evidence: ['POLICY-1'],
+      },
+      requiredTools: [
+        { name: 'search_policy', arguments: { topic: 'returns' } },
+      ],
+      maxCalls: 1,
+    } as SpikeCase;
+    const candidate = {
+      alias: 'candidate-a',
+      model: 'claude-3-5-sonnet',
+      baseUrl: 'https://api.anthropic.com',
+      apiKeyEnv: 'BENCH_TEST_KEY',
+      gateway: false,
+    };
+    const call = {
+      sequence: 1,
+      name: 'search_policy',
+      arguments: { topic: 'returns' },
+      result: { days: 30, evidence_id: 'POLICY-1' },
+      success: true,
+    };
+    const output = JSON.stringify({
+      status: 'answered',
+      facts: { days: 30 },
+      evidence: ['POLICY-1'],
+    });
+    const trace = {
+      output,
+      failure: null,
+      reason: 'completed',
+      tools: [{ name: 'mcp__commerce_fixture__search_policy' }],
+    };
+    const contextExpected = {
+      renderedProfileHash: 'rendered-profile',
+      canonicalProfileHash: 'canonical-profile',
+      profileId: 'profile-1',
+      version: 1,
+      identityHash: 'identity-hash',
+      runtimePolicyHash: 'runtime-policy-hash',
+      skillsHash: 'skills-hash',
+      mcpHash: 'mcp-hash',
+      sessionId: 'session-1',
+      turnId: 'turn-1',
+    };
+    const contextActual = {
+      executionMode: 'container',
+      turnId: 'turn-1',
+      agentId: 'session-1',
+      agentProfile: {
+        id: 'profile-1',
+        version: 1,
+        identityHash: 'identity-hash',
+        runtimePolicyHash: 'runtime-policy-hash',
+      },
+      skills: { manifestHash: 'skills-hash', selectedSkillIds: [] },
+      mcp: { manifestHash: 'mcp-hash', serverIds: ['commerce_fixture'] },
+      prompt: {
+        blocks: [
+          {
+            id: 'agent-profile',
+            hash: 'rendered-profile',
+            owner: 'agent_profile',
+          },
+          { id: 'platform', hash: 'platform-hash', owner: 'platform' },
+        ],
+      },
+      warnings: [],
+    };
+    const freshState = {
+      serviceDirectoryCreated: true,
+      dataDirectoryCreated: true,
+      initialDataEntries: 0,
+      initialDatabase: {
+        users: [],
+        workspaces: [],
+        sessions: [],
+        sdkSessions: [],
+        messages: 0,
+        usageEvents: 0,
+      },
+      dataDirectory,
+      userId: 'user-1',
+      groupFolder: 'group-1',
+      sessionId: 'session-1',
+      workspaceJid: 'workspace-1',
+      userAbsentBeforeSetup: true,
+      sessionAbsentBeforeCreate: true,
+      sessionOwned: true,
+      sessionEmpty: true,
+      workspaceBaselineHash: 'baseline-hash',
+    };
+    const db = new Database(path.join(dataDirectory, 'db/messages.db'));
+    db.exec(`
+      CREATE TABLE usage_events (
+        user_id TEXT, group_folder TEXT, agent_id TEXT, event_id TEXT,
+        created_at INTEGER, input_tokens INTEGER, output_tokens INTEGER,
+        cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+        reasoning_output_tokens INTEGER, duration_ms INTEGER
+      );
+      CREATE TABLE usage_records (
+        user_id TEXT, group_folder TEXT, agent_id TEXT, event_id TEXT,
+        created_at INTEGER, model TEXT, input_tokens INTEGER, output_tokens INTEGER,
+        cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+        reasoning_output_tokens INTEGER
+      );
+    `);
+    const usageRow = [
+      'user-1',
+      'group-1',
+      'session-1',
+      'event-1',
+      1,
+      10,
+      3,
+      0,
+      0,
+      0,
+    ];
+    db.prepare(
+      'INSERT INTO usage_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(...usageRow, 5);
+    db.prepare(
+      'INSERT INTO usage_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(...usageRow.slice(0, 5), candidate.model, ...usageRow.slice(5));
+    db.close();
+
+    try {
+      writeJson(path.join(runDirectory, 'candidates.json'), [candidate]);
+      writeJson(path.join(runDirectory, 'cases.used.json'), [caseRow]);
+      writeJson(path.join(runDirectory, 'execution-sequence.jsonl'), {
+        caseId: 'policy-check',
+        repetition: 1,
+        candidateAlias: 'candidate-a',
+        executionIndex: 1,
+        expectedExecutionIndex: 1,
+      });
+      writeJson(path.join(runDirectory, 'execution-order.json'), {
+        valid: true,
+        expectedAttempts: 1,
+        actualAttempts: 1,
+        expected: [
+          {
+            caseId: 'policy-check',
+            repetition: 1,
+            candidateAlias: 'candidate-a',
+            executionIndex: 1,
+          },
+        ],
+        actual: [
+          {
+            caseId: 'policy-check',
+            repetition: 1,
+            candidateAlias: 'candidate-a',
+            executionIndex: 1,
+          },
+        ],
+      });
+      fs.mkdirSync(attemptDirectory, { recursive: true });
+      writeJson(path.join(attemptDirectory, 'trace.json'), trace);
+      const originalResultFile = path.join(attemptDirectory, 'result.json');
+      const originalResultText =
+        JSON.stringify({ source: 'original-result' }) + '\n';
+      fs.writeFileSync(originalResultFile, originalResultText, { mode: 0o600 });
+      fs.writeFileSync(
+        path.join(attemptDirectory, 'fixture.jsonl'),
+        JSON.stringify(call) + '\n',
+      );
+      writeJson(path.join(attemptDirectory, 'context-evidence.json'), {
+        actual: contextActual,
+        expected: contextExpected,
+      });
+      writeJson(path.join(attemptDirectory, 'fresh-state.json'), freshState);
+      writeJson(path.join(runDirectory, 'promptfoo/results.json'), [
+        {
+          success: true,
+          response: {
+            metadata: {
+              candidate: 'candidate-a',
+              caseId: 'policy-check',
+              repetition: 1,
+              actualExecutionIndex: 1,
+              expectedExecutionIndex: 1,
+              measurementValid: true,
+              qualityEligible: true,
+              pass: true,
+              measurementFailure: null,
+              businessFailure: null,
+              failure: null,
+              businessPass: true,
+              gatewayVerificationRequired: false,
+              identityBasis: 'official_endpoint_sdk',
+              gates: {
+                modelIdentity: true,
+                independentFixture: true,
+                freshState: true,
+                terminalClassified: true,
+                usageReconciled: true,
+                contextVerified: true,
+              },
+            },
+          },
+        },
+      ]);
+      const report = reassessPromptfoo(runDirectory);
+      expect(report).toMatchObject({
+        evidenceComplete: true,
+        executionOrderValid: true,
+        providerParityValid: true,
+        providerParityMismatchFields: [],
+        measurementValidAttempts: 1,
+        businessPassedAttempts: 1,
+        invalidRun: false,
+      });
+      expect(report.results[0].sourceHashes).toHaveProperty('trace.json');
+      expect(report.results[0].gates).toMatchObject({
+        modelIdentity: true,
+        independentFixture: true,
+        freshState: true,
+        contextVerified: true,
+      });
+      expect(fs.readFileSync(originalResultFile, 'utf8')).toBe(
+        originalResultText,
+      );
+      expect(fs.existsSync(path.join(runDirectory, 'reassessed.json'))).toBe(
+        true,
+      );
+
+      const promptfooResults = JSON.parse(
+        fs.readFileSync(
+          path.join(runDirectory, 'promptfoo/results.json'),
+          'utf8',
+        ),
+      );
+      promptfooResults[0].response.metadata.businessPass = false;
+      writeJson(
+        path.join(runDirectory, 'promptfoo/results.json'),
+        promptfooResults,
+      );
+      expect(reassessPromptfoo(runDirectory).providerParityValid).toBe(false);
+    } finally {
+      fs.rmSync(runDirectory, { recursive: true, force: true });
+    }
   });
 });

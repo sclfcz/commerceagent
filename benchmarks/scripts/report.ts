@@ -1,15 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  countClassifications,
-  summarizeCandidates,
-} from '../lib/assessment.js';
-import {
-  validateAdapterParity,
-  validateExecutionOrder,
-} from '../promptfoo/build-tests.js';
 import { privateJson } from '../lib/contracts.js';
+import { reassessPromptfoo } from '../lib/reassess-promptfoo.js';
+import { parse } from 'yaml';
+import { aggregatePromptfooCosts } from '../lib/pricing.js';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
@@ -18,58 +13,39 @@ export function createStageTwoReport(runDirectory: string) {
   const summary = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'summary.json'), 'utf8'),
   );
-  const sequence = JSON.parse(
-    fs.readFileSync(path.join(runDirectory, 'execution-order.json'), 'utf8'),
-  );
-  const order = validateExecutionOrder(sequence.expected, sequence.actual);
-  const attempts = fs
-    .readdirSync(runDirectory, { withFileTypes: true })
-    .filter(
-      (entry) => entry.isDirectory() && entry.name.startsWith('promptfoo-'),
-    )
-    .sort((left, right) => left.name.localeCompare(right.name))
-    .map((entry) => {
-      const resultPath = path.join(runDirectory, entry.name, 'result.json');
-      return fs.existsSync(resultPath)
-        ? JSON.parse(fs.readFileSync(resultPath, 'utf8'))
-        : null;
-    })
-    .filter(Boolean);
+  const independent = reassessPromptfoo(runDirectory);
   const promptfooResults = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'promptfoo/results.json'), 'utf8'),
   );
-  const adapterParity = validateAdapterParity(attempts, promptfooResults);
+  const pricing = parse(
+    fs.readFileSync(path.join(benchmarkDirectory, 'pricing.yaml'), 'utf8'),
+  );
   const reconciliationPath = path.join(
     runDirectory,
     'artifact-reconciliation.json',
   );
-  const artifactReconciliation = fs.existsSync(reconciliationPath)
+  const reconciliation = fs.existsSync(reconciliationPath)
     ? JSON.parse(fs.readFileSync(reconciliationPath, 'utf8'))
     : null;
-  const identityByCandidate = summarizeCandidates(attempts);
+  const artifactReconciliation = reconciliation
+    ? {
+        reason: reconciliation.reason,
+        attempts: reconciliation.attempts,
+        originalSummaryHash: reconciliation.originalSummaryHash,
+        originalProviderParityValid: reconciliation.originalProviderParityValid,
+        reconciledSidecarCount: reconciliation.results?.length ?? 0,
+      }
+    : null;
   return {
-    schemaVersion: 1,
+    ...independent,
     stage: summary.stage,
     scope: summary.scope,
-    attempts: attempts.length,
-    executionOrderValid: order.valid,
-    providerParityValid: adapterParity.valid,
     artifactReconciliation,
-    measurementValidAttempts: attempts.filter((row) => row.measurementValid)
-      .length,
-    businessPassedAttempts: attempts.filter((row) => row.businessPass).length,
-    failureCounts: countClassifications(attempts, 'failure'),
-    measurementFailureCounts: countClassifications(
-      attempts,
-      'measurementFailure',
-    ),
-    businessFailureCounts: countClassifications(attempts, 'businessFailure'),
-    identityByCandidate,
-    invalidRun:
-      !order.valid ||
-      !adapterParity.valid ||
-      attempts.length !== sequence.expectedAttempts ||
-      sequence.actualAttempts !== sequence.expectedAttempts,
+    promptfooReportedPasses: promptfooResults.filter(
+      (result: Record<string, any>) => result.success === true,
+    ).length,
+    costByCandidate: aggregatePromptfooCosts(pricing, promptfooResults),
+    promptfooCostColumnAuthoritative: false,
   };
 }
 
@@ -82,17 +58,28 @@ export function main() {
     : path.join(benchmarkDirectory, 'results', argument);
   const report = createStageTwoReport(runDirectory);
   privateJson(path.join(runDirectory, 'report.private.json'), report);
-  if (report.artifactReconciliation) {
-    const original = JSON.parse(
-      fs.readFileSync(path.join(runDirectory, 'summary.json'), 'utf8'),
-    );
-    privateJson(path.join(runDirectory, 'summary.reconciled.json'), {
-      ...original,
-      ...report,
+  privateJson(path.join(runDirectory, 'summary.reassessed.json'), report);
+  process.stdout.write(
+    JSON.stringify({
+      schemaVersion: report.schemaVersion,
+      stage: report.stage,
+      scope: report.scope,
+      attempts: report.attempts,
+      evidenceComplete: report.evidenceComplete,
+      executionOrderValid: report.executionOrderValid,
       providerParityValid: report.providerParityValid,
-    });
-  }
-  process.stdout.write(JSON.stringify(report) + '\n');
+      measurementValidAttempts: report.measurementValidAttempts,
+      businessPassedAttempts: report.businessPassedAttempts,
+      failureCounts: report.failureCounts,
+      measurementFailureCounts: report.measurementFailureCounts,
+      businessFailureCounts: report.businessFailureCounts,
+      identityByCandidate: report.identityByCandidate,
+      costByCandidate: report.costByCandidate,
+      promptfooReportedPasses: report.promptfooReportedPasses,
+      promptfooCostColumnAuthoritative: report.promptfooCostColumnAuthoritative,
+      invalidRun: report.invalidRun,
+    }) + '\n',
+  );
   if (report.invalidRun) process.exitCode = 1;
 }
 

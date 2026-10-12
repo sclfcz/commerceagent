@@ -19,8 +19,6 @@
     "test": "vitest",
     "test:real-model": "tsx scripts/test-real-model-smoke.ts",
     "bench:spike": "tsx benchmarks/scripts/spike.ts",
-    "bench:run": "tsx benchmarks/scripts/run-promptfoo.ts",
-    "bench:report": "tsx benchmarks/scripts/report.ts",
     "bench:typecheck": "tsc -p benchmarks/tsconfig.json",
     "dev:all": "npx concurrently --timestamp-format \"yyyy-MM-dd HH:mm:ss.SSS\" -n backend,frontend -c blue,green \"npm run dev\" \"npm run dev:web\"",
     "dev:web": "cd web && npm run dev",
@@ -30,7 +28,9 @@
     "desktop:fetch-node": "npm --prefix desktop run fetch-node",
     "desktop:dist:mac": "npm --prefix desktop run dist:mac",
     "desktop:dist:win": "npm --prefix desktop run dist:win",
-    "build:desktop": "npm run build && npm run build:web && npm --prefix desktop run stage"
+    "build:desktop": "npm run build && npm run build:web && npm --prefix desktop run stage",
+    "bench:run": "npm --prefix benchmarks run run --",
+    "bench:report": "npm --prefix benchmarks run report --"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.205",
@@ -65,7 +65,6 @@
     "concurrently": "^9.2.1",
     "happy-dom": "^20.11.1",
     "prettier": "3.8.3",
-    "promptfoo": "0.121.20",
     "tsx": "^4.19.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.1"

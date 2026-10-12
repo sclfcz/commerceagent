@@ -148,26 +148,31 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 
 ### 阶段 2：Promptfoo 接入与双候选全量运行（2026-10-12）
 
-- 固定 Promptfoo `0.121.20` 并提交 lockfile，新增 `bench:run` 与 `bench:report`。
-  自定义 Provider 复用 spike 的真实 Container `attempt()`，单 Provider 通过候选变量路由；
-  30 条测试行按用例/重复轮次轮换候选，串行启动独立实例，不使用 Promptfoo `--repeat`。
-- 按该固定版本设置私有 `PROMPTFOO_CONFIG_DIR` 和缓存路径，关闭缓存、遥测、更新检查及分享；
-  同时设置 `cache: false`、`sharing: false` 与 `maxConcurrency: 1`。离线测试验证 Provider
-  返回、候选轮换、执行顺序拒绝、metadata 对账、价格缺失返回 `null` 以及这些隐私开关。
-- 真实运行编号：`promptfoo-2026-10-11T16-28-09-907Z`。完整执行 5 条 spike 用例、
-  2 个候选、每条 3 次，共 30 次；执行顺序核验通过，测量有效 30/30，业务断言通过 28/30，
-  2 次业务失败均为 `business_assertion`。两个候选当前都属网关待核验，身份状态分别为
-  `gateway_pending`，质量合格样本均为 0；本次不生成模型排名。
-- 首次运行发现 attempt 文件漏存 `repetition`，导致执行时 Provider metadata 与磁盘结果的
-  一致性门槛失败。30 次原始模型调用及断言结果均保留，没有追加调用、改答案或重跑样本。
-  修正共享 `attempt()`，在落盘前写入重复轮次；随后仅用已有 `execution-sequence.jsonl`
-  给 30 个私有结果补回缺失的轮次字段。原始 `summary.json` 保留，另写入私有
-  `artifact-reconciliation.json`、`summary.reconciled.json` 和 `report.private.json`。
-  离线重验结果：执行顺序有效、Provider parity 通过、整次运行有效。
-- 备份安全测试标题已改为描述跨平台 staging 行为；缓存读转缓存写但总 token 守恒的例子已补测，
-  计费修复独立提交为 `7571478`。最终全量测试：**344 个测试文件通过，2985 项通过、
-  24 项跳过、0 项失败**。`make typecheck`、`make build`、benchmark 类型检查、
-  `npm run format:check`、`npm run docs:check` 与 `git diff --check` 均通过。
+- Promptfoo `0.121.20` 与 `tsx` 已移入独立 `benchmarks/` npm 项目，新增子项目 lockfile；
+  根 `package-lock.json` 与 `927a810` 完全一致。按该锁文件重装后检查了 318 个生产依赖，
+  缺失与版本不匹配均为 0；Anthropic SDK 为 `0.93.0`、`ws` 为 `8.21.0`。
+  根 `npm ci` 和 `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --prefix benchmarks` 均通过；
+  `CLAUDE.md` 已将 Node 项目数改为四个。根目录安装报告 22 项基线公告，benchmark 子项目
+  安装报告 12 项公告，仍需分别分级；它们不会进入产品依赖树。
+- `bench:run` / `bench:report` 通过根 npm 脚本委托给 benchmark 子项目。Provider 仍复用真实
+  Container `attempt()`，以单 Provider 加候选变量逐次路由。测试行带 JavaScript 断言，metric
+  分为 `measurement`、`completion`、`facts_evidence`、`instruction` 和 `tools`。
+  `bench:report` 从 trace、fixture 账本、usage 数据库、Context 和 fresh-state 文件独立重判，
+  再与 Promptfoo metadata 逐项比较。每次重判写 `reassessed.json`，原始 `result.json` 不参与分类。
+- 完整 30 次运行：`promptfoo-2026-10-11T16-28-09-907Z`，业务通过 28/30、失败 2 次；
+  该次仍只有两个网关候选。首次 parity 发现重复轮次字段漏写。修复前曾临时改写 30 个
+  `result.json`；之后已把原字段内容恢复，并将带重复轮次的版本另存为 `result.reconciled.json`，
+  同时记录当前恢复文件和 sidecar 的 hash。恢复时逐个核对：30/30 除 `repetition` 外的 JSON
+  字段一致。但改写前没有保存原文件 hash，无法证明原始字节级一致性；因此该次运行缺少后来
+  加入的 `context-evidence.json`，独立重判将其标为不可判定，不作为阶段 2 独立验收依据。
+- 更新后的「官方候选 + 网关」真实 smoke：`promptfoo-2026-10-12T02-01-37-408Z`，4 次尝试。
+  原始证据完整，执行顺序、独立重判和 Provider parity 全部通过；测量与业务均 4/4 通过。
+  官方候选 `candidate-qwen` 身份核验通过 2/2、质量合格 2/2；`candidate-go` 为
+  `gateway_pending` 2/2，不进入质量排名。Promptfoo 五组断言结果 4/4 通过。
+  两个候选均没有定价，报告成本保持 `null`；Promptfoo UI 的成本列不作为费用来源。
+- 缓存重分类计费修复独立提交为 `7571478`。阶段 2 benchmark 实现提交为 `eb29204`。
+  最新 `make test` 为 **2,989 项通过、24 项跳过**；`make typecheck`、`make build`、
+  benchmark 类型检查、格式检查、`docs:check` 均通过。
 
-阶段 2 的编排和测量链路验收完成。两候选身份仍待外部核验，且正式业务集、成本汇总、
-Judge 与 holdout 均未进入本阶段范围；下一步必须由用户验收本阶段后再开始阶段 3。
+阶段 2 验收完成，阶段 3 尚未开始。进入阶段 3 前仍需为候选补充带来源和生效日期的价格，
+并计划更大样本的身份已核验候选运行；Judge 与 holdout 不属于本阶段。

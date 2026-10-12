@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import {
   buildTests,
-  validateAdapterParity,
   validateExecutionOrder,
 } from '../promptfoo/build-tests.js';
 import { configurePromptfooStorage } from '../promptfoo/runtime.js';
@@ -14,10 +13,8 @@ import {
   privateJson,
   type SpikeCase,
 } from '../lib/contracts.js';
-import {
-  countClassifications,
-  summarizeCandidates,
-} from '../lib/assessment.js';
+import { reassessPromptfoo } from '../lib/reassess-promptfoo.js';
+import { aggregatePromptfooCosts } from '../lib/pricing.js';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
@@ -106,6 +103,10 @@ export async function main() {
     const promptfooResults = evaluation.results.map((row) =>
       row.toEvaluateResult(),
     );
+    const pricing = parse(
+      fs.readFileSync(path.join(benchmarkDirectory, 'pricing.yaml'), 'utf8'),
+    );
+    const costByCandidate = aggregatePromptfooCosts(pricing, promptfooResults);
     privateJson(
       path.join(promptfooDirectory, 'results.json'),
       promptfooResults,
@@ -133,47 +134,47 @@ export async function main() {
       expected,
       actual,
     });
-    const results = fs
-      .readdirSync(runDirectory, { withFileTypes: true })
-      .filter(
-        (entry) => entry.isDirectory() && entry.name.startsWith('promptfoo-'),
-      )
-      .sort((left, right) => left.name.localeCompare(right.name))
-      .map((entry) => {
-        const file = path.join(runDirectory, entry.name, 'result.json');
-        return fs.existsSync(file)
-          ? JSON.parse(fs.readFileSync(file, 'utf8'))
-          : null;
-      })
-      .filter(Boolean);
-    const parity = validateAdapterParity(results, promptfooResults);
-    privateJson(path.join(runDirectory, 'adapter-parity.json'), {
-      ...parity,
-      attempts: results.length,
-      promptfooResults: promptfooResults.length,
-    });
+    const independent = reassessPromptfoo(runDirectory);
     const report = {
+      ...independent,
       schemaVersion: 1,
       stage: smoke ? 'smoke' : 'benchmark',
       scope: 'synthetic-query-analysis',
-      executionOrderValid: order.valid,
-      providerParityValid: parity.valid,
-      attempts: results.length,
-      measurementValidAttempts: results.filter((row) => row.measurementValid)
-        .length,
-      businessPassedAttempts: results.filter((row) => row.businessPass).length,
-      failureCounts: countClassifications(results, 'failure'),
-      measurementFailureCounts: countClassifications(
-        results,
-        'measurementFailure',
-      ),
-      businessFailureCounts: countClassifications(results, 'businessFailure'),
-      identityByCandidate: summarizeCandidates(results),
       promptfooResultPath: 'promptfoo/results.json',
+      costByCandidate,
+      promptfooReportedPasses: promptfooResults.filter(
+        (result: Record<string, any>) => result.success === true,
+      ).length,
+      promptfooCostColumnAuthoritative: false,
     };
     privateJson(path.join(runDirectory, 'summary.json'), report);
-    process.stdout.write(JSON.stringify(report) + '\n');
-    if (!order.valid || !parity.valid || results.length !== tests.length)
+    process.stdout.write(
+      JSON.stringify({
+        schemaVersion: report.schemaVersion,
+        stage: report.stage,
+        scope: report.scope,
+        attempts: report.attempts,
+        evidenceComplete: report.evidenceComplete,
+        executionOrderValid: report.executionOrderValid,
+        providerParityValid: report.providerParityValid,
+        measurementValidAttempts: report.measurementValidAttempts,
+        businessPassedAttempts: report.businessPassedAttempts,
+        failureCounts: report.failureCounts,
+        measurementFailureCounts: report.measurementFailureCounts,
+        businessFailureCounts: report.businessFailureCounts,
+        identityByCandidate: report.identityByCandidate,
+        costByCandidate: report.costByCandidate,
+        promptfooReportedPasses: report.promptfooReportedPasses,
+        promptfooCostColumnAuthoritative:
+          report.promptfooCostColumnAuthoritative,
+        invalidRun: report.invalidRun,
+      }) + '\n',
+    );
+    if (
+      !order.valid ||
+      independent.invalidRun ||
+      independent.attempts !== tests.length
+    )
       process.exitCode = 1;
   } catch {
     process.stderr.write(
