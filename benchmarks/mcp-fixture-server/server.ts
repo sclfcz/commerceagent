@@ -50,6 +50,7 @@ export async function startFixtureServer(options: {
   const host = options.host ?? '127.0.0.1';
   if (!(host === '::1' || (isIP(host) === 4 && host.startsWith('127.'))))
     throw new Error('fixture_non_loopback_bind_forbidden');
+  fs.writeFileSync(options.ledgerFile, '', { flag: 'wx', mode: 0o600 });
   const token = randomBytes(32).toString('hex');
   const ledger: ToolCall[] = [];
   const server = http.createServer(async (req, res) => {

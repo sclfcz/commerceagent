@@ -258,6 +258,24 @@ export function reassessPromptfoo(runDirectory: string) {
       candidate.model,
     );
     if (missingEvidence) {
+      let partialTrace: Record<string, any> | null = null;
+      if (fs.existsSync(traceFile)) {
+        try {
+          partialTrace = JSON.parse(fs.readFileSync(traceFile, 'utf8'));
+        } catch {
+          partialTrace = null;
+        }
+      }
+      const partialFailure =
+        partialTrace?.failure === 'upstream_error' ||
+        partialTrace?.failure === 'queue_timeout' ||
+        partialTrace?.failure === 'run_timeout' ||
+        partialTrace?.failure === 'stream_disconnected' ||
+        partialTrace?.failure === 'runner_exit' ||
+        partialTrace?.failure === 'stopped' ||
+        partialTrace?.failure === 'released'
+          ? partialTrace.failure
+          : 'collection_incomplete';
       evidenceComplete = false;
       reassessed.push({
         candidate: row.candidateAlias,
@@ -267,10 +285,10 @@ export function reassessPromptfoo(runDirectory: string) {
         measurementValid: false,
         qualityEligible: false,
         pass: false,
-        measurementFailure: 'collection_incomplete',
+        measurementFailure: partialFailure,
         businessFailure: null,
-        failure: 'collection_incomplete',
-        businessPass: false,
+        failure: partialFailure,
+        businessPass: null,
         gatewayVerificationRequired: gateway,
         sdkModelMatches: false,
         identityBasis:
@@ -281,7 +299,7 @@ export function reassessPromptfoo(runDirectory: string) {
           modelIdentity: false,
           independentFixture: false,
           freshState: false,
-          terminalClassified: false,
+          terminalClassified: partialTrace?.reason != null,
           usageReconciled: false,
           contextVerified: false,
         },

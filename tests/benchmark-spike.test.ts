@@ -139,6 +139,23 @@ describe('fixture audit outside the Runner', () => {
       ).rejects.toThrow('fixture_non_loopback_bind_forbidden');
     },
   );
+  test('creates a protected empty ledger before the first fixture call', async () => {
+    const directory = fs.mkdtempSync(path.join(temp, 'empty-ledger-'));
+    const ledgerFile = path.join(directory, 'fixture.jsonl');
+    const server = await startFixtureServer({
+      data,
+      scenario: 'normal',
+      ledgerFile,
+    });
+    try {
+      expect(fs.existsSync(ledgerFile)).toBe(true);
+      expect(fs.readFileSync(ledgerFile, 'utf8')).toBe('');
+      expect(fs.statSync(ledgerFile).mode & 0o077).toBe(0);
+      expect(server.ledger).toHaveLength(0);
+    } finally {
+      await server.close();
+    }
+  });
   test('the actual stdio bridge initializes, lists tools and executes an audited call', async () => {
     const directory = fs.mkdtempSync(path.join(temp, 'bridge-'));
     const fixture = await startFixtureServer({

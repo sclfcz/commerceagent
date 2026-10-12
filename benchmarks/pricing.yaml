@@ -18,10 +18,10 @@ candidates:
     effective_date: 2026-10-12
     currency: CNY
     billing_region: cn-mainland
-    model_fingerprint: 863fcfac12c3672c1b791ff5ec6c2854865d52047305087d231ac59f5a72b283
-    input: 1.6
-    output: 6.4
-    cache_read: 0.16
-    cache_write: 2
-    reasoning: 6.4
-    source: https://www.qianwenai.com/models (cn-mainland official API price card; 20% promotion checked 2026-10-12; Anthropic cache-read mapped to explicit cache hit)
+    model_fingerprint: 48575ca716e534a5dc6c90c4dd92ad13c812f617c7a2cd90e4634145323d9685
+    input: 0.2
+    output: 0.8
+    cache_read: 0.02
+    cache_write: 0.25
+    reasoning: 0.8
+    source: https://www.qianwenai.com/models (cn-mainland official API price card; Anthropic cache-read mapped to explicit cache hit; checked 2026-10-12)

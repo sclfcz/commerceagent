@@ -1078,6 +1078,15 @@ describe('Promptfoo benchmark adapter', () => {
         promptfooResults,
       );
       expect(reassessPromptfoo(runDirectory).providerParityValid).toBe(false);
+      const traceFile = path.join(attemptDirectory, 'trace.json');
+      const failedTrace = JSON.parse(fs.readFileSync(traceFile, 'utf8'));
+      failedTrace.failure = 'upstream_error';
+      writeJson(traceFile, failedTrace);
+      fs.rmSync(path.join(attemptDirectory, 'fixture.jsonl'));
+      expect(reassessPromptfoo(runDirectory).results[0]).toMatchObject({
+        measurementFailure: 'upstream_error',
+        businessPass: null,
+      });
     } finally {
       fs.rmSync(runDirectory, { recursive: true, force: true });
     }

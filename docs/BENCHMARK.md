@@ -83,7 +83,7 @@ benchmark 锁文件中的 `tsx` 固定为 `4.23.15`，修复了其 esbuild 相�
 中国内地公开价来自[官方模型市场](https://www.qianwenai.com/models)，核对日期为 2026-10-12。
 `candidate-cn1` 的输入/输出/思考、缓存命中、显式缓存创建单价依次为 ¥0.8/¥2.7/¥0.1/¥1.25；
 `candidate-cn2` 使用当天展示的输入/输出/显式缓存创建/显式缓存命中价格
-¥1.6/¥6.4/¥2.0/¥0.16；Runner 的 `cache_read_input_tokens` 对应平台的显式缓存命中项。
+¥0.2/¥0.8/¥0.25/¥0.02；Runner 的 `cache_read_input_tokens` 对应平台的显式缓存命中项。
 费率按每百万 token 计。
 价格按请求次数对应的每次 usage 累加，失败尝试和重试也计入总成本；成功任务成本为总成本除以
 合格通过次数。只要价格或任一次 usage 不完整，总成本与成功任务成本都显示 `unknown`。Promptfoo

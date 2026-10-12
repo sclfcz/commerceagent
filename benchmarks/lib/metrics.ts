@@ -5,7 +5,7 @@ export interface MetricAttempt {
   measurementValid: boolean;
   qualityEligible: boolean;
   pass: boolean;
-  businessPass: boolean;
+  businessPass: boolean | null;
   businessChecks?: Record<string, boolean>;
   elapsedMs?: number | null;
   logicalRunMs?: number | null;
