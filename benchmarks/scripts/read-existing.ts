@@ -11,20 +11,27 @@ try {
       (provider.anthropicApiKey || provider.anthropicAuthToken),
   );
   process.send?.(
-    providers.map((provider, index) => ({
-      alias: `candidate-${index + 1}`,
-      model: provider.anthropicModel,
-      baseUrl: provider.anthropicBaseUrl || 'https://api.anthropic.com',
-      apiKeyEnv: `BENCH_IMPORTED_${index + 1}`,
-      credentialKind: provider.anthropicApiKey ? 'apiKey' : 'authToken',
-      credential: provider.anthropicApiKey || provider.anthropicAuthToken,
-      gatewayDeclared: false,
-      gateway: requiresGatewayAudit(
-        provider.anthropicBaseUrl || 'https://api.anthropic.com',
-        false,
-        provider.anthropicModel,
-      ),
-    })),
+    providers.map((provider, index) => {
+      const baseUrl = provider.anthropicBaseUrl || 'https://api.anthropic.com';
+      const billingRegion =
+        /^qwen/i.test(provider.anthropicModel || '') &&
+        ['maas.qianwenaiapi.com', 'dashscope.aliyuncs.com'].includes(
+          new URL(baseUrl).hostname,
+        )
+          ? 'cn-mainland'
+          : undefined;
+      return {
+        alias: `candidate-${index + 1}`,
+        model: provider.anthropicModel,
+        baseUrl,
+        apiKeyEnv: `BENCH_IMPORTED_${index + 1}`,
+        credentialKind: provider.anthropicApiKey ? 'apiKey' : 'authToken',
+        credential: provider.anthropicApiKey || provider.anthropicAuthToken,
+        gatewayDeclared: false,
+        gateway: requiresGatewayAudit(baseUrl, false, provider.anthropicModel),
+        ...(billingRegion ? { billingRegion } : {}),
+      };
+    }),
   );
 } catch {
   process.exitCode = 1;

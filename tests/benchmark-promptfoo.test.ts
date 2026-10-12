@@ -9,6 +9,7 @@ import { providerResponse } from '../benchmarks/promptfoo/provider.js';
 import {
   aggregatePromptfooCosts,
   calculateCost,
+  modelFingerprint,
 } from '../benchmarks/lib/pricing.js';
 import { importOpenCodeGoKey } from '../benchmarks/lib/opencode-go.js';
 import { importCandidateCredentials } from '../benchmarks/lib/local-credentials.js';
@@ -56,6 +57,7 @@ describe('Promptfoo benchmark adapter', () => {
         qualityEligible: true,
         pass: true,
         businessPass: true,
+        elapsedMs: repetition * 10,
       })),
       ...[1, 2, 3].map((repetition) => ({
         candidate: 'candidate-a',
@@ -74,6 +76,7 @@ describe('Promptfoo benchmark adapter', () => {
         qualityEligible: true,
         pass: true,
         businessPass: true,
+        elapsedMs: repetition * 10,
       })),
       {
         candidate: 'candidate-b',
@@ -83,6 +86,7 @@ describe('Promptfoo benchmark adapter', () => {
         qualityEligible: false,
         pass: false,
         businessPass: false,
+        elapsedMs: 10_000,
       },
     ];
     const report = summarizeMetrics(rows, {
@@ -102,12 +106,33 @@ describe('Promptfoo benchmark adapter', () => {
       ineligibleRate: 1 / 3,
       rankEligible: false,
       pass3: { passed: 0, failed: 0, undetermined: 3 },
+      latency: { elapsedMs: { p50: 10, p95: 20, coldStart: true } },
     });
     expect(report.candidates['candidate-c']).toMatchObject({
       attempts: 0,
       eligibleAttempts: 0,
       rankEligible: false,
       pass3: { passed: 0, failed: 0, undetermined: 3 },
+    });
+    expect(report.pairwise).toEqual({});
+  });
+
+  test('task completion follows businessPass and status accuracy is separate', () => {
+    const report = summarizeMetrics([
+      {
+        candidate: 'candidate-a',
+        caseId: 'case-1',
+        repetition: 1,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: false,
+        businessPass: false,
+        businessChecks: { status: true },
+      },
+    ]);
+    expect(report.candidates['candidate-a'].dimensionPassRates).toMatchObject({
+      completion: 0,
+      status_accuracy: 1,
     });
   });
 
@@ -153,6 +178,7 @@ describe('Promptfoo benchmark adapter', () => {
             pass3: { passed: 1, failed: 0, undetermined: 0 },
             dimensionPassRates: {
               completion: 1,
+              status_accuracy: 1,
               facts_evidence: 1,
               instruction: 1,
               tools: 1,
@@ -170,7 +196,7 @@ describe('Promptfoo benchmark adapter', () => {
       },
       privateCandidates: candidates,
     });
-    expect(summary.markdown).toContain('candidate-1');
+    expect(summary.markdown).toMatch(/\| candidate-[a-f0-9]{10} \|/);
     expect(summary.markdown).not.toContain('candidate-a');
     expect(validatePublicSummary(summary.markdown, candidates).valid).toBe(
       true,
@@ -185,6 +211,14 @@ describe('Promptfoo benchmark adapter', () => {
         candidates,
       ).valid,
     ).toBe(false);
+    expect(
+      validatePublicSummary(summary.markdown + ' candidate-a', candidates)
+        .valid,
+    ).toBe(false);
+    expect(
+      validatePublicSummary(summary.markdown + ' Qwen vendor label', candidates)
+        .valid,
+    ).toBe(false);
   });
 
   test('adds metadata-backed javascript assertions grouped by benchmark dimension', () => {
@@ -193,6 +227,7 @@ describe('Promptfoo benchmark adapter', () => {
       'identity',
       'measurement',
       'completion',
+      'status_accuracy',
       'facts_evidence',
       'instruction',
       'tools',
@@ -478,6 +513,7 @@ describe('Promptfoo benchmark adapter', () => {
         identity: 1,
         measurement: 1,
         completion: 0,
+        status_accuracy: 1,
         facts_evidence: 1,
         instruction: 1,
         tools: 1,
@@ -645,7 +681,7 @@ describe('Promptfoo benchmark adapter', () => {
     });
   });
 
-  test('returns null cost when any candidate rate is unknown', () => {
+  test('refuses unknown rates and alias prices bound to a different model or region', () => {
     const usage = {
       inputTokens: 1_000_000,
       outputTokens: 100,
@@ -653,27 +689,40 @@ describe('Promptfoo benchmark adapter', () => {
       cacheCreationInputTokens: 30,
       reasoningTokens: 10,
     };
-    expect(calculateCost(usage, undefined)).toBeNull();
+    const identity = {
+      model: 'model-a',
+      baseUrl: 'https://provider.example.test/anthropic',
+      billingRegion: 'cn-mainland',
+    };
+    const price = {
+      effective_date: '2026-10-12',
+      currency: 'CNY',
+      model_fingerprint: modelFingerprint(identity.model, identity.baseUrl)!,
+      billing_region: 'cn-mainland',
+      input: 1,
+      output: 2,
+      cache_read: 0.2,
+      cache_write: 1.2,
+      reasoning: 3,
+      source: 'synthetic test rate',
+    };
+    expect(calculateCost(usage, undefined, identity)).toBeNull();
     expect(
-      calculateCost(usage, {
-        input: 1,
-        output: 2,
-        cache_read: 0.2,
-        cache_write: 1.2,
-      }),
+      calculateCost(usage, { ...price, cache_write: undefined }, identity),
+    ).toBeNull();
+    expect(calculateCost(usage, price, identity)).toBeCloseTo(1.00025);
+    expect(
+      calculateCost(usage, price, { ...identity, model: 'model-b' }),
     ).toBeNull();
     expect(
-      calculateCost(usage, {
-        effective_date: '2026-10-11',
-        currency: 'USD',
-        input: 1,
-        output: 2,
-        cache_read: 0.2,
-        cache_write: 1.2,
-        reasoning: 3,
-        source: 'synthetic test rate',
+      calculateCost(usage, price, { ...identity, billingRegion: 'us-west' }),
+    ).toBeNull();
+    expect(
+      calculateCost(usage, price, {
+        ...identity,
+        baseUrl: 'https://other-provider.example.test/anthropic',
       }),
-    ).toBeCloseTo(1.00025);
+    ).toBeNull();
   });
 
   test('keeps aggregate candidate cost unknown if any attempt is unpriced', () => {

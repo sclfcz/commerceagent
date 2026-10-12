@@ -430,6 +430,22 @@ describe('context observation and candidate configuration', () => {
     expect(parseCandidates([valid])).toEqual([
       { ...valid, gatewayDeclared: false, gateway: true },
     ]);
+    expect(
+      parseCandidates([
+        {
+          ...valid,
+          alias: 'candidate-cn1',
+          model: 'qwen3.8-flash',
+          baseUrl: 'https://maas.qianwenaiapi.com/apps/anthropic',
+          gateway: false,
+          billingRegion: 'cn-mainland',
+        },
+      ])[0],
+    ).toMatchObject({
+      gateway: false,
+      gatewayDeclared: false,
+      billingRegion: 'cn-mainland',
+    });
     expect(() => parseCandidates([valid, valid])).toThrow();
     expect(() =>
       parseCandidates([

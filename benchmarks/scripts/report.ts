@@ -27,7 +27,12 @@ export function createBenchmarkReport(runDirectory: string) {
   ) as Record<string, any>;
   const candidates = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'candidates.json'), 'utf8'),
-  ) as Array<{ alias: string; model: string; baseUrl: string }>;
+  ) as Array<{
+    alias: string;
+    model: string;
+    baseUrl: string;
+    billingRegion?: string;
+  }>;
   const usedCases = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'cases.used.json'), 'utf8'),
   ) as Array<{ id: string }>;
@@ -60,8 +65,9 @@ export function createBenchmarkReport(runDirectory: string) {
         (row: Record<string, any>) => row.candidate === alias,
       );
       const rate = pricing.candidates?.[alias];
+      const candidate = candidates.find((item) => item.alias === alias);
       const attemptCosts = rows.map((row: Record<string, any>) =>
-        calculateCost(row.usage, rate),
+        calculateCost(row.usage, rate, candidate),
       );
       const known =
         attemptCosts.length > 0 &&

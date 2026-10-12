@@ -62,9 +62,21 @@ export async function main() {
     fs.readFileSync(path.join(benchmarkDirectory, 'cases/spike.yaml'), 'utf8'),
   ) as SpikeCase[];
   const smoke = process.argv.includes('--smoke');
+  const caseLimitIndex = process.argv.indexOf('--case-limit');
+  const caseLimit =
+    caseLimitIndex >= 0 ? Number(process.argv[caseLimitIndex + 1]) : null;
+  if (
+    caseLimit !== null &&
+    (!Number.isSafeInteger(caseLimit) ||
+      caseLimit < 1 ||
+      caseLimit > allCases.length)
+  )
+    throw new Error('invalid_case_limit');
   const cases = smoke
     ? allCases.slice(0, candidates.length > 1 ? 2 : 1)
-    : allCases;
+    : caseLimit === null
+      ? allCases
+      : allCases.slice(0, caseLimit);
   const repetitions = smoke ? 1 : 3;
   const tests = buildTests(cases, candidates, repetitions);
   privateJson(path.join(runDirectory, 'cases.used.json'), cases);

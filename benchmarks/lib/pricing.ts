@@ -1,15 +1,39 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { parse } from 'yaml';
 
 export interface CandidatePrice {
   effective_date: string;
   currency: string;
-  input: number;
-  output: number;
-  cache_read: number;
-  cache_write: number;
-  reasoning: number;
+  input: number | null;
+  output: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+  reasoning: number | null;
   source: string;
+  model_fingerprint: string;
+  billing_region: string;
+}
+
+export interface PricingIdentity {
+  model: string;
+  baseUrl: string;
+  billingRegion?: string;
+}
+
+export function modelFingerprint(
+  model: string,
+  baseUrl: string,
+): string | null {
+  try {
+    const origin = new URL(baseUrl).origin;
+    return crypto
+      .createHash('sha256')
+      .update(`${model}|${origin}`, 'utf8')
+      .digest('hex');
+  } catch {
+    return null;
+  }
 }
 
 export function loadPrices(
@@ -30,34 +54,44 @@ export function calculateCost(
     reasoningTokens: number;
   } | null,
   price: Partial<CandidatePrice> | undefined,
+  identity: PricingIdentity | undefined,
 ): number | null {
-  if (!usage || !price) return null;
-  const fields: Array<keyof CandidatePrice> = [
-    'input',
-    'output',
-    'cache_read',
-    'cache_write',
-    'reasoning',
-  ];
+  if (!usage || !price || !identity) return null;
+  const fingerprint = modelFingerprint(identity.model, identity.baseUrl);
   if (
-    fields.some(
-      (field) =>
-        typeof price[field] !== 'number' ||
-        !Number.isFinite(price[field]) ||
-        price[field]! < 0,
-    )
+    !fingerprint ||
+    price.model_fingerprint !== fingerprint ||
+    !identity.billingRegion ||
+    price.billing_region !== identity.billingRegion
   )
     return null;
   const ordinaryOutput = Math.max(
     0,
     usage.outputTokens - usage.reasoningTokens,
   );
+  const requiredRates: Array<[keyof CandidatePrice, number]> = [
+    ['input', usage.inputTokens],
+    ['output', ordinaryOutput],
+    ['cache_read', usage.cacheReadInputTokens],
+    ['cache_write', usage.cacheCreationInputTokens],
+    ['reasoning', usage.reasoningTokens],
+  ];
+  if (
+    requiredRates.some(
+      ([field, tokens]) =>
+        tokens > 0 &&
+        (typeof price[field] !== 'number' ||
+          !Number.isFinite(price[field]) ||
+          price[field]! < 0),
+    )
+  )
+    return null;
   return (
-    (usage.inputTokens * price.input! +
-      ordinaryOutput * price.output! +
-      usage.cacheReadInputTokens * price.cache_read! +
-      usage.cacheCreationInputTokens * price.cache_write! +
-      usage.reasoningTokens * price.reasoning!) /
+    (usage.inputTokens * (price.input ?? 0) +
+      ordinaryOutput * (price.output ?? 0) +
+      usage.cacheReadInputTokens * (price.cache_read ?? 0) +
+      usage.cacheCreationInputTokens * (price.cache_write ?? 0) +
+      usage.reasoningTokens * (price.reasoning ?? 0)) /
     1_000_000
   );
 }

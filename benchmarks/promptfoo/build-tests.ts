@@ -42,7 +42,12 @@ function benchmarkAssertions() {
     {
       type: 'javascript' as const,
       metric: 'completion',
-      value: `!!${meta} && ${meta}.measurementValid === true && ${meta}.businessPass === true && !!${meta}.business && ${meta}.business.status === true`,
+      value: `!!${meta} && ${meta}.measurementValid === true && ${meta}.businessPass === true`,
+    },
+    {
+      type: 'javascript' as const,
+      metric: 'status_accuracy',
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.status === true`,
     },
     {
       type: 'javascript' as const,

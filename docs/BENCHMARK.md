@@ -30,6 +30,7 @@ Promptfoo 入口复用同一套 `attempt()` 驱动，可运行两条 smoke 用�
 ```bash
 npm run bench:run -- --existing --smoke
 npm run bench:run -- --existing
+npm run bench:run -- --case-limit 2
 npm run bench:report -- promptfoo-<run-id>
 ```
 
@@ -38,7 +39,8 @@ Promptfoo 及其依赖安装在独立的 `benchmarks/` npm 项目和 lockfile �
 
 `bench:report` 会再次校验实际顺序，并从每次运行的证据重新计算分类，输出私有的
 `report.private.json` 与脱敏的 `report.public.md`。公开报告先扫描候选配置中的模型 ID、完整
-Endpoint 和主机名；发现匹配就拒绝写出。公开标签会重新映射为 `candidate-1` 等匿名编号。
+Endpoint 和主机名；发现匹配就拒绝写出。公开标签会重新映射为运行级匿名的
+`candidate-<hash>` 编号，并避免与私有别名重合。
 命令行只打印汇总指标，不打印模型回复或 Provider 私有配置。
 
 可像 spike 一样通过 `BENCH_CANDIDATES_FILE` 配置多个候选；`--existing --with-opencode-go`
@@ -68,10 +70,21 @@ Node 支持范围不因此改变。执行器在 Promptfoo 載入前设置 `PROMP
 config、结果和原始输出都放在被忽略的 `benchmarks/results/<run-id>/promptfoo/`；
 只可在本机执行 `promptfoo view` 查看。
 
-候选价格填在 `benchmarks/pricing.yaml`，以 `candidate-*` 别名配置，各栏是每百万 token 单价。
-当前候选对应的中国内地公开标价记录于 2026-10-12：输入 ¥0.8、输出/思考 ¥2.7、缓存命中 ¥0.1、
-显式缓存创建 ¥1.25。来源为[官方模型平台价目页](https://help.aliyun.com/zh/model-studio/model-pricing)，
-本地候选与匿名别名的对应关系只保存在忽略文件中。
+benchmark 锁文件中的 `tsx` 固定为 `4.23.15`，修复了其 esbuild 相关 moderate 公告。Promptfoo
+依赖链仍有 7 项 high 公告，涉及代理、FTP 与 JKS 集成。当前 benchmark 不配置或使用这些传输和
+密钥库功能，只在本机运行；此残余风险已记录并接受，升级前应复核上游修复，不能把 benchmark 环境
+作为通用服务或开放给不可信用户。
+
+候选价格填在 `benchmarks/pricing.yaml`，条目除别名外还带 `sha256(model + "|" + origin)` 指纹和
+计费区域。报告只有在指纹和区域都与本次候选相符时才使用费率；同一别名换了模型、API origin 或区域，
+成本一律为 `unknown`。这些指纹不包含可读模型名或完整 Endpoint。本地候选与匿名别名的对应关系只
+保存在忽略文件中。
+
+中国内地公开价来自[官方模型市场](https://www.qianwenai.com/models)，核对日期为 2026-10-12。
+`candidate-cn1` 的输入/输出/思考、缓存命中、显式缓存创建单价依次为 ¥0.8/¥2.7/¥0.1/¥1.25；
+`candidate-cn2` 使用当天展示的输入/输出/显式缓存创建/显式缓存命中价格
+¥1.6/¥6.4/¥2.0/¥0.16；Runner 的 `cache_read_input_tokens` 对应平台的显式缓存命中项。
+费率按每百万 token 计。
 价格按请求次数对应的每次 usage 累加，失败尝试和重试也计入总成本；成功任务成本为总成本除以
 合格通过次数。只要价格或任一次 usage 不完整，总成本与成功任务成本都显示 `unknown`。Promptfoo
 界面的成本列无效，可能显示零或沿用运行时估算；不要据此比较模型。唯一成本口径是
@@ -79,9 +92,12 @@ config、结果和原始输出都放在被忽略的 `benchmarks/results/<run-id>
 
 报告指标按以下口径计算：首次通过率只看第 1 次重复且合格的尝试；平均通过率使用全部合格尝试。
 pass^3 要求同一用例的三次尝试都合格且都通过；存在不合格或缺少重复时，该用例计为「不可判定」。
-不合格尝试不进入质量分母；不合格率超过 10% 的候选不参与排名。模型差异按共同合格的用例配对
-重抽样 10,000 次，给出通过率差的 95% 区间；区间包含 0 时只报告「未观察到显著差异」。延迟
-分别报告端到端 `elapsedMs` 与模型逻辑 `logicalRunMs` 的 p50/p95，均标记为冷启动。
+任务完成率是 `businessPass` 的通过率；`status_accuracy` 单独报告 status 字段的正确率。
+facts/evidence、instruction 和 tools 各维度按所有对应检查的通过次数除以检查总次数，采用微平均。
+不合格尝试不进入质量分母；不合格率超过 10% 的候选不参与排名或成对比较。模型差异按共同合格的
+用例配对重抽样 10,000 次，给出通过率差的 95% 区间；未做多重比较校正，区间包含 0 时只报告
+「未观察到显著差异」。延迟 p50/p95 只统计测量有效的尝试，分别报告端到端 `elapsedMs` 与模型逻辑
+`logicalRunMs`，均标记为冷启动。
 
 该模式先复制 `data/config/claude-provider.json` 与加密密钥到私有结果目录，再在隔离子进程
 读取副本，生产配置不会被迁移或修改。`BENCH_EXISTING_DATA_DIR` 可指定源数据目录。

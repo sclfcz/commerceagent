@@ -106,7 +106,7 @@ export function summarizeMetrics(
       );
       const first = eligible.filter((row) => row.repetition === 1);
       const dimensions = {
-        completion: ['status'],
+        status_accuracy: ['status'],
         facts_evidence: ['facts', 'evidence'],
         instruction: ['format', 'injection'],
         tools: [
@@ -130,6 +130,9 @@ export function summarizeMetrics(
           return [dimension, opportunities ? passed / opportunities : null];
         }),
       );
+      dimensionPassRates.completion = eligible.length
+        ? eligible.filter((row) => row.businessPass).length / eligible.length
+        : null;
       const pass3 = allCaseIds.map((caseId) => {
         const repeated = attempts.filter((row) => row.caseId === caseId);
         if (
@@ -150,6 +153,7 @@ export function summarizeMetrics(
         : null;
       const percentilePair = (field: 'elapsedMs' | 'logicalRunMs') => {
         const values = attempts
+          .filter((row) => row.measurementValid)
           .map((row) => row[field])
           .filter(
             (value): value is number =>
@@ -191,21 +195,45 @@ export function summarizeMetrics(
       ];
     }),
   );
+  const comparisonAliases = aliases.filter(
+    (alias) => candidates[alias].rankEligible,
+  );
   const pairwise: Record<string, unknown> = {};
-  for (let leftIndex = 0; leftIndex < aliases.length; leftIndex++) {
+  const comparisonOmissions: Array<{
+    left: string;
+    right: string;
+    reason: string;
+  }> = [];
+  for (let leftIndex = 0; leftIndex < comparisonAliases.length; leftIndex++) {
     for (
       let rightIndex = leftIndex + 1;
-      rightIndex < aliases.length;
+      rightIndex < comparisonAliases.length;
       rightIndex++
     ) {
-      const left = aliases[leftIndex];
-      const right = aliases[rightIndex];
-      pairwise[`${left}__vs__${right}`] = bootstrapPairedDifference(
+      const left = comparisonAliases[leftIndex];
+      const right = comparisonAliases[rightIndex];
+      const estimate = bootstrapPairedDifference(
         rows.filter((row) => row.candidate === left),
         rows.filter((row) => row.candidate === right),
         bootstrapIterations,
       );
+      if (estimate.pairedCases === 0) {
+        comparisonOmissions.push({
+          left,
+          right,
+          reason: 'no_shared_eligible_cases',
+        });
+        continue;
+      }
+      pairwise[`${left}__vs__${right}`] = estimate;
     }
   }
-  return { candidates, pairwise };
+  return {
+    candidates,
+    pairwise,
+    excludedFromPairwise: aliases.filter(
+      (alias) => !candidates[alias].rankEligible,
+    ),
+    comparisonOmissions,
+  };
 }

@@ -304,7 +304,7 @@ export default class CommerceAgentProvider implements ApiProvider {
     );
     const usage = result.usage || null;
     const price = run.prices[candidateAlias];
-    const cost = calculateCost(usage, price);
+    const cost = calculateCost(usage, price, candidate);
     const response = providerResponse(
       result,
       actualExecutionIndex,

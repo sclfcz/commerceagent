@@ -1,6 +1,8 @@
+import crypto from 'node:crypto';
+
 export function validatePublicSummary(
   markdown: string,
-  candidates: Array<{ model: string; baseUrl: string }>,
+  candidates: Array<{ alias: string; model: string; baseUrl: string }>,
 ) {
   const secrets = candidates.flatMap((candidate) => {
     const host = (() => {
@@ -10,11 +12,20 @@ export function validatePublicSummary(
         return '';
       }
     })();
-    return [candidate.model, candidate.baseUrl, host].filter(
+    return [candidate.alias, candidate.model, candidate.baseUrl, host].filter(
       (value) => value.length >= 4,
     );
   });
-  const leaked = [...new Set(secrets)].filter((value) =>
+  const sensitiveKeywords = [
+    'qwen',
+    'deepseek',
+    'kimi',
+    'glm',
+    'claude',
+    'gpt',
+  ];
+  const needles = [...new Set([...secrets, ...sensitiveKeywords])];
+  const leaked = needles.filter((value) =>
     markdown.toLowerCase().includes(value.toLowerCase()),
   );
   return { valid: leaked.length === 0, leaked };
@@ -31,15 +42,22 @@ export function renderPublicSummary(input: {
 }) {
   const aliases = Object.keys(input.metrics.candidates).sort();
   const publicAlias = new Map(
-    aliases.map((_, index) => [aliases[index], `candidate-${index + 1}`]),
+    aliases.map((alias) => [
+      alias,
+      `candidate-${crypto
+        .createHash('sha256')
+        .update(`${input.runId}|${alias}`)
+        .digest('hex')
+        .slice(0, 10)}`,
+    ]),
   );
   const lines = [
     `# Benchmark summary: ${input.runId}`,
     '',
     'Only quality-eligible attempts are included in pass rates. Candidates with more than 10% ineligible attempts are excluded from ranking. Latencies are cold starts.',
     '',
-    '| Candidate | Ranking | Eligible / total | Ineligible | First pass | Average pass | Completion | Facts/evidence | Instruction | Tools | pass^3 passed / failed / undetermined | Total cost | Cost per successful task | elapsed p50 / p95 ms | logical p50 / p95 ms |',
-    '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    '| Candidate | Ranking | Eligible / total | Ineligible | First pass | Average pass | Task completion | Status accuracy | Facts/evidence | Instruction | Tools | pass^3 passed / failed / undetermined | Total cost | Cost per successful task | elapsed p50 / p95 ms | logical p50 / p95 ms |',
+    '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
   ];
   for (const alias of aliases) {
     const metrics = input.metrics.candidates[alias];
@@ -55,16 +73,21 @@ export function renderPublicSummary(input: {
         ? 'unknown'
         : `${cost.currency} ${cost.costPerSuccessfulTask.toFixed(6)}`;
     lines.push(
-      `| ${publicAlias.get(alias)} | ${metrics.rankEligible ? 'eligible' : 'excluded'} | ${metrics.eligibleAttempts}/${metrics.attempts} | ${rate(metrics.ineligibleRate)} | ${rate(metrics.firstPassRate)} | ${rate(metrics.averagePassRate)} | ${rate(metrics.dimensionPassRates.completion)} | ${rate(metrics.dimensionPassRates.facts_evidence)} | ${rate(metrics.dimensionPassRates.instruction)} | ${rate(metrics.dimensionPassRates.tools)} | ${metrics.pass3.passed} / ${metrics.pass3.failed} / ${metrics.pass3.undetermined} | ${totalCost} | ${successCost} | ${metrics.latency.elapsedMs.p50 ?? 'unknown'} / ${metrics.latency.elapsedMs.p95 ?? 'unknown'} | ${metrics.latency.logicalRunMs.p50 ?? 'unknown'} / ${metrics.latency.logicalRunMs.p95 ?? 'unknown'} |`,
+      `| ${publicAlias.get(alias)} | ${metrics.rankEligible ? 'eligible' : 'excluded'} | ${metrics.eligibleAttempts}/${metrics.attempts} | ${rate(metrics.ineligibleRate)} | ${rate(metrics.firstPassRate)} | ${rate(metrics.averagePassRate)} | ${rate(metrics.dimensionPassRates.completion)} | ${rate(metrics.dimensionPassRates.status_accuracy)} | ${rate(metrics.dimensionPassRates.facts_evidence)} | ${rate(metrics.dimensionPassRates.instruction)} | ${rate(metrics.dimensionPassRates.tools)} | ${metrics.pass3.passed} / ${metrics.pass3.failed} / ${metrics.pass3.undetermined} | ${totalCost} | ${successCost} | ${metrics.latency.elapsedMs.p50 ?? 'unknown'} / ${metrics.latency.elapsedMs.p95 ?? 'unknown'} | ${metrics.latency.logicalRunMs.p50 ?? 'unknown'} / ${metrics.latency.logicalRunMs.p95 ?? 'unknown'} |`,
     );
   }
   lines.push(
     '',
     '## Paired comparisons',
     '',
-    'Differences use paired case bootstrap intervals (10,000 resamples); intervals containing zero indicate no observed significant difference.',
+    'Differences use paired case bootstrap intervals (10,000 resamples, without multiple-comparison correction); intervals containing zero indicate no observed significant difference. Candidates excluded from ranking are omitted from paired comparisons.',
     '',
   );
+  if (Object.keys(input.metrics.pairwise).length === 0)
+    lines.push(
+      'No paired comparisons: fewer than two ranking-eligible candidates with shared eligible cases.',
+      '',
+    );
   for (const [key, interval] of Object.entries(input.metrics.pairwise)) {
     const [left, right] = key.split('__vs__');
     const label = `${publicAlias.get(left)} vs ${publicAlias.get(right)}`;

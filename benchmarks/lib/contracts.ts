@@ -26,6 +26,7 @@ export interface Candidate {
   apiKeyEnv: string;
   gatewayDeclared: boolean;
   gateway: boolean;
+  billingRegion?: string;
   credentialKind?: 'apiKey' | 'authToken';
 }
 export interface ToolCall {
@@ -136,6 +137,12 @@ export function parseCandidates(input: unknown): Candidate[] {
       throw new Error('candidate_config');
     aliases.add(raw.alias);
     if (
+      raw.billingRegion !== undefined &&
+      (typeof raw.billingRegion !== 'string' ||
+        !/^[a-z0-9-]+$/.test(raw.billingRegion))
+    )
+      throw new Error('candidate_config');
+    if (
       raw.credentialKind !== undefined &&
       raw.credentialKind !== 'apiKey' &&
       raw.credentialKind !== 'authToken'
@@ -157,6 +164,9 @@ export function parseCandidates(input: unknown): Candidate[] {
           : raw.gateway,
         raw.model,
       ),
+      ...(typeof raw.billingRegion === 'string'
+        ? { billingRegion: raw.billingRegion }
+        : {}),
       ...(raw.credentialKind ? { credentialKind: raw.credentialKind } : {}),
     };
   });
