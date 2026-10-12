@@ -170,7 +170,8 @@ snake_case、camelCase 和省略输入字段测试全部失败。
   官方候选 `candidate-qwen` 身份核验通过 2/2、质量合格 2/2；`candidate-go` 为
   `gateway_pending` 2/2，不进入质量排名。Promptfoo 五组断言结果 4/4 通过。
   两个候选均没有定价，报告成本保持 `null`；Promptfoo UI 的成本列不作为费用来源。
-- 缓存重分类计费修复独立提交为 `7571478`。阶段 2 benchmark 实现提交为 `eb29204`。
+- 缓存重分类计费修复独立提交为 `7571478`。阶段 2 首次接入提交为 `eb29204`，
+  依赖隔离与独立重判修复提交为 `60d5ed9`。
   最新 `make test` 为 **2,989 项通过、24 项跳过**；`make typecheck`、`make build`、
   benchmark 类型检查、格式检查、`docs:check` 均通过。
 
