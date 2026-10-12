@@ -22,6 +22,18 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import Database from 'better-sqlite3';
 import { reassessPromptfoo } from '../benchmarks/lib/reassess-promptfoo.js';
+import {
+  bootstrapPairedDifference,
+  summarizeMetrics,
+} from '../benchmarks/lib/metrics.js';
+import { profilePromptHashes } from '../benchmarks/lib/context.js';
+import { buildAgentProfilePrompt } from '../src/agent-profile-prompts.js';
+import { hash } from '../benchmarks/lib/contracts.js';
+import {
+  renderPublicSummary,
+  validatePublicSummary,
+} from '../benchmarks/lib/public-report.js';
+import { createBenchmarkReport } from '../benchmarks/scripts/report.js';
 
 const candidates = [
   { alias: 'candidate-a' },
@@ -34,9 +46,151 @@ const cases = [
 ] as SpikeCase[];
 
 describe('Promptfoo benchmark adapter', () => {
+  test('metrics exclude ineligible attempts and mark incomplete pass^3 as undetermined', () => {
+    const rows = [
+      ...[1, 2, 3].map((repetition) => ({
+        candidate: 'candidate-a',
+        caseId: 'case-1',
+        repetition,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: true,
+        businessPass: true,
+      })),
+      ...[1, 2, 3].map((repetition) => ({
+        candidate: 'candidate-a',
+        caseId: 'case-2',
+        repetition,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: repetition !== 2,
+        businessPass: repetition !== 2,
+      })),
+      ...[1, 2].map((repetition) => ({
+        candidate: 'candidate-b',
+        caseId: 'case-1',
+        repetition,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: true,
+        businessPass: true,
+      })),
+      {
+        candidate: 'candidate-b',
+        caseId: 'case-1',
+        repetition: 3,
+        measurementValid: false,
+        qualityEligible: false,
+        pass: false,
+        businessPass: false,
+      },
+    ];
+    const report = summarizeMetrics(rows, {
+      caseIds: ['case-1', 'case-2', 'case-3'],
+      candidateAliases: ['candidate-c'],
+    });
+    expect(report.candidates['candidate-a']).toMatchObject({
+      eligibleAttempts: 6,
+      firstPassRate: 1,
+      averagePassRate: 5 / 6,
+      rankEligible: true,
+      pass3: { passed: 1, failed: 1, undetermined: 1 },
+    });
+    expect(report.candidates['candidate-b']).toMatchObject({
+      eligibleAttempts: 2,
+      ineligibleAttempts: 1,
+      ineligibleRate: 1 / 3,
+      rankEligible: false,
+      pass3: { passed: 0, failed: 0, undetermined: 3 },
+    });
+    expect(report.candidates['candidate-c']).toMatchObject({
+      attempts: 0,
+      eligibleAttempts: 0,
+      rankEligible: false,
+      pass3: { passed: 0, failed: 0, undetermined: 3 },
+    });
+  });
+
+  test('paired bootstrap resamples shared case IDs and is deterministic', () => {
+    const make = (candidate: string, passes: boolean[]) =>
+      passes.map((pass, index) => ({
+        candidate,
+        caseId: `case-${index}`,
+        repetition: 1,
+        measurementValid: true,
+        qualityEligible: true,
+        pass,
+        businessPass: pass,
+      }));
+    const left = make('candidate-a', [true, true, false, false]);
+    const right = make('candidate-b', [true, false, false, false]);
+    const a = bootstrapPairedDifference(left, right, 10_000, 7);
+    expect(a).toEqual(bootstrapPairedDifference(left, right, 10_000, 7));
+    expect(a.pairedCases).toBe(4);
+    expect(a.difference).toBe(0.25);
+    expect(a.lower95).toBeLessThanOrEqual(a.difference);
+    expect(a.upper95).toBeGreaterThanOrEqual(a.difference);
+  });
+
+  test('public report leak checker rejects model names and endpoint hosts', () => {
+    const candidates = [
+      {
+        alias: 'candidate-a',
+        model: 'private-model-xyz',
+        baseUrl: 'https://private.example.test/anthropic',
+      },
+    ];
+    const summary = renderPublicSummary({
+      runId: 'test-run',
+      metrics: {
+        candidates: {
+          'candidate-a': {
+            attempts: 3,
+            eligibleAttempts: 3,
+            ineligibleRate: 0,
+            firstPassRate: 1,
+            averagePassRate: 1,
+            pass3: { passed: 1, failed: 0, undetermined: 0 },
+            dimensionPassRates: {
+              completion: 1,
+              facts_evidence: 1,
+              instruction: 1,
+              tools: 1,
+            },
+            latency: {
+              elapsedMs: { p50: 2, p95: 3 },
+              logicalRunMs: { p50: 1, p95: 2 },
+            },
+          },
+        },
+        pairwise: {},
+      },
+      costs: {
+        'candidate-a': { totalCost: null, costPerSuccessfulTask: null },
+      },
+      privateCandidates: candidates,
+    });
+    expect(summary.markdown).toContain('candidate-1');
+    expect(summary.markdown).not.toContain('candidate-a');
+    expect(validatePublicSummary(summary.markdown, candidates).valid).toBe(
+      true,
+    );
+    expect(
+      validatePublicSummary(summary.markdown + ' private-model-xyz', candidates)
+        .valid,
+    ).toBe(false);
+    expect(
+      validatePublicSummary(
+        summary.markdown + ' private.example.test',
+        candidates,
+      ).valid,
+    ).toBe(false);
+  });
+
   test('adds metadata-backed javascript assertions grouped by benchmark dimension', () => {
     const row = buildTests(cases.slice(0, 1), candidates.slice(0, 1), 1)[0];
     expect(row.assert.map((assertion) => assertion.metric)).toEqual([
+      'identity',
       'measurement',
       'completion',
       'facts_evidence',
@@ -46,8 +200,8 @@ describe('Promptfoo benchmark adapter', () => {
     expect(
       row.assert.every((assertion) => assertion.type === 'javascript'),
     ).toBe(true);
-    expect(row.assert[0].value).toContain('context.metadata.measurementValid');
-    expect(row.assert[1].value).toContain('context.metadata.businessPass');
+    expect(row.assert[1].value).toContain('context.metadata.measurementValid');
+    expect(row.assert[2].value).toContain('context.metadata.businessPass');
   });
 
   test('persists repetition before comparing Promptfoo result metadata', () => {
@@ -266,7 +420,8 @@ describe('Promptfoo benchmark adapter', () => {
               callApi: async () => ({
                 output: 'synthetic response',
                 metadata: {
-                  gates: { contextVerified: true },
+                  gatewayVerificationRequired: false,
+                  gates: { contextVerified: true, modelIdentity: true },
                   measurementValid: true,
                   businessPass: false,
                   business: {
@@ -320,6 +475,7 @@ describe('Promptfoo benchmark adapter', () => {
         },
       });
       expect(evaluationResult.namedScores).toMatchObject({
+        identity: 1,
         measurement: 1,
         completion: 0,
         facts_evidence: 1,
@@ -565,20 +721,13 @@ describe('Promptfoo benchmark adapter', () => {
     fs.mkdirSync(path.join(dataDirectory, 'db'), { recursive: true });
     const writeJson = (file: string, value: unknown) =>
       fs.writeFileSync(file, JSON.stringify(value) + '\n');
-    const caseRow = {
-      id: 'policy-check',
-      scenario: 'normal',
-      prompt: 'What is the return rule?',
-      expected: {
-        status: 'answered',
-        facts: { days: 30 },
-        evidence: ['POLICY-1'],
-      },
-      requiredTools: [
-        { name: 'search_policy', arguments: { topic: 'returns' } },
-      ],
-      maxCalls: 1,
-    } as SpikeCase;
+    const sourceCases = parse(
+      fs.readFileSync(
+        path.join(process.cwd(), 'benchmarks/cases/spike.yaml'),
+        'utf8',
+      ),
+    ) as SpikeCase[];
+    const caseRow = sourceCases[1];
     const candidate = {
       alias: 'candidate-a',
       model: 'claude-3-5-sonnet',
@@ -588,34 +737,60 @@ describe('Promptfoo benchmark adapter', () => {
     };
     const call = {
       sequence: 1,
-      name: 'search_policy',
-      arguments: { topic: 'returns' },
-      result: { days: 30, evidence_id: 'POLICY-1' },
+      name: 'get_order',
+      arguments: { order_id: 'ORD-MISSING' },
+      result: null,
       success: true,
     };
     const output = JSON.stringify({
-      status: 'answered',
-      facts: { days: 30 },
-      evidence: ['POLICY-1'],
+      status: 'not_found',
+      facts: {},
+      evidence: [],
     });
     const trace = {
       output,
       failure: null,
       reason: 'completed',
-      tools: [{ name: 'mcp__commerce_fixture__search_policy' }],
-    };
-    const contextExpected = {
-      renderedProfileHash: 'rendered-profile',
-      canonicalProfileHash: 'canonical-profile',
-      profileId: 'profile-1',
-      version: 1,
-      identityHash: 'identity-hash',
-      runtimePolicyHash: 'runtime-policy-hash',
-      skillsHash: 'skills-hash',
-      mcpHash: 'mcp-hash',
-      sessionId: 'session-1',
       turnId: 'turn-1',
+      tools: [{ name: 'mcp__commerce_fixture__get_order' }],
     };
+    const profileDefinition = parse(
+      fs.readFileSync(
+        path.join(process.cwd(), 'benchmarks/profile.yaml'),
+        'utf8',
+      ),
+    ) as Record<string, any>;
+    const dbProfile = {
+      id: 'profile-1',
+      name: profileDefinition.name,
+      version: 1,
+      identity_hash: 'identity-hash',
+      identity_prompt: profileDefinition.identity_prompt,
+      soul_prompt: profileDefinition.soul_prompt,
+      agents_prompt: profileDefinition.agents_prompt,
+      tools_prompt: profileDefinition.tools_prompt,
+      prompt_mode: profileDefinition.prompt_mode,
+      runtime_policy: JSON.stringify({
+        reasoning: profileDefinition.runtime_policy.reasoning,
+        context: {
+          ...profileDefinition.runtime_policy.context,
+          auto_compact_window: 0,
+          auto_compact_percentage: 0,
+        },
+        skills: profileDefinition.runtime_policy.skills,
+        mcp: profileDefinition.runtime_policy.mcp,
+      }),
+    };
+    const promptHashes = profilePromptHashes(
+      {
+        id: dbProfile.id,
+        name: dbProfile.name,
+        version: dbProfile.version,
+        identityHash: dbProfile.identity_hash,
+        identityPrompt: buildAgentProfilePrompt(profileDefinition),
+      },
+      false,
+    );
     const contextActual = {
       executionMode: 'container',
       turnId: 'turn-1',
@@ -624,7 +799,7 @@ describe('Promptfoo benchmark adapter', () => {
         id: 'profile-1',
         version: 1,
         identityHash: 'identity-hash',
-        runtimePolicyHash: 'runtime-policy-hash',
+        runtimePolicyHash: hash(JSON.parse(dbProfile.runtime_policy)),
       },
       skills: { manifestHash: 'skills-hash', selectedSkillIds: [] },
       mcp: { manifestHash: 'mcp-hash', serverIds: ['commerce_fixture'] },
@@ -632,7 +807,7 @@ describe('Promptfoo benchmark adapter', () => {
         blocks: [
           {
             id: 'agent-profile',
-            hash: 'rendered-profile',
+            hash: promptHashes.renderedProfileHash,
             owner: 'agent_profile',
           },
           { id: 'platform', hash: 'platform-hash', owner: 'platform' },
@@ -665,6 +840,11 @@ describe('Promptfoo benchmark adapter', () => {
     };
     const db = new Database(path.join(dataDirectory, 'db/messages.db'));
     db.exec(`
+      CREATE TABLE agent_profiles (
+        id TEXT, owner_user_id TEXT, name TEXT, identity_prompt TEXT,
+        soul_prompt TEXT, agents_prompt TEXT, tools_prompt TEXT, prompt_mode TEXT,
+        runtime_policy TEXT, identity_hash TEXT, version INTEGER
+      );
       CREATE TABLE usage_events (
         user_id TEXT, group_folder TEXT, agent_id TEXT, event_id TEXT,
         created_at INTEGER, input_tokens INTEGER, output_tokens INTEGER,
@@ -678,6 +858,21 @@ describe('Promptfoo benchmark adapter', () => {
         reasoning_output_tokens INTEGER
       );
     `);
+    db.prepare(
+      'INSERT INTO agent_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(
+      dbProfile.id,
+      'user-1',
+      dbProfile.name,
+      dbProfile.identity_prompt,
+      dbProfile.soul_prompt,
+      dbProfile.agents_prompt,
+      dbProfile.tools_prompt,
+      dbProfile.prompt_mode,
+      dbProfile.runtime_policy,
+      dbProfile.identity_hash,
+      dbProfile.version,
+    );
     const usageRow = [
       'user-1',
       'group-1',
@@ -701,8 +896,12 @@ describe('Promptfoo benchmark adapter', () => {
     try {
       writeJson(path.join(runDirectory, 'candidates.json'), [candidate]);
       writeJson(path.join(runDirectory, 'cases.used.json'), [caseRow]);
+      writeJson(path.join(runDirectory, 'summary.json'), {
+        stage: 'smoke',
+        scope: 'synthetic-query-analysis',
+      });
       writeJson(path.join(runDirectory, 'execution-sequence.jsonl'), {
-        caseId: 'policy-check',
+        caseId: 'missing-order',
         repetition: 1,
         candidateAlias: 'candidate-a',
         executionIndex: 1,
@@ -714,7 +913,7 @@ describe('Promptfoo benchmark adapter', () => {
         actualAttempts: 1,
         expected: [
           {
-            caseId: 'policy-check',
+            caseId: 'missing-order',
             repetition: 1,
             candidateAlias: 'candidate-a',
             executionIndex: 1,
@@ -722,7 +921,7 @@ describe('Promptfoo benchmark adapter', () => {
         ],
         actual: [
           {
-            caseId: 'policy-check',
+            caseId: 'missing-order',
             repetition: 1,
             candidateAlias: 'candidate-a',
             executionIndex: 1,
@@ -741,7 +940,7 @@ describe('Promptfoo benchmark adapter', () => {
       );
       writeJson(path.join(attemptDirectory, 'context-evidence.json'), {
         actual: contextActual,
-        expected: contextExpected,
+        expected: { renderedProfileHash: 'tampered-runtime-expectation' },
       });
       writeJson(path.join(attemptDirectory, 'fresh-state.json'), freshState);
       writeJson(path.join(runDirectory, 'promptfoo/results.json'), [
@@ -750,7 +949,7 @@ describe('Promptfoo benchmark adapter', () => {
           response: {
             metadata: {
               candidate: 'candidate-a',
-              caseId: 'policy-check',
+              caseId: 'missing-order',
               repetition: 1,
               actualExecutionIndex: 1,
               expectedExecutionIndex: 1,
@@ -798,6 +997,25 @@ describe('Promptfoo benchmark adapter', () => {
       expect(fs.existsSync(path.join(runDirectory, 'reassessed.json'))).toBe(
         true,
       );
+      const stage3Report = createBenchmarkReport(runDirectory);
+      expect(stage3Report.metrics.candidates['candidate-a']).toMatchObject({
+        eligibleAttempts: 1,
+        firstPassRate: 1,
+        averagePassRate: 1,
+        pass3: { passed: 0, failed: 0, undetermined: 1 },
+      });
+      expect(stage3Report.costByCandidate['candidate-a']).toMatchObject({
+        totalCost: null,
+        costPerSuccessfulTask: null,
+        known: false,
+      });
+      expect(stage3Report.publicReport.leakageCheckPassed).toBe(true);
+      const publicMarkdown = fs.readFileSync(
+        path.join(runDirectory, 'report.public.md'),
+        'utf8',
+      );
+      expect(publicMarkdown).not.toContain(candidate.model);
+      expect(publicMarkdown).not.toContain('api.anthropic.com');
 
       const promptfooResults = JSON.parse(
         fs.readFileSync(

@@ -1,10 +1,14 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
+import { parse } from 'yaml';
+import { buildAgentProfilePrompt } from '../../src/agent-profile-prompts.js';
 import { auditFixtureCalls } from '../assertions/audit.js';
 import { assertSpike } from '../assertions/spike.js';
 import { FreshStateTracker } from './fresh-state.js';
-import { officialVendor } from './identity.js';
+import { officialVendor, requiresGatewayAudit } from './identity.js';
 import { readUsage } from './usage.js';
 import { countClassifications, summarizeCandidates } from './assessment.js';
 import {
@@ -14,7 +18,11 @@ import {
   type SpikeCase,
   type ToolCall,
 } from './contracts.js';
-import { verifyContext, type ContextEvidence } from './context.js';
+import {
+  profilePromptHashes,
+  verifyContext,
+  type ContextEvidence,
+} from './context.js';
 import {
   validateAssessmentParity,
   validateExecutionOrder,
@@ -78,6 +86,100 @@ function readLedger(file: string): ToolCall[] {
     .map((line) => JSON.parse(line) as ToolCall);
 }
 
+function deriveExpectedContext(
+  databaseFile: string,
+  profileFile: string,
+  actual: ContextEvidence | null,
+  fresh: Record<string, any>,
+  trace: Record<string, any>,
+) {
+  if (
+    !actual?.agentProfile ||
+    !actual.skills.manifestHash ||
+    !actual.mcp.manifestHash
+  )
+    return null;
+  const profileDefinition = parse(
+    fs.readFileSync(profileFile, 'utf8'),
+  ) as Record<string, any>;
+  const db = new Database(databaseFile, {
+    readonly: true,
+    fileMustExist: true,
+  });
+  try {
+    const profile = db
+      .prepare(
+        'SELECT * FROM agent_profiles WHERE id = ? AND owner_user_id = ?',
+      )
+      .get(actual.agentProfile.id, fresh.userId) as
+      | Record<string, any>
+      | undefined;
+    if (!profile) return null;
+    const runtimePolicy = JSON.parse(profile.runtime_policy);
+    const sourcePolicy = profileDefinition.runtime_policy ?? {};
+    const expectedPolicy = {
+      reasoning: { effort: sourcePolicy.reasoning?.effort ?? 'inherit' },
+      context: {
+        source: sourcePolicy.context?.source ?? 'managed',
+        auto_compact_window: sourcePolicy.context?.auto_compact_window ?? 0,
+        auto_compact_percentage:
+          sourcePolicy.context?.auto_compact_percentage ?? 0,
+      },
+      skills: {
+        mode: sourcePolicy.skills?.mode ?? 'inherit',
+        ids: sourcePolicy.skills?.ids ?? [],
+        ...(sourcePolicy.skills?.host
+          ? {
+              host: {
+                mode: sourcePolicy.skills.host.mode ?? 'disabled',
+                ids: sourcePolicy.skills.host.ids ?? [],
+              },
+            }
+          : {}),
+      },
+      mcp: {
+        mode: sourcePolicy.mcp?.mode ?? 'inherit',
+        ids: sourcePolicy.mcp?.ids ?? [],
+      },
+    };
+    const promptsMatch =
+      profile.name === profileDefinition.name &&
+      Number(profile.version) === 1 &&
+      profile.identity_prompt === (profileDefinition.identity_prompt ?? '') &&
+      profile.soul_prompt === (profileDefinition.soul_prompt ?? '') &&
+      profile.agents_prompt === (profileDefinition.agents_prompt ?? '') &&
+      profile.tools_prompt === (profileDefinition.tools_prompt ?? '') &&
+      profile.prompt_mode === profileDefinition.prompt_mode &&
+      JSON.stringify(runtimePolicy) === JSON.stringify(expectedPolicy);
+    const hashes = profilePromptHashes(
+      {
+        id: profile.id,
+        name: profile.name,
+        version: profile.version,
+        identityHash: profile.identity_hash,
+        identityPrompt: buildAgentProfilePrompt(profile),
+      },
+      profile.prompt_mode === 'append',
+    );
+    if (!promptsMatch) return null;
+    return {
+      ...hashes,
+      profileId: profile.id,
+      version: Number(profile.version),
+      identityHash: profile.identity_hash,
+      runtimePolicyHash: hash(runtimePolicy),
+      // Skills and MCP hashes are captured in the independent run-context
+      // stream snapshot. Their allowed IDs are checked against profile.yaml.
+      skillsHash: actual.skills.manifestHash,
+      mcpHash: actual.mcp.manifestHash,
+      sessionId: fresh.sessionId,
+      turnId: trace.turnId ?? null,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 export function reassessPromptfoo(runDirectory: string) {
   const executionFile = path.join(runDirectory, 'execution-sequence.jsonl');
   const execution = fs
@@ -91,9 +193,22 @@ export function reassessPromptfoo(runDirectory: string) {
   const candidates = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'candidates.json'), 'utf8'),
   ) as Array<Record<string, any>>;
-  const cases = JSON.parse(
+  const copiedCases = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'cases.used.json'), 'utf8'),
   ) as SpikeCase[];
+  const profileFile = fileURLToPath(
+    new URL('../profile.yaml', import.meta.url),
+  );
+  const caseFile = fileURLToPath(
+    new URL('../cases/spike.yaml', import.meta.url),
+  );
+  const sourceCases = parse(fs.readFileSync(caseFile, 'utf8')) as SpikeCase[];
+  const sourceCaseById = new Map(sourceCases.map((test) => [test.id, test]));
+  const casesMatchSource =
+    copiedCases.length > 0 &&
+    copiedCases.every(
+      (test) => hash(test) === hash(sourceCaseById.get(test.id) ?? null),
+    );
   const promptfooFile = path.join(runDirectory, 'promptfoo/results.json');
   const promptfooResults = JSON.parse(fs.readFileSync(promptfooFile, 'utf8'));
   const promptfooByIndex = new Map<number, Record<string, any>>();
@@ -132,9 +247,16 @@ export function reassessPromptfoo(runDirectory: string) {
     const candidate = candidates.find(
       (entry) => entry.alias === row.candidateAlias,
     );
-    const test = cases.find((entry) => entry.id === row.caseId);
+    const test = sourceCases.find((entry) => entry.id === row.caseId);
     if (!candidate || !test) throw new Error('assessment_identity_missing');
     const missingEvidence = sourceFiles.some((file) => !fs.existsSync(file));
+    const gateway = requiresGatewayAudit(
+      candidate.baseUrl,
+      typeof candidate.gatewayDeclared === 'boolean'
+        ? candidate.gatewayDeclared
+        : candidate.gateway === true,
+      candidate.model,
+    );
     if (missingEvidence) {
       evidenceComplete = false;
       reassessed.push({
@@ -149,10 +271,10 @@ export function reassessPromptfoo(runDirectory: string) {
         businessFailure: null,
         failure: 'collection_incomplete',
         businessPass: false,
-        gatewayVerificationRequired: candidate.gateway,
+        gatewayVerificationRequired: gateway,
         sdkModelMatches: false,
         identityBasis:
-          officialVendor(candidate.baseUrl) && !candidate.gateway
+          officialVendor(candidate.baseUrl) && !gateway
             ? 'official_endpoint_sdk'
             : 'gateway_pending',
         gates: {
@@ -176,12 +298,18 @@ export function reassessPromptfoo(runDirectory: string) {
     const ledger = readLedger(ledgerFile);
     const contextEvidence = JSON.parse(
       fs.readFileSync(contextFile, 'utf8'),
-    ) as { actual: ContextEvidence | null; expected: Record<string, any> };
-    const context = verifyContext(
-      contextEvidence.actual,
-      contextEvidence.expected as Parameters<typeof verifyContext>[1],
-    );
+    ) as { actual: ContextEvidence | null; expected?: Record<string, any> };
     const freshEvidence = JSON.parse(fs.readFileSync(freshStateFile, 'utf8'));
+    const expectedContext = deriveExpectedContext(
+      databaseFile,
+      profileFile,
+      contextEvidence.actual,
+      freshEvidence,
+      trace,
+    );
+    const context = expectedContext
+      ? verifyContext(contextEvidence.actual, expectedContext)
+      : { verified: false, observedPromptHashes: [], fingerprint: null };
     const freshState = freshStates.verify(freshEvidence);
     const folderRows = readUsage(
       databaseFile,
@@ -212,7 +340,7 @@ export function reassessPromptfoo(runDirectory: string) {
       auditMatched: audit.matched,
       onlyAllowedTools: business.checks.onlyAllowedTools,
       businessPass: business.pass,
-      gateway: candidate.gateway,
+      gateway,
     });
     reassessed.push({
       candidate: candidate.alias,
@@ -221,20 +349,25 @@ export function reassessPromptfoo(runDirectory: string) {
       executionIndex: index,
       ...assessment,
       businessPass: business.pass,
-      gatewayVerificationRequired: candidate.gateway,
+      businessChecks: business.checks,
+      caseDefinitionVerified: casesMatchSource,
+      gatewayVerificationRequired: gateway,
       sdkModelMatches: folderRows.identityVerified,
       identityBasis:
-        officialVendor(candidate.baseUrl) && !candidate.gateway
+        officialVendor(candidate.baseUrl) && !gateway
           ? 'official_endpoint_sdk'
           : 'gateway_pending',
       gates: {
-        modelIdentity: folderRows.identityVerified && !candidate.gateway,
+        modelIdentity: folderRows.identityVerified && !gateway,
         independentFixture: audit.matched,
         freshState,
         terminalClassified: trace.reason !== null,
         usageReconciled: usageComplete && folderRows.scopeIsolated,
         contextVerified: context.verified,
       },
+      usage: folderRows.usage,
+      elapsedMs: trace.elapsedMs ?? null,
+      logicalRunMs: trace.logicalRunMs ?? null,
       sourceHashes: Object.fromEntries(
         sourceFiles.map((file) => [path.basename(file), sha256(file)]),
       ),
@@ -254,10 +387,17 @@ export function reassessPromptfoo(runDirectory: string) {
     fs.readFileSync(new URL('./fresh-state.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('./usage.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('./context.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('./metrics.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('./public-report.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(
+      new URL('../promptfoo/build-tests.ts', import.meta.url),
+      'utf8',
+    ),
     fs.readFileSync(
       new URL('./reassess-promptfoo.ts', import.meta.url),
       'utf8',
     ),
+    fs.readFileSync(new URL('../scripts/report.ts', import.meta.url), 'utf8'),
   ]);
   const report = {
     schemaVersion: 1,
@@ -269,6 +409,8 @@ export function reassessPromptfoo(runDirectory: string) {
       promptfooResults: sha256(promptfooFile),
       candidateMatrix: sha256(path.join(runDirectory, 'candidates.json')),
       cases: sha256(path.join(runDirectory, 'cases.used.json')),
+      caseDefinition: sha256(caseFile),
+      profileDefinition: sha256(profileFile),
     },
     reassessmentRevision: revisionHash,
     evidenceComplete,
@@ -289,6 +431,7 @@ export function reassessPromptfoo(runDirectory: string) {
     identityByCandidate: summarizeCandidates(reassessed as any),
     invalidRun:
       !evidenceComplete ||
+      !casesMatchSource ||
       !order.valid ||
       !independentParity.valid ||
       reassessed.length !== savedOrder.expectedAttempts,

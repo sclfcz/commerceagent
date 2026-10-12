@@ -177,3 +177,31 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 
 阶段 2 验收完成，阶段 3 尚未开始。进入阶段 3 前仍需为候选补充带来源和生效日期的价格，
 并计划更大样本的身份已核验候选运行；Judge 与 holdout 不属于本阶段。
+
+### 阶段 3：指标与脱敏报告（2026-10-12）
+
+- Promptfoo 独立子项目升级到 `0.124.1`，版本和 lockfile 一致，根目录产品 lockfile 未变。
+  安装审计输出为 9 项公告（2 moderate、7 high、0 critical）；当前网络下单独重查公告接口未返回
+  可解析结果，仍需在 registry 可用时复核公告明细。
+- 独立重判不再采用 `context-evidence.json.expected` 或候选的派生 `gateway` 值；Profile 提示词和
+  Runtime Policy 从版本库 `profile.yaml` 推导，并与该次全新数据库里的 Profile 行核对。用例定义
+  与仓库源文件比对，业务预期直接取源用例。端点身份通过 `requiresGatewayAudit` 再计算。原始
+  `result.json` 保持不动。
+- 新增 `identity` Promptfoo metric：SDK 身份门槛未通过的候选在界面显示失败。新增阶段 3 报告：
+  合格样本分母、首次通过率、平均通过率、pass^3（不完整重复标为不可判定）、分维度通过率、冷启动
+  时延、成本和 10,000 次按 case 配对 bootstrap 区间。无效运行不参与排名；候选不合格率超过 10%
+  也不参与排名。成本含失败尝试与重试；任一价格或 usage 未知时总成本为 `null`。
+- 价格表新增带币种、生效记录日期和来源的匿名候选费率，来自官方模型平台价目页的中国内地公开价。
+  只有本地匿名别名与价格键精确匹配时才计价，缺失费率仍显示未知。Promptfoo UI 成本列明确标为无效，
+  应以独立报告为准。
+- 公开 Markdown 只使用 `candidate-1` 等重映射别名、指标、区间和样本数；在写出前扫描候选模型 ID、
+  完整地址与主机名，发现匹配即失败。合成测试覆盖不合格分母、pass^3 不可判定、配对重抽样、价格
+  未知和模型名/地址泄漏拦截。benchmark 定向测试 **17 项通过**，benchmark TypeScript 检查通过。
+- 升级后的真实 smoke 使用已固定的本地镜像和现有唯一候选，共 1 次调用：证据完整、执行顺序和
+  Provider parity 通过，测量与业务断言通过；身份为网关待核验，因此质量合格数为 0，Promptfoo 的
+  `identity` 分数为 0，整体 Promptfoo 结果失败符合门槛。重算报告将该别名价格判为未知。Smoke 当时
+  的 Promptfoo metadata 曾带运行时成本值；这不作为费用证据，原始结果保留，`bench:report` 独立
+  重算为未知成本。
+
+阶段 3 实现和 smoke 验证完成，等待验收。当前 smoke 没有已核验身份的合格样本；正式质量结论需要
+之后使用具备相应本地凭据的已核验候选运行 3 次重复矩阵。Judge、holdout 与业务集扩充仍未开始。

@@ -19,6 +19,7 @@ export function openCodeGoCandidate(existing: Candidate[]): Candidate {
     model,
     baseUrl: 'https://opencode.ai/zen/go',
     apiKeyEnv: 'BENCH_OPENCODE_GO_API_KEY',
+    gatewayDeclared: true,
     gateway: true,
   };
 }

@@ -11,7 +11,7 @@
     "report": "tsx scripts/report.ts"
   },
   "devDependencies": {
-    "promptfoo": "0.121.20",
+    "promptfoo": "0.124.1",
     "tsx": "4.19.0"
   }
 }

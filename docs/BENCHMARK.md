@@ -36,8 +36,10 @@ npm run bench:report -- promptfoo-<run-id>
 Promptfoo 及其依赖安装在独立的 `benchmarks/` npm 项目和 lockfile 中；根目录 lockfile 保持
 产品依赖版本，不会被 benchmark 工具链重新解析。
 
-`bench:report` 会再次校验实际顺序，并分别汇总测量失败、业务失败和候选身份状态；它不会
-打印模型回复或 Provider 私有配置。
+`bench:report` 会再次校验实际顺序，并从每次运行的证据重新计算分类，输出私有的
+`report.private.json` 与脱敏的 `report.public.md`。公开报告先扫描候选配置中的模型 ID、完整
+Endpoint 和主机名；发现匹配就拒绝写出。公开标签会重新映射为 `candidate-1` 等匿名编号。
+命令行只打印汇总指标，不打印模型回复或 Provider 私有配置。
 
 可像 spike 一样通过 `BENCH_CANDIDATES_FILE` 配置多个候选；`--existing --with-opencode-go`
 会附加已配置的 Go 候选。Promptfoo 测试行在运行前生成，按重复轮次、用例批次及
@@ -48,12 +50,15 @@ fixture 账本摘要、上下文 hash、耗时和执行序号。测量失败会�
 执行结束由独立重判路径重新计算门槛和分类，与 Promptfoo metadata 逐项核对；不一致时整次运行无效。
 没有 SDK 直连备援。
 
-每条测试行都带有基于 `context.metadata` 的 JavaScript 断言，按 `measurement`、`completion`、
-`facts_evidence`、`instruction` 和 `tools` 分组。`bench:report` 从私有的 `trace.json`、
+每条测试行都带有基于 `context.metadata` 的 JavaScript 断言，按 `identity`、`measurement`、
+`completion`、`facts_evidence`、`instruction` 和 `tools` 分组。网关候选会在 `identity` 组失败，
+因此 Promptfoo 界面也不能把它显示为可排名候选。`bench:report` 从私有的 `trace.json`、
 fixture 账本、`messages.db`、Context 与 fresh-state 证据重新计算业务和测量分类，再与 Promptfoo
-metadata 比较；重判只写 `reassessed.json`，不覆盖原始 `result.json`。
+metadata 比较；用例从仓库用例源文件复核，Profile 期望值从 `profile.yaml` 与全新数据库里的
+Profile 记录推导，端点身份重新调用白名单规则判断。`context-evidence.json.expected` 不参与重判。
+重判只写新的报告文件，不覆盖原始 `result.json`。
 
-Promptfoo 固定为 `0.121.20`，该版本要求 Node `^20.20.0 || >=22.22.0`；产品其他部分的
+Promptfoo 固定为 `0.124.1`，该版本要求 Node `^20.20.0 || >=22.22.0`；产品其他部分的
 Node 支持范围不因此改变。执行器在 Promptfoo 載入前设置 `PROMPTFOO_CONFIG_DIR`、
 `PROMPTFOO_CACHE_PATH`、`PROMPTFOO_CACHE_ENABLED=false`、
 `PROMPTFOO_DISABLE_TELEMETRY=1`、`PROMPTFOO_DISABLE_UPDATE=1` 和
@@ -64,9 +69,19 @@ config、结果和原始输出都放在被忽略的 `benchmarks/results/<run-id>
 只可在本机执行 `promptfoo view` 查看。
 
 候选价格填在 `benchmarks/pricing.yaml`，以 `candidate-*` 别名配置，各栏是每百万 token 单价。
-某候选没有价格或缺少任何计费字段时，成本为 `null`，不以零代替未知。第一版没有预设真实
-候选价格，因此通常只会提供 usage 和 `null` 成本。Promptfoo 的聚合成本列在 Provider 未提供
-cost 时会显示 `0`，这不代表免费，也不用于分析；应以 `bench:report` 的成本汇总为准。
+当前候选对应的中国内地公开标价记录于 2026-10-12：输入 ¥0.8、输出/思考 ¥2.7、缓存命中 ¥0.1、
+显式缓存创建 ¥1.25。来源为[官方模型平台价目页](https://help.aliyun.com/zh/model-studio/model-pricing)，
+本地候选与匿名别名的对应关系只保存在忽略文件中。
+价格按请求次数对应的每次 usage 累加，失败尝试和重试也计入总成本；成功任务成本为总成本除以
+合格通过次数。只要价格或任一次 usage 不完整，总成本与成功任务成本都显示 `unknown`。Promptfoo
+界面的成本列无效，可能显示零或沿用运行时估算；不要据此比较模型。唯一成本口径是
+`bench:report` 从独立 usage 证据与当前定价表重新计算的结果。
+
+报告指标按以下口径计算：首次通过率只看第 1 次重复且合格的尝试；平均通过率使用全部合格尝试。
+pass^3 要求同一用例的三次尝试都合格且都通过；存在不合格或缺少重复时，该用例计为「不可判定」。
+不合格尝试不进入质量分母；不合格率超过 10% 的候选不参与排名。模型差异按共同合格的用例配对
+重抽样 10,000 次，给出通过率差的 95% 区间；区间包含 0 时只报告「未观察到显著差异」。延迟
+分别报告端到端 `elapsedMs` 与模型逻辑 `logicalRunMs` 的 p50/p95，均标记为冷启动。
 
 该模式先复制 `data/config/claude-provider.json` 与加密密钥到私有结果目录，再在隔离子进程
 读取副本，生产配置不会被迁移或修改。`BENCH_EXISTING_DATA_DIR` 可指定源数据目录。

@@ -1,5 +1,14 @@
-# Candidate aliases only. Missing or incomplete entries produce null cost.
+# Candidate aliases only. Alias-to-model mapping is held in local ignored config.
 # Rates are currency units per million tokens.
-effective_date: 2026-10-11
-currency: USD
-candidates: {}
+effective_date: 2026-10-12
+currency: CNY
+candidates:
+  candidate-cn1:
+    effective_date: 2026-10-12
+    currency: CNY
+    input: 0.8
+    output: 2.7
+    cache_read: 0.1
+    cache_write: 1.25
+    reasoning: 2.7
+    source: https://help.aliyun.com/zh/model-studio/model-pricing (China mainland list rates; reasoning billed with output; checked 2026-10-12)

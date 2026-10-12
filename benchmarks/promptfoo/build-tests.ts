@@ -31,6 +31,11 @@ function benchmarkAssertions() {
   return [
     {
       type: 'javascript' as const,
+      metric: 'identity',
+      value: `!!${meta} && ${meta}.gatewayVerificationRequired === false && !!${meta}.gates && ${meta}.gates.modelIdentity === true`,
+    },
+    {
+      type: 'javascript' as const,
       metric: 'measurement',
       value: `!!${meta} && ${meta}.measurementValid === true`,
     },
@@ -166,7 +171,9 @@ export function validateAssessmentParity(
     if (mismatchFields.length)
       return { valid: false, mismatchIndex: index + 1, mismatchFields };
     const expectedSuccess =
-      attempt.measurementValid === true && attempt.businessPass === true;
+      attempt.measurementValid === true &&
+      attempt.businessPass === true &&
+      attempt.qualityEligible === true;
     if (
       typeof promptfooResults[index].success === 'boolean' &&
       promptfooResults[index].success !== expectedSuccess

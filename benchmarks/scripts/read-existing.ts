@@ -18,6 +18,7 @@ try {
       apiKeyEnv: `BENCH_IMPORTED_${index + 1}`,
       credentialKind: provider.anthropicApiKey ? 'apiKey' : 'authToken',
       credential: provider.anthropicApiKey || provider.anthropicAuthToken,
+      gatewayDeclared: false,
       gateway: requiresGatewayAudit(
         provider.anthropicBaseUrl || 'https://api.anthropic.com',
         false,

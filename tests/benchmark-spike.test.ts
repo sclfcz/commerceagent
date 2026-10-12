@@ -427,7 +427,9 @@ describe('context observation and candidate configuration', () => {
       apiKeyEnv: 'BENCH_KEY',
       gateway: false,
     };
-    expect(parseCandidates([valid])).toEqual([{ ...valid, gateway: true }]);
+    expect(parseCandidates([valid])).toEqual([
+      { ...valid, gatewayDeclared: false, gateway: true },
+    ]);
     expect(() => parseCandidates([valid, valid])).toThrow();
     expect(() =>
       parseCandidates([

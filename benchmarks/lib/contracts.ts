@@ -24,6 +24,7 @@ export interface Candidate {
   model: string;
   baseUrl: string;
   apiKeyEnv: string;
+  gatewayDeclared: boolean;
   gateway: boolean;
   credentialKind?: 'apiKey' | 'authToken';
 }
@@ -145,7 +146,17 @@ export function parseCandidates(input: unknown): Candidate[] {
       model: raw.model,
       baseUrl: raw.baseUrl,
       apiKeyEnv: raw.apiKeyEnv,
-      gateway: requiresGatewayAudit(raw.baseUrl, raw.gateway, raw.model),
+      gatewayDeclared:
+        typeof raw.gatewayDeclared === 'boolean'
+          ? raw.gatewayDeclared
+          : raw.gateway,
+      gateway: requiresGatewayAudit(
+        raw.baseUrl,
+        typeof raw.gatewayDeclared === 'boolean'
+          ? raw.gatewayDeclared
+          : raw.gateway,
+        raw.model,
+      ),
       ...(raw.credentialKind ? { credentialKind: raw.credentialKind } : {}),
     };
   });
