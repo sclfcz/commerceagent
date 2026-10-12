@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR, GROUPS_DIR } from './config.js';
 import {
+  applyBenchmarkAlwaysLoadedMcpServer,
   buildEffectiveMcpManifest,
   loadPluginMcpDefinitions,
 } from './effective-mcp-manifest.js';
@@ -281,10 +282,14 @@ export function buildAgentCapabilityPreview(options: {
     : hostContext
       ? loadHostClaudeMcpServers(externalClaudeDir)
       : {};
-  const mcpManifest = buildEffectiveMcpManifest({
-    ...mergeMcpServerLayers(contextMcpServers, runtimeManagedServers),
-    ...pluginMcpDefinitions,
-  });
+  const mcpServers = applyBenchmarkAlwaysLoadedMcpServer(
+    {
+      ...mergeMcpServerLayers(contextMcpServers, runtimeManagedServers),
+      ...pluginMcpDefinitions,
+    },
+    process.env.COMMERCEAGENT_BENCHMARK_ALWAYS_LOAD_MCP_SERVER,
+  );
+  const mcpManifest = buildEffectiveMcpManifest(mcpServers);
 
   const notes = [
     '系统附加能力与宿主机、项目上下文是叠加关系，不会因继承宿主机配置而被替换。',

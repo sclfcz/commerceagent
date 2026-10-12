@@ -32,6 +32,7 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const {
+  applyBenchmarkAlwaysLoadedMcpServer,
   applyContainerProxyEnvLines,
   buildContainerArgs,
   detectContainerHostIdentity,
@@ -39,6 +40,28 @@ const {
   resolveContainerHostIdentity,
 } = await import('../src/container-runner.js');
 const { readContainerProxyConfig } = await import('../src/config.js');
+
+describe('benchmark MCP startup override', () => {
+  test('forces eager initialization only for the configured eval server', () => {
+    const servers = {
+      commerce_fixture: { command: 'node', args: ['fixture-bridge.mjs'] },
+      other: { command: 'node', args: ['other.mjs'] },
+    };
+    const resolved = applyBenchmarkAlwaysLoadedMcpServer(
+      servers,
+      'commerce_fixture',
+    );
+    expect(resolved.commerce_fixture.alwaysLoad).toBe(true);
+    expect(resolved.other).toEqual(servers.other);
+    expect(servers.commerce_fixture).not.toHaveProperty('alwaysLoad');
+  });
+  test('keeps normal MCP definitions unchanged without the benchmark flag', () => {
+    const servers = { commerce_fixture: { command: 'node' } };
+    expect(applyBenchmarkAlwaysLoadedMcpServer(servers, undefined)).toBe(
+      servers,
+    );
+  });
+});
 
 const mounts = [
   {

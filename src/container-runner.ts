@@ -26,6 +26,7 @@ import {
 } from './config.js';
 import { logger } from './logger.js';
 import {
+  applyBenchmarkAlwaysLoadedMcpServer,
   buildEffectiveMcpManifest,
   loadPluginMcpDefinitions,
 } from './effective-mcp-manifest.js';
@@ -371,6 +372,8 @@ export interface ContainerInput {
   isHome?: boolean;
   isAdminHome?: boolean;
   isScheduledTask?: boolean;
+  /** Isolated evaluation flag. Never set for customer workspaces. */
+  benchmarkMode?: boolean;
   /**
    * Internal per-runner HMAC secret delivered only in the stdin bootstrap.
    * Never expose this in environment variables, files, logs, prompts, or IPC.
@@ -810,8 +813,14 @@ function resolveRuntimeMcpServers(
     externalClaudeDir: getEffectiveExternalDir(),
     includeHostClaudeContext: shouldIncludeHostClaudeContext(agentProfile),
   });
-  return mergeMcpServerLayers(context, managed);
+  const merged = mergeMcpServerLayers(context, managed);
+  return applyBenchmarkAlwaysLoadedMcpServer(
+    merged,
+    process.env.COMMERCEAGENT_BENCHMARK_ALWAYS_LOAD_MCP_SERVER,
+  );
 }
+
+export { applyBenchmarkAlwaysLoadedMcpServer } from './effective-mcp-manifest.js';
 
 function buildRuntimeMcpManifest(
   group: RegisteredGroup,
@@ -2231,6 +2240,7 @@ export async function runContainerAgent(
       // the caller's `input` object (queue/log/retry paths reuse the same ref).
       const dockerInput: ContainerInput = {
         ...input,
+        benchmarkMode: process.env.COMMERCEAGENT_BENCHMARK_MODE === '1',
         workspaceMemoryMutationSigningSecret,
         workspaceMemoryRunnerInstanceId,
         plugins: group.created_by
@@ -3290,6 +3300,7 @@ export async function runHostAgent(
       // plugins.
       const hostInput: ContainerInput = {
         ...input,
+        benchmarkMode: process.env.COMMERCEAGENT_BENCHMARK_MODE === '1',
         workspaceMemoryMutationSigningSecret,
         workspaceMemoryRunnerInstanceId,
         plugins: preparedHostPlugins,

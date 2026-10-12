@@ -33,6 +33,10 @@ import {
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { pruneProcessedHistoryImagesInTranscript as pruneProcessedHistoryImagesInTranscriptFile } from './history-image-prune.js';
 import { getChannelFromJid } from './channel-prefixes.js';
+import {
+  resolveAllowedTools,
+  resolveAvailableBuiltInTools,
+} from './eval-tool-policy.js';
 
 import type {
   ContainerInput,
@@ -213,6 +217,18 @@ const DEFAULT_ALLOWED_TOOLS = [
   'NotebookEdit',
   'mcp__commerceagent__*',
 ];
+function allowedToolsForInput(containerInput: ContainerInput): string[] {
+  return resolveAllowedTools(
+    containerInput.benchmarkMode === true,
+    DEFAULT_ALLOWED_TOOLS,
+  );
+}
+
+function availableBuiltInToolsForInput(
+  containerInput: ContainerInput,
+): string[] | undefined {
+  return resolveAvailableBuiltInTools(containerInput.benchmarkMode === true);
+}
 
 let activeAgentMcpPolicy = resolveAgentMcpPolicy('inherit');
 
@@ -1925,6 +1941,7 @@ async function runQueryAttempt(
   let queryRef: Pick<Query, 'interrupt'> | null = null;
   let messageCount = 0;
   let resultCount = 0;
+  let benchmarkMcpRuntimeCaptured = false;
   let postResultInterruptRequested = false;
   // SDK transport is not ready until system/init is received. Piping user messages
   // before init causes "ProcessTransport is not ready for writing" unhandled rejection.
@@ -2624,6 +2641,9 @@ async function runQueryAttempt(
       ...(sessionId && resumeAt ? { resumeSessionAt: resumeAt } : {}),
       systemPrompt,
       allowedTools,
+      ...(availableBuiltInToolsForInput(containerInput) !== undefined
+        ? { tools: availableBuiltInToolsForInput(containerInput) }
+        : {}),
       ...(effectiveDisallowedTools && {
         disallowedTools: effectiveDisallowedTools,
       }),
@@ -3128,6 +3148,31 @@ async function runQueryAttempt(
       if (message.type === 'system' && message.subtype === 'init') {
         newSessionId = message.session_id;
         log(`Session initialized: ${newSessionId}`);
+        if (containerInput.benchmarkMode) {
+          const mcpServers = Array.isArray(message.mcp_servers)
+            ? message.mcp_servers
+                .filter(
+                  (server: any) => server && typeof server.name === 'string',
+                )
+                .map((server: any) => ({
+                  name: server.name,
+                  status:
+                    typeof server.status === 'string'
+                      ? server.status
+                      : 'unknown',
+                }))
+            : [];
+          const fixtureTools = Array.isArray(message.tools)
+            ? message.tools.filter(
+                (name: unknown) =>
+                  typeof name === 'string' &&
+                  name.startsWith('mcp__commerce_fixture__'),
+              )
+            : [];
+          log(
+            `[BENCHMARK_MCP_INIT] ${JSON.stringify({ mcpServers, fixtureTools })}`,
+          );
+        }
         // Mark transport ready and drain any IPC messages that arrived before init.
         sdkTransportReady = true;
         scheduleIpcPoll();
@@ -3232,6 +3277,37 @@ async function runQueryAttempt(
 
       if (message.type === 'result') {
         resultCount++;
+        if (containerInput.benchmarkMode && !benchmarkMcpRuntimeCaptured) {
+          benchmarkMcpRuntimeCaptured = true;
+          try {
+            const statuses = await runSdkControlWithTimeout(
+              'mcpServerStatus',
+              () => q.mcpServerStatus(),
+              SDK_CONTEXT_USAGE_TIMEOUT_MS,
+            );
+            const mcpServers = statuses.map((server) => ({
+              name: server.name,
+              status: server.status,
+            }));
+            const fixtureTools = statuses
+              .filter((server) => server.name === 'commerce_fixture')
+              .flatMap((server) =>
+                (server.tools ?? []).map((tool) =>
+                  tool.name.startsWith('mcp__commerce_fixture__')
+                    ? tool.name
+                    : `mcp__commerce_fixture__${tool.name}`,
+                ),
+              )
+              .filter((name) => name.startsWith('mcp__commerce_fixture__'));
+            log(
+              `[BENCHMARK_MCP_RUNTIME] ${JSON.stringify({ mcpServers, fixtureTools })}`,
+            );
+          } catch {
+            // Keep the marker present but fail closed when the SDK status API
+            // cannot provide evidence; never print error text or config.
+            log('[BENCHMARK_MCP_RUNTIME] {"mcpServers":[],"fixtureTools":[]}');
+          }
+        }
         const textResult =
           'result' in message ? (message as { result?: string }).result : null;
         const resultSubtype = message.subtype;
@@ -4097,7 +4173,7 @@ async function main(): Promise<void> {
         workspaceMemoryInstructions,
         resumeAt,
         true,
-        DEFAULT_ALLOWED_TOOLS,
+        allowedToolsForInput(containerInput),
         undefined,
         promptImages,
         undefined,
@@ -4337,7 +4413,7 @@ async function main(): Promise<void> {
             workspaceMemoryInstructions,
             resumeAt,
             true,
-            DEFAULT_ALLOWED_TOOLS,
+            allowedToolsForInput(containerInput),
             undefined,
             undefined,
             'auto_continue',
@@ -4481,7 +4557,7 @@ async function main(): Promise<void> {
           workspaceMemoryInstructions,
           resumeAt,
           true,
-          DEFAULT_ALLOWED_TOOLS,
+          allowedToolsForInput(containerInput),
           undefined,
           undefined,
           'truncation_continue',

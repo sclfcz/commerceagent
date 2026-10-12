@@ -216,6 +216,8 @@ export interface ContainerInput {
   /** Whether this is the admin's home container (full privileges). */
   isAdminHome?: boolean;
   isScheduledTask?: boolean;
+  /** Host-only flag for the isolated benchmark runner. */
+  benchmarkMode?: boolean;
   /**
    * Internal HMAC secret delivered only in the stdin bootstrap. It must remain
    * runner-private and must never be written to IPC, files, env, or prompts.
