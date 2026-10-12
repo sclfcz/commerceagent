@@ -5,14 +5,32 @@ import type { Failure } from '../lib/contracts.js';
 export interface TurnObservation {
   output: string;
   runId: string | null;
+  /** StreamEvent turn id (the runtime IPC run identity). */
   turnId: string | null;
+  /** Persisted user-message turn id carried by the final new_message event. */
+  messageTurnId: string | null;
   reason: string | null;
   failure: Failure | null;
   elapsedMs: number;
   logicalRunMs: number | null;
   apiRequests: Array<{ messageId: string; requestId: string }>;
-  tools: Array<{ id: string; name: string }>;
-  trace: Array<{ atMs: number; type: string; runId?: string; turnId?: string }>;
+  tools: Array<{
+    id: string;
+    name: string;
+    resultObserved: boolean;
+    failed: boolean | null;
+    unavailable: boolean;
+  }>;
+  trace: Array<{
+    atMs: number;
+    type: string;
+    runId?: string;
+    turnId?: string;
+    toolUseId?: string;
+    toolName?: string;
+    toolFailed?: boolean;
+    toolUnavailable?: boolean;
+  }>;
 }
 
 // This transport exercises the real Web entry point; no direct SDK fallback.
@@ -37,6 +55,7 @@ export function observeTurn(options: {
       output: '',
       runId: null,
       turnId: null,
+      messageTurnId: null,
       reason: null,
       failure: null,
       elapsedMs: 0,
@@ -159,6 +178,18 @@ export function observeTurn(options: {
             type: event.eventType,
             runId: msg.runId,
             turnId: event.turnId,
+            ...(event.toolUseId ? { toolUseId: event.toolUseId } : {}),
+            ...(event.toolName ? { toolName: event.toolName } : {}),
+            ...(event.eventType === 'tool_result'
+              ? { toolFailed: event.toolResult?.startsWith('⚠️ ') ?? false }
+              : {}),
+            ...(event.eventType === 'tool_result'
+              ? {
+                  toolUnavailable: /No such tool available/i.test(
+                    event.toolResult ?? '',
+                  ),
+                }
+              : {}),
           });
           if (
             event.eventType === 'tool_use_start' &&
@@ -169,7 +200,22 @@ export function observeTurn(options: {
             observation.tools.push({
               id: event.toolUseId,
               name: event.toolName,
+              resultObserved: false,
+              failed: null,
+              unavailable: false,
             });
+          if (event.eventType === 'tool_result' && event.toolUseId) {
+            const tool = observation.tools.find(
+              (item) => item.id === event.toolUseId,
+            );
+            if (tool) {
+              tool.resultObserved = true;
+              tool.failed = event.toolResult?.startsWith('⚠️ ') ?? false;
+              tool.unavailable = /No such tool available/i.test(
+                event.toolResult ?? '',
+              );
+            }
+          }
         }
         if (
           msg.type === 'new_message' &&
@@ -179,9 +225,8 @@ export function observeTurn(options: {
         ) {
           if (msg.message.provider_failure === true) upstreamFailure = true;
           if (msg.message.finalization_reason !== 'completed') return;
-          if (observation.turnId && msg.message.turn_id !== observation.turnId)
-            return;
-          observation.turnId = msg.message.turn_id ?? observation.turnId;
+          observation.messageTurnId = msg.message.turn_id ?? null;
+          observation.turnId ??= msg.message.turn_id ?? null;
           observation.output = msg.message.content;
           if (observation.reason === 'completed')
             finish(upstreamFailure ? 'upstream_error' : null);

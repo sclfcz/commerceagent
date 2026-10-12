@@ -1,9 +1,11 @@
+import { isDeepStrictEqual } from 'node:util';
 import { rotateCandidates } from '../lib/assessment.js';
 import {
   renderCasePrompt,
   type Candidate,
   type SpikeCase,
 } from '../lib/contracts.js';
+import type { BusinessCase } from '../lib/cases.js';
 
 export interface BenchmarkTestRow {
   vars: {
@@ -52,23 +54,23 @@ function benchmarkAssertions() {
     {
       type: 'javascript' as const,
       metric: 'facts_evidence',
-      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.facts === true && ${meta}.business.evidence === true`,
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.facts === true && ${meta}.business.evidence === true && ${meta}.business.forbiddenConclusions !== false`,
     },
     {
       type: 'javascript' as const,
       metric: 'instruction',
-      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.format === true && ${meta}.business.injection === true`,
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.format === true && ${meta}.business.injection === true && ${meta}.business.instructions !== false`,
     },
     {
       type: 'javascript' as const,
       metric: 'tools',
-      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.requiredTools === true && ${meta}.business.onlyAllowedTools === true && ${meta}.business.successfulTools === true && ${meta}.business.callLimit === true`,
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.requiredTools === true && ${meta}.business.forbiddenTools !== false && ${meta}.business.onlyAllowedTools === true && ${meta}.business.successfulTools === true && ${meta}.business.callLimit === true && ${meta}.business.state !== false`,
     },
   ];
 }
 
 export function buildTests(
-  cases: SpikeCase[],
+  cases: Array<SpikeCase | BusinessCase>,
   candidates: Candidate[],
   repetitions = 3,
 ): BenchmarkTestRow[] {
@@ -170,8 +172,7 @@ export function validateAssessmentParity(
       };
     const mismatchFields = fields.filter(
       (field) =>
-        JSON.stringify(attempt[field] ?? null) !==
-        JSON.stringify(provider[field] ?? null),
+        !isDeepStrictEqual(attempt[field] ?? null, provider[field] ?? null),
     );
     if (mismatchFields.length)
       return { valid: false, mismatchIndex: index + 1, mismatchFields };

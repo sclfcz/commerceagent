@@ -12,10 +12,18 @@ export function validatePublicSummary(
         return '';
       }
     })();
-    return [candidate.alias, candidate.model, candidate.baseUrl, host].filter(
+    return [candidate.model, candidate.baseUrl, host].filter(
       (value) => value.length >= 4,
     );
   });
+  const aliasLeaks = candidates
+    .map((candidate) => candidate.alias)
+    .filter((alias) => {
+      const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`(^|[^a-z0-9-])${escaped}(?=$|[^a-z0-9-])`, 'i').test(
+        markdown,
+      );
+    });
   const sensitiveKeywords = [
     'qwen',
     'deepseek',
@@ -25,9 +33,12 @@ export function validatePublicSummary(
     'gpt',
   ];
   const needles = [...new Set([...secrets, ...sensitiveKeywords])];
-  const leaked = needles.filter((value) =>
-    markdown.toLowerCase().includes(value.toLowerCase()),
-  );
+  const leaked = [
+    ...needles.filter((value) =>
+      markdown.toLowerCase().includes(value.toLowerCase()),
+    ),
+    ...aliasLeaks,
+  ];
   return { valid: leaked.length === 0, leaked };
 }
 
@@ -38,6 +49,8 @@ export function renderPublicSummary(input: {
     pairwise: Record<string, any>;
   };
   costs: Record<string, any>;
+  split?: string | null;
+  holdoutCumulativeRuns?: number;
   privateCandidates: Array<{ alias: string; model: string; baseUrl: string }>;
 }) {
   const aliases = Object.keys(input.metrics.candidates).sort();
@@ -55,6 +68,8 @@ export function renderPublicSummary(input: {
     `# Benchmark summary: ${input.runId}`,
     '',
     'Only quality-eligible attempts are included in pass rates. Candidates with more than 10% ineligible attempts are excluded from ranking. Latencies are cold starts.',
+    'Costs are usage-based estimates under the declared rate assumptions; one cache-read mapping has not yet been checked against a platform invoice.',
+    `Split: ${input.split ?? 'legacy'}; cumulative holdout runs: ${input.holdoutCumulativeRuns ?? 0}.`,
     '',
     '| Candidate | Ranking | Eligible / total | Ineligible | First pass | Average pass | Task completion | Status accuracy | Facts/evidence | Instruction | Tools | pass^3 passed / failed / undetermined | Total cost | Cost per successful task | elapsed p50 / p95 ms | logical p50 / p95 ms |',
     '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',

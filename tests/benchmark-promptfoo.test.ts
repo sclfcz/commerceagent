@@ -35,6 +35,10 @@ import {
   validatePublicSummary,
 } from '../benchmarks/lib/public-report.js';
 import { createBenchmarkReport } from '../benchmarks/scripts/report.js';
+import {
+  loadAllBusinessCases,
+  parseFixtureVariant,
+} from '../benchmarks/lib/cases.js';
 
 const candidates = [
   { alias: 'candidate-a' },
@@ -197,10 +201,10 @@ describe('Promptfoo benchmark adapter', () => {
       privateCandidates: candidates,
     });
     expect(summary.markdown).toMatch(/\| candidate-[a-f0-9]{10} \|/);
-    expect(summary.markdown).not.toContain('candidate-a');
     expect(validatePublicSummary(summary.markdown, candidates).valid).toBe(
       true,
     );
+    expect(validatePublicSummary('candidate-a1', candidates).valid).toBe(true);
     expect(
       validatePublicSummary(summary.markdown + ' private-model-xyz', candidates)
         .valid,
@@ -761,8 +765,9 @@ describe('Promptfoo benchmark adapter', () => {
   });
 
   test('reassesses classifications from trace, fixture ledger, usage database and context evidence', () => {
-    const runDirectory = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'commerceagent-independent-reassess-'),
+    const runDirectory = path.join(
+      os.tmpdir(),
+      `commerceagent-independent-reassess-${Date.now()}`,
     );
     fs.mkdirSync(path.join(runDirectory, 'promptfoo'), { recursive: true });
     const attemptDirectory = path.join(runDirectory, 'promptfoo-0001');
@@ -770,38 +775,42 @@ describe('Promptfoo benchmark adapter', () => {
     fs.mkdirSync(path.join(dataDirectory, 'db'), { recursive: true });
     const writeJson = (file: string, value: unknown) =>
       fs.writeFileSync(file, JSON.stringify(value) + '\n');
-    const sourceCases = parse(
-      fs.readFileSync(
-        path.join(process.cwd(), 'benchmarks/cases/spike.yaml'),
-        'utf8',
-      ),
-    ) as SpikeCase[];
-    const caseRow = sourceCases[1];
+    const caseRow = loadAllBusinessCases().find((test) => test.id === 'pc-07')!;
+    const caseFixture = parseFixtureVariant(caseRow.fixture_variant);
     const candidate = {
       alias: 'candidate-a',
       model: 'claude-3-5-sonnet',
       baseUrl: 'https://api.anthropic.com',
       apiKeyEnv: 'BENCH_TEST_KEY',
-      gateway: false,
+      gateway: true,
+      gatewayDeclared: false,
     };
     const call = {
       sequence: 1,
-      name: 'get_order',
-      arguments: { order_id: 'ORD-MISSING' },
-      result: null,
+      name: 'list_products',
+      arguments: { category: 'charger' },
+      result: { products: [], has_more: false, next_page_token: null },
       success: true,
     };
     const output = JSON.stringify({
       status: 'not_found',
       facts: {},
       evidence: [],
+      answer: '没有找到符合条件的充电器资料。',
     });
     const trace = {
       output,
       failure: null,
       reason: 'completed',
       turnId: 'turn-1',
-      tools: [{ name: 'mcp__commerce_fixture__get_order' }],
+      tools: [
+        {
+          name: 'mcp__commerce_fixture__list_products',
+          resultObserved: true,
+          failed: false,
+          unavailable: false,
+        },
+      ],
     };
     const profileDefinition = parse(
       fs.readFileSync(
@@ -945,12 +954,14 @@ describe('Promptfoo benchmark adapter', () => {
     try {
       writeJson(path.join(runDirectory, 'candidates.json'), [candidate]);
       writeJson(path.join(runDirectory, 'cases.used.json'), [caseRow]);
-      writeJson(path.join(runDirectory, 'summary.json'), {
+      writeJson(path.join(runDirectory, 'run-metadata.json'), {
         stage: 'smoke',
+        split: 'dev',
+        repetitions: 1,
         scope: 'synthetic-query-analysis',
       });
       writeJson(path.join(runDirectory, 'execution-sequence.jsonl'), {
-        caseId: 'missing-order',
+        caseId: 'pc-07',
         repetition: 1,
         candidateAlias: 'candidate-a',
         executionIndex: 1,
@@ -962,7 +973,7 @@ describe('Promptfoo benchmark adapter', () => {
         actualAttempts: 1,
         expected: [
           {
-            caseId: 'missing-order',
+            caseId: 'pc-07',
             repetition: 1,
             candidateAlias: 'candidate-a',
             executionIndex: 1,
@@ -970,7 +981,7 @@ describe('Promptfoo benchmark adapter', () => {
         ],
         actual: [
           {
-            caseId: 'missing-order',
+            caseId: 'pc-07',
             repetition: 1,
             candidateAlias: 'candidate-a',
             executionIndex: 1,
@@ -978,6 +989,22 @@ describe('Promptfoo benchmark adapter', () => {
         ],
       });
       fs.mkdirSync(attemptDirectory, { recursive: true });
+      const runnerLogs = path.join(dataDirectory, 'groups/group-1/logs');
+      fs.mkdirSync(runnerLogs, { recursive: true });
+      fs.writeFileSync(
+        path.join(runnerLogs, 'runner.log'),
+        '[BENCHMARK_MCP_INIT] ' +
+          JSON.stringify({
+            mcpServers: [{ name: 'commerce_fixture', status: 'connected' }],
+            fixtureTools: [
+              'mcp__commerce_fixture__list_products',
+              'mcp__commerce_fixture__get_order',
+              'mcp__commerce_fixture__search_policy',
+              'mcp__commerce_fixture__get_ad_report',
+            ],
+          }) +
+          '\n',
+      );
       writeJson(path.join(attemptDirectory, 'trace.json'), trace);
       const originalResultFile = path.join(attemptDirectory, 'result.json');
       const originalResultText =
@@ -987,6 +1014,14 @@ describe('Promptfoo benchmark adapter', () => {
         path.join(attemptDirectory, 'fixture.jsonl'),
         JSON.stringify(call) + '\n',
       );
+      writeJson(
+        path.join(attemptDirectory, 'fixture-snapshot.json'),
+        caseFixture,
+      );
+      writeJson(path.join(attemptDirectory, 'fixture-state.json'), {
+        refund_requests: [],
+        handoffs: [],
+      });
       writeJson(path.join(attemptDirectory, 'context-evidence.json'), {
         actual: contextActual,
         expected: { renderedProfileHash: 'tampered-runtime-expectation' },
@@ -998,7 +1033,7 @@ describe('Promptfoo benchmark adapter', () => {
           response: {
             metadata: {
               candidate: 'candidate-a',
-              caseId: 'missing-order',
+              caseId: 'pc-07',
               repetition: 1,
               actualExecutionIndex: 1,
               expectedExecutionIndex: 1,
@@ -1014,10 +1049,14 @@ describe('Promptfoo benchmark adapter', () => {
               gates: {
                 modelIdentity: true,
                 independentFixture: true,
+                fixtureStateReconciled: true,
                 freshState: true,
                 terminalClassified: true,
                 usageReconciled: true,
                 contextVerified: true,
+                mcpRuntimeReady: true,
+                toolUnavailable: false,
+                fixtureBypass: false,
               },
             },
           },
@@ -1029,11 +1068,23 @@ describe('Promptfoo benchmark adapter', () => {
         executionOrderValid: true,
         providerParityValid: true,
         providerParityMismatchFields: [],
+        split: 'dev',
+        finalRun: false,
+        splitValid: true,
+        fixtureDefinitionsMatch: true,
+        fixtureStatesReconciled: true,
+        reassessmentMethod: {
+          contextExpectedSnapshotUsed: false,
+          gatewayMarkerRecomputedFromCandidateEndpointAndDeclaration: true,
+          fixtureStateRecomputedFromLedger: true,
+        },
         measurementValidAttempts: 1,
         businessPassedAttempts: 1,
         invalidRun: false,
       });
       expect(report.results[0].sourceHashes).toHaveProperty('trace.json');
+      expect(report.results[0].gatewayVerificationRequired).toBe(false);
+      expect(report.results[0].qualityEligible).toBe(true);
       expect(report.results[0].gates).toMatchObject({
         modelIdentity: true,
         independentFixture: true,
@@ -1046,6 +1097,13 @@ describe('Promptfoo benchmark adapter', () => {
       expect(fs.existsSync(path.join(runDirectory, 'reassessed.json'))).toBe(
         true,
       );
+      writeJson(path.join(runDirectory, 'summary.json'), {
+        stage: 'smoke',
+        split: 'dev',
+        finalRun: false,
+        repetitions: 1,
+        scope: 'synthetic-commerce-workflows',
+      });
       const stage3Report = createBenchmarkReport(runDirectory);
       expect(stage3Report.metrics.candidates['candidate-a']).toMatchObject({
         eligibleAttempts: 1,

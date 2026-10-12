@@ -8,23 +8,30 @@ export function assessAttempt(input: {
   contextVerified: boolean;
   freshState: boolean;
   auditMatched: boolean;
+  mcpRuntimeReady?: boolean;
+  toolUnavailable?: boolean;
+  fixtureBypass?: boolean;
   onlyAllowedTools: boolean;
   businessPass: boolean;
   gateway: boolean;
 }) {
   const measurementFailure: Failure | null =
     input.transportFailure ||
-    (!input.usageComplete || !input.scopeIsolated
-      ? 'collection_incomplete'
-      : !input.freshState
-        ? 'state_not_fresh'
-        : !input.contextVerified
-          ? 'context_mismatch'
-          : !input.auditMatched
-            ? 'audit_mismatch'
-            : !input.sdkModelMatches
-              ? 'model_identity'
-              : null);
+    (input.fixtureBypass
+      ? 'fixture_bypass'
+      : input.toolUnavailable || input.mcpRuntimeReady === false
+        ? 'tool_unavailable'
+        : !input.usageComplete || !input.scopeIsolated
+          ? 'collection_incomplete'
+          : !input.freshState
+            ? 'state_not_fresh'
+            : !input.contextVerified
+              ? 'context_mismatch'
+              : !input.auditMatched
+                ? 'audit_mismatch'
+                : !input.sdkModelMatches
+                  ? 'model_identity'
+                  : null);
   const businessFailure: Failure | null = !input.onlyAllowedTools
     ? 'tool_policy_violation'
     : !input.businessPass
@@ -34,8 +41,8 @@ export function assessAttempt(input: {
   // retain any independent audit mismatch too, so that sample stays ineligible.
   const failure =
     input.transportFailure ||
-    (businessFailure === 'tool_policy_violation' && businessFailure) ||
     measurementFailure ||
+    (businessFailure === 'tool_policy_violation' && businessFailure) ||
     (input.gateway ? 'model_identity' : businessFailure);
   return {
     measurementFailure,
@@ -115,4 +122,26 @@ export function countClassifications(
     counts[value] = (counts[value] || 0) + 1;
   }
   return counts;
+}
+
+export function measurementValidityGate(input: {
+  split: string | null | undefined;
+  caseCount: number;
+  attempts: number;
+  expectedAttempts: number;
+  validAttempts: number;
+}) {
+  const applicable =
+    input.split === 'dev' &&
+    input.caseCount === 50 &&
+    input.attempts === input.expectedAttempts &&
+    input.expectedAttempts > 0;
+  const rate = input.attempts > 0 ? input.validAttempts / input.attempts : null;
+  const minimumRate = 0.95;
+  return {
+    applicable,
+    minimumRate,
+    rate,
+    passed: applicable && rate !== null && rate >= minimumRate,
+  };
 }

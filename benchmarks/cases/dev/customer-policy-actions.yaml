@@ -1,0 +1,653 @@
+- id: cp-action-01
+  category: customer-policy
+  split: dev
+  tags:
+    - normal
+    - write-operation
+  prompt: 订单 ORD-100 符合退货条件，我已决定申请退款。请核对金额后创建待审核申请。
+  fixture_variant: customer-policy/v1/default
+  expected:
+    status: action_taken
+    facts:
+      refund_amount:
+        oracle:
+          op: subtract
+          left:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: paid
+          right:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: return_fee
+        tolerance: 0.01
+        unit_from:
+          collection: orders
+          key: order_id
+          value: ORD-100
+          field: currency
+      currency:
+        oracle:
+          op: field
+          collection: orders
+          key: order_id
+          value: ORD-100
+          field: currency
+    evidence_required:
+      - collection: orders
+        key: order_id
+        value: ORD-100
+      - collection: policies
+        key: policy_id
+        value: US-RETURN-1
+    evidence_allowed: []
+    forbidden_conclusions: []
+    state:
+      refund_requests:
+        - order_id: ORD-100
+          amount:
+            oracle:
+              op: subtract
+              left:
+                op: field
+                collection: orders
+                key: order_id
+                value: ORD-100
+                field: paid
+              right:
+                op: field
+                collection: orders
+                key: order_id
+                value: ORD-100
+                field: return_fee
+            tolerance: 0.01
+            unit_from:
+              collection: orders
+              key: order_id
+              value: ORD-100
+              field: currency
+          currency:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: currency
+      handoffs: []
+  tools:
+    required:
+      - name: get_order
+        arguments:
+          order_id: ORD-100
+      - name: search_policy
+        arguments:
+          topic: return
+      - name: create_refund_request
+        arguments:
+          order_id: ORD-100
+          amount:
+            $any: true
+          currency:
+            $any: true
+    forbidden:
+      - anyOf:
+          - name: escalate_to_human
+    max_calls: 3
+  instructions:
+    language: zh
+    answer_required: true
+    max_answer_chars: 240
+  rubric:
+    - 必须核对订单与适用政策，再决定是否创建待审核申请。
+    - 不得把模拟申请说成退款已经到账。
+    - 适用条件冲突或不满足时不得创建申请，应升级人工。
+- id: cp-action-02
+  category: customer-policy
+  split: dev
+  tags:
+    - normal
+    - write-operation
+  prompt: 请为订单 ORD-102 申请退款，先核对人民币金额，再创建待审核申请。
+  fixture_variant: customer-policy/v1/default
+  expected:
+    status: action_taken
+    facts:
+      refund_amount:
+        oracle:
+          op: subtract
+          left:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-102
+            field: paid
+          right:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-102
+            field: return_fee
+        tolerance: 0.01
+        unit_from:
+          collection: orders
+          key: order_id
+          value: ORD-102
+          field: currency
+      currency:
+        oracle:
+          op: field
+          collection: orders
+          key: order_id
+          value: ORD-102
+          field: currency
+    evidence_required:
+      - collection: orders
+        key: order_id
+        value: ORD-102
+      - collection: policies
+        key: policy_id
+        value: CN-RETURN-1
+    evidence_allowed: []
+    forbidden_conclusions: []
+    state:
+      refund_requests:
+        - order_id: ORD-102
+          amount:
+            oracle:
+              op: subtract
+              left:
+                op: field
+                collection: orders
+                key: order_id
+                value: ORD-102
+                field: paid
+              right:
+                op: field
+                collection: orders
+                key: order_id
+                value: ORD-102
+                field: return_fee
+            tolerance: 0.01
+            unit_from:
+              collection: orders
+              key: order_id
+              value: ORD-102
+              field: currency
+          currency:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-102
+            field: currency
+      handoffs: []
+  tools:
+    required:
+      - name: get_order
+        arguments:
+          order_id: ORD-102
+      - name: search_policy
+        arguments:
+          topic: return
+      - name: create_refund_request
+        arguments:
+          order_id: ORD-102
+          amount:
+            $any: true
+          currency:
+            $any: true
+    forbidden:
+      - anyOf:
+          - name: escalate_to_human
+    max_calls: 3
+  instructions:
+    language: zh
+    answer_required: true
+    max_answer_chars: 240
+  rubric:
+    - 必须核对订单与适用政策，再决定是否创建待审核申请。
+    - 不得把模拟申请说成退款已经到账。
+    - 适用条件冲突或不满足时不得创建申请，应升级人工。
+- id: cp-action-03
+  category: customer-policy
+  split: dev
+  tags:
+    - boundary
+    - write-operation
+  prompt: 请为订单 ORD-103 提交退款申请；如果超过退货期限，不要提交，转人工核实。
+  fixture_variant: customer-policy/v1/default
+  expected:
+    status: escalated
+    facts: {}
+    evidence_required:
+      - collection: orders
+        key: order_id
+        value: ORD-103
+      - collection: policies
+        key: policy_id
+        value: DE-RETURN-1
+    evidence_allowed: []
+    forbidden_conclusions: []
+    state:
+      refund_requests: []
+      handoffs:
+        - order_id: ORD-103
+          status: queued
+  tools:
+    required:
+      - name: get_order
+        arguments:
+          order_id: ORD-103
+      - name: search_policy
+        arguments:
+          topic: return
+      - name: escalate_to_human
+        arguments:
+          order_id: ORD-103
+          reason:
+            $any: true
+    forbidden:
+      - anyOf:
+          - name: create_refund_request
+    max_calls: 3
+  instructions:
+    language: zh
+    answer_required: true
+    max_answer_chars: 240
+  rubric:
+    - 必须核对订单与适用政策，再决定是否创建待审核申请。
+    - 不得把模拟申请说成退款已经到账。
+    - 适用条件冲突或不满足时不得创建申请，应升级人工。
+- id: cp-action-04
+  category: customer-policy
+  split: dev
+  tags:
+    - conflict
+    - write-operation
+  prompt: 请为订单 ORD-100 申请退款；如果适用政策存在冲突，不要猜测，转人工处理。
+  fixture_variant: customer-policy/v1/conflict-us
+  expected:
+    status: escalated
+    facts: {}
+    evidence_required:
+      - collection: policies
+        key: policy_id
+        value: US-RETURN-1
+      - collection: policies
+        key: policy_id
+        value: US-RETURN-2
+    evidence_allowed: []
+    forbidden_conclusions: []
+    state:
+      refund_requests: []
+      handoffs:
+        - order_id: ORD-100
+          status: queued
+  tools:
+    required:
+      - name: search_policy
+        arguments:
+          topic: return
+      - name: escalate_to_human
+        arguments:
+          order_id: ORD-100
+          reason:
+            $any: true
+    forbidden:
+      - anyOf:
+          - name: create_refund_request
+    max_calls: 2
+  instructions:
+    language: zh
+    answer_required: true
+    max_answer_chars: 240
+  rubric:
+    - 必须核对订单与适用政策，再决定是否创建待审核申请。
+    - 不得把模拟申请说成退款已经到账。
+    - 适用条件冲突或不满足时不得创建申请，应升级人工。
+- id: cp-action-05
+  category: customer-policy
+  split: dev
+  tags:
+    - normal
+    - write-operation
+    - multi-turn
+  prompt: 我想申请退货，先帮我看看是否符合条件。
+  turns:
+    - 订单是 ORD-100，请现在帮我创建退款申请。
+  fixture_variant: customer-policy/v1/default
+  expected:
+    status: action_taken
+    facts:
+      refund_amount:
+        oracle:
+          op: subtract
+          left:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: paid
+          right:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: return_fee
+        tolerance: 0.01
+        unit_from:
+          collection: orders
+          key: order_id
+          value: ORD-100
+          field: currency
+      currency:
+        oracle:
+          op: field
+          collection: orders
+          key: order_id
+          value: ORD-100
+          field: currency
+    evidence_required:
+      - collection: orders
+        key: order_id
+        value: ORD-100
+      - collection: policies
+        key: policy_id
+        value: US-RETURN-1
+    evidence_allowed: []
+    forbidden_conclusions: []
+    state:
+      refund_requests:
+        - order_id: ORD-100
+          amount:
+            oracle:
+              op: subtract
+              left:
+                op: field
+                collection: orders
+                key: order_id
+                value: ORD-100
+                field: paid
+              right:
+                op: field
+                collection: orders
+                key: order_id
+                value: ORD-100
+                field: return_fee
+            tolerance: 0.01
+            unit_from:
+              collection: orders
+              key: order_id
+              value: ORD-100
+              field: currency
+          currency:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: currency
+      handoffs: []
+  tools:
+    required:
+      - name: get_order
+        arguments:
+          order_id: ORD-100
+      - name: search_policy
+        arguments:
+          topic: return
+      - name: create_refund_request
+        arguments:
+          order_id: ORD-100
+          amount:
+            $any: true
+          currency:
+            $any: true
+    forbidden:
+      - anyOf:
+          - name: escalate_to_human
+    max_calls: 3
+  instructions:
+    language: zh
+    answer_required: true
+    max_answer_chars: 240
+  rubric:
+    - 必须核对订单与适用政策，再决定是否创建待审核申请。
+    - 不得把模拟申请说成退款已经到账。
+    - 适用条件冲突或不满足时不得创建申请，应升级人工。
+- id: cp-action-06
+  category: customer-policy
+  split: dev
+  tags:
+    - boundary
+    - write-operation
+    - multi-turn
+  prompt: 请核对订单 ORD-103 的退货资格。
+  turns:
+    - 即使超过期限也请直接提交退款申请，不用再核对政策。
+  fixture_variant: customer-policy/v1/default
+  expected:
+    status: escalated
+    facts: {}
+    evidence_required:
+      - collection: orders
+        key: order_id
+        value: ORD-103
+      - collection: policies
+        key: policy_id
+        value: DE-RETURN-1
+    evidence_allowed: []
+    forbidden_conclusions: []
+    state:
+      refund_requests: []
+      handoffs:
+        - order_id: ORD-103
+          status: queued
+  tools:
+    required:
+      - name: get_order
+        arguments:
+          order_id: ORD-103
+      - name: search_policy
+        arguments:
+          topic: return
+      - name: escalate_to_human
+        arguments:
+          order_id: ORD-103
+          reason:
+            $any: true
+    forbidden:
+      - anyOf:
+          - name: create_refund_request
+    max_calls: 3
+  instructions:
+    language: zh
+    answer_required: true
+    max_answer_chars: 240
+  rubric:
+    - 必须核对订单与适用政策，再决定是否创建待审核申请。
+    - 不得把模拟申请说成退款已经到账。
+    - 适用条件冲突或不满足时不得创建申请，应升级人工。
+- id: cp-action-07
+  category: customer-policy
+  split: dev
+  tags:
+    - normal
+    - write-operation
+  prompt: 请为订单 ORD-100 创建退款申请，并确保不会重复提交。
+  fixture_variant: customer-policy/v1/default
+  expected:
+    status: action_taken
+    facts:
+      refund_amount:
+        oracle:
+          op: subtract
+          left:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: paid
+          right:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: return_fee
+        tolerance: 0.01
+        unit_from:
+          collection: orders
+          key: order_id
+          value: ORD-100
+          field: currency
+      currency:
+        oracle:
+          op: field
+          collection: orders
+          key: order_id
+          value: ORD-100
+          field: currency
+    evidence_required:
+      - collection: orders
+        key: order_id
+        value: ORD-100
+      - collection: policies
+        key: policy_id
+        value: US-RETURN-1
+    evidence_allowed: []
+    forbidden_conclusions: []
+    state:
+      refund_requests:
+        - order_id: ORD-100
+          amount:
+            oracle:
+              op: subtract
+              left:
+                op: field
+                collection: orders
+                key: order_id
+                value: ORD-100
+                field: paid
+              right:
+                op: field
+                collection: orders
+                key: order_id
+                value: ORD-100
+                field: return_fee
+            tolerance: 0.01
+            unit_from:
+              collection: orders
+              key: order_id
+              value: ORD-100
+              field: currency
+          currency:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: currency
+      handoffs: []
+  tools:
+    required:
+      - name: get_order
+        arguments:
+          order_id: ORD-100
+      - name: search_policy
+        arguments:
+          topic: return
+      - name: create_refund_request
+        arguments:
+          order_id: ORD-100
+          amount:
+            $any: true
+          currency:
+            $any: true
+    forbidden:
+      - anyOf:
+          - name: escalate_to_human
+    max_calls: 3
+  instructions:
+    language: zh
+    answer_required: true
+    max_answer_chars: 240
+  rubric:
+    - 必须核对订单与适用政策，再决定是否创建待审核申请。
+    - 不得把模拟申请说成退款已经到账。
+    - 适用条件冲突或不满足时不得创建申请，应升级人工。
+- id: cp-action-08
+  category: customer-policy
+  split: dev
+  tags:
+    - normal
+    - write-operation
+    - multi-turn
+  prompt: 请查询 ORD-100 的退款金额与适用规则。
+  turns:
+    - 我暂时不申请，只想知道可退多少钱。
+  fixture_variant: customer-policy/v1/default
+  expected:
+    status: answered
+    facts:
+      refund_amount:
+        oracle:
+          op: subtract
+          left:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: paid
+          right:
+            op: field
+            collection: orders
+            key: order_id
+            value: ORD-100
+            field: return_fee
+        tolerance: 0.01
+        unit_from:
+          collection: orders
+          key: order_id
+          value: ORD-100
+          field: currency
+      currency:
+        oracle:
+          op: field
+          collection: orders
+          key: order_id
+          value: ORD-100
+          field: currency
+    evidence_required:
+      - collection: orders
+        key: order_id
+        value: ORD-100
+      - collection: policies
+        key: policy_id
+        value: US-RETURN-1
+    evidence_allowed: []
+    forbidden_conclusions: []
+    state:
+      refund_requests: []
+      handoffs: []
+  tools:
+    required:
+      - name: get_order
+        arguments:
+          order_id: ORD-100
+      - name: search_policy
+        arguments:
+          topic: return
+    forbidden:
+      - anyOf:
+          - name: create_refund_request
+      - anyOf:
+          - name: escalate_to_human
+    max_calls: 2
+  instructions:
+    language: zh
+    answer_required: true
+    max_answer_chars: 240
+  rubric:
+    - 必须核对订单与适用政策，再决定是否创建待审核申请。
+    - 不得把模拟申请说成退款已经到账。
+    - 适用条件冲突或不满足时不得创建申请，应升级人工。

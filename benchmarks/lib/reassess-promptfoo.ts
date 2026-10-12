@@ -7,10 +7,27 @@ import { parse } from 'yaml';
 import { buildAgentProfilePrompt } from '../../src/agent-profile-prompts.js';
 import { auditFixtureCalls } from '../assertions/audit.js';
 import { assertSpike } from '../assertions/spike.js';
+import {
+  assertBusinessCase,
+  fixtureStateMatchesLedger,
+  loadBusinessCases,
+  parseFixtureVariant,
+  type BusinessCase,
+  type FixtureState,
+} from './cases.js';
 import { FreshStateTracker } from './fresh-state.js';
 import { officialVendor, requiresGatewayAudit } from './identity.js';
 import { readUsage } from './usage.js';
-import { countClassifications, summarizeCandidates } from './assessment.js';
+import {
+  assessMcpRuntime,
+  countSuccessfulFixtureCalls,
+  readMcpRuntimeEvidence,
+} from './mcp-runtime.js';
+import {
+  countClassifications,
+  measurementValidityGate,
+  summarizeCandidates,
+} from './assessment.js';
 import {
   hash,
   privateJson,
@@ -41,23 +58,30 @@ function assessFromEvidence(input: {
   contextVerified: boolean;
   freshState: boolean;
   auditMatched: boolean;
+  mcpRuntimeReady?: boolean;
+  toolUnavailable?: boolean;
+  fixtureBypass?: boolean;
   onlyAllowedTools: boolean;
   businessPass: boolean;
   gateway: boolean;
 }) {
   const measurementFailure: Failure | null =
     input.transportFailure ||
-    (!input.usageComplete || !input.scopeIsolated
-      ? 'collection_incomplete'
-      : !input.freshState
-        ? 'state_not_fresh'
-        : !input.contextVerified
-          ? 'context_mismatch'
-          : !input.auditMatched
-            ? 'audit_mismatch'
-            : !input.sdkModelMatches
-              ? 'model_identity'
-              : null);
+    (input.fixtureBypass
+      ? 'fixture_bypass'
+      : input.toolUnavailable || input.mcpRuntimeReady === false
+        ? 'tool_unavailable'
+        : !input.usageComplete || !input.scopeIsolated
+          ? 'collection_incomplete'
+          : !input.freshState
+            ? 'state_not_fresh'
+            : !input.contextVerified
+              ? 'context_mismatch'
+              : !input.auditMatched
+                ? 'audit_mismatch'
+                : !input.sdkModelMatches
+                  ? 'model_identity'
+                  : null);
   const businessFailure: Failure | null = !input.onlyAllowedTools
     ? 'tool_policy_violation'
     : !input.businessPass
@@ -65,8 +89,8 @@ function assessFromEvidence(input: {
       : null;
   const failure =
     input.transportFailure ||
-    (businessFailure === 'tool_policy_violation' && businessFailure) ||
     measurementFailure ||
+    (businessFailure === 'tool_policy_violation' && businessFailure) ||
     (input.gateway ? 'model_identity' : businessFailure);
   return {
     measurementFailure,
@@ -195,20 +219,97 @@ export function reassessPromptfoo(runDirectory: string) {
   ) as Array<Record<string, any>>;
   const copiedCases = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'cases.used.json'), 'utf8'),
-  ) as SpikeCase[];
+  ) as Array<SpikeCase | BusinessCase>;
+  const summaryFile = path.join(runDirectory, 'summary.json');
+  const metadataFile = path.join(runDirectory, 'run-metadata.json');
+  const runMetadata = fs.existsSync(summaryFile)
+    ? JSON.parse(fs.readFileSync(summaryFile, 'utf8'))
+    : fs.existsSync(metadataFile)
+      ? JSON.parse(fs.readFileSync(metadataFile, 'utf8'))
+      : {};
+  const copiedSplits = [
+    ...new Set(
+      copiedCases
+        .filter((test): test is BusinessCase => 'split' in test)
+        .map((test) => test.split),
+    ),
+  ];
+  const inferredSplit = copiedSplits.length === 1 ? copiedSplits[0] : undefined;
+  const savedSummary = {
+    ...runMetadata,
+    ...(runMetadata.split === undefined && inferredSplit
+      ? { split: inferredSplit }
+      : {}),
+  };
+  const splitValid =
+    savedSummary.split === undefined ||
+    ((savedSummary.split === 'dev' || savedSummary.split === 'holdout') &&
+      (savedSummary.split === 'holdout'
+        ? savedSummary.finalRun === true &&
+          savedSummary.cumulativeHoldoutRuns === 1
+        : savedSummary.finalRun !== true) &&
+      copiedCases.every(
+        (test) => 'split' in test && test.split === savedSummary.split,
+      ));
   const profileFile = fileURLToPath(
     new URL('../profile.yaml', import.meta.url),
   );
   const caseFile = fileURLToPath(
     new URL('../cases/spike.yaml', import.meta.url),
   );
-  const sourceCases = parse(fs.readFileSync(caseFile, 'utf8')) as SpikeCase[];
+  const legacyCases = parse(fs.readFileSync(caseFile, 'utf8')) as SpikeCase[];
+  const selectedCases =
+    savedSummary.split === 'dev' || savedSummary.split === 'holdout'
+      ? loadBusinessCases(savedSummary.split)
+      : [];
+  const sourceCases: Array<SpikeCase | BusinessCase> = [
+    ...legacyCases,
+    ...selectedCases,
+  ];
   const sourceCaseById = new Map(sourceCases.map((test) => [test.id, test]));
   const casesMatchSource =
     copiedCases.length > 0 &&
     copiedCases.every(
       (test) => hash(test) === hash(sourceCaseById.get(test.id) ?? null),
     );
+  const caseSourceFiles = [
+    caseFile,
+    ...(savedSummary.split === 'dev' || savedSummary.split === 'holdout'
+      ? fs
+          .readdirSync(
+            fileURLToPath(
+              new URL(`../cases/${savedSummary.split}/`, import.meta.url),
+            ),
+          )
+          .filter((file) => file.endsWith('.yaml') || file.endsWith('.yml'))
+          .map((file) =>
+            fileURLToPath(
+              new URL(
+                `../cases/${savedSummary.split}/${file}`,
+                import.meta.url,
+              ),
+            ),
+          )
+      : []),
+  ].sort();
+  const fixtureSourceFiles = fs
+    .readdirSync(fileURLToPath(new URL('../fixtures/', import.meta.url)), {
+      withFileTypes: true,
+    })
+    .filter((entry) => entry.isDirectory())
+    .flatMap((entry) =>
+      fs
+        .readdirSync(
+          fileURLToPath(new URL(`../fixtures/${entry.name}/`, import.meta.url)),
+        )
+        .filter((file) => file.endsWith('.json'))
+        .map((file) =>
+          fileURLToPath(
+            new URL(`../fixtures/${entry.name}/${file}`, import.meta.url),
+          ),
+        ),
+    )
+    .sort();
   const promptfooFile = path.join(runDirectory, 'promptfoo/results.json');
   const promptfooResults = JSON.parse(fs.readFileSync(promptfooFile, 'utf8'));
   const promptfooByIndex = new Map<number, Record<string, any>>();
@@ -221,6 +322,8 @@ export function reassessPromptfoo(runDirectory: string) {
   const freshStates = new FreshStateTracker();
   const reassessed: Array<Record<string, any>> = [];
   let evidenceComplete = true;
+  let fixtureDefinitionsMatch = true;
+  let fixtureStatesReconciled = true;
   for (const row of execution.sort(
     (left, right) => left.executionIndex - right.executionIndex,
   )) {
@@ -237,18 +340,45 @@ export function reassessPromptfoo(runDirectory: string) {
       attemptDirectory,
       'service/data-eval/db/messages.db',
     );
+    const candidate = candidates.find(
+      (entry) => entry.alias === row.candidateAlias,
+    );
+    const test = sourceCaseById.get(row.caseId);
+    if (!candidate || !test) throw new Error('assessment_identity_missing');
+    const fixtureSnapshotFile = path.join(
+      attemptDirectory,
+      'fixture-snapshot.json',
+    );
+    const fixtureStateFile = path.join(attemptDirectory, 'fixture-state.json');
+    const mcpRuntimeEvidenceFile = path.join(
+      attemptDirectory,
+      'mcp-runtime-evidence.json',
+    );
+    const freshEvidenceForPath = fs.existsSync(freshStateFile)
+      ? JSON.parse(fs.readFileSync(freshStateFile, 'utf8'))
+      : null;
+    const mcpLogDirectory = path.join(
+      attemptDirectory,
+      'service/data-eval/groups',
+      freshEvidenceForPath?.groupFolder ?? '',
+      'logs',
+    );
+    const mcpLogFiles = fs.existsSync(mcpLogDirectory)
+      ? fs
+          .readdirSync(mcpLogDirectory)
+          .filter((name) => name.endsWith('.log'))
+          .map((name) => path.join(mcpLogDirectory, name))
+      : [];
     const sourceFiles = [
       traceFile,
       ledgerFile,
       contextFile,
       freshStateFile,
       databaseFile,
+      ...('fixture_variant' in test
+        ? [fixtureSnapshotFile, fixtureStateFile]
+        : []),
     ];
-    const candidate = candidates.find(
-      (entry) => entry.alias === row.candidateAlias,
-    );
-    const test = sourceCases.find((entry) => entry.id === row.caseId);
-    if (!candidate || !test) throw new Error('assessment_identity_missing');
     const missingEvidence = sourceFiles.some((file) => !fs.existsSync(file));
     const gateway = requiresGatewayAudit(
       candidate.baseUrl,
@@ -338,8 +468,54 @@ export function reassessPromptfoo(runDirectory: string) {
       },
       candidate.model,
     );
-    const business = assertSpike(trace.output, test, ledger, trace.tools);
+    let fixtureDefinitionVerified: boolean | null = null;
+    const fixtureState =
+      'fixture_variant' in test
+        ? (JSON.parse(
+            fs.readFileSync(fixtureStateFile, 'utf8'),
+          ) as FixtureState)
+        : undefined;
+    const fixtureStateReconciled = fixtureState
+      ? fixtureStateMatchesLedger(ledger, fixtureState)
+      : true;
+    fixtureStatesReconciled &&= fixtureStateReconciled;
+    const fixtureVariant =
+      'fixture_variant' in test
+        ? (() => {
+            const snapshot = JSON.parse(
+              fs.readFileSync(fixtureSnapshotFile, 'utf8'),
+            );
+            const source = parseFixtureVariant(test.fixture_variant);
+            const matchesSource = hash(snapshot) === hash(source);
+            fixtureDefinitionVerified = matchesSource;
+            fixtureDefinitionsMatch &&= matchesSource;
+            return {
+              data: snapshot.data,
+              variant: snapshot.variant,
+              config: snapshot.config,
+            };
+          })()
+        : null;
+    const business = fixtureVariant
+      ? assertBusinessCase(
+          trace.output,
+          test as BusinessCase,
+          fixtureVariant,
+          ledger,
+          trace.tools,
+          fixtureState,
+        )
+      : assertSpike(trace.output, test as SpikeCase, ledger, trace.tools);
     const audit = auditFixtureCalls(ledger, trace.tools);
+    const mcpEvidence = readMcpRuntimeEvidence(mcpLogDirectory);
+    const mcpRuntime = fixtureVariant
+      ? assessMcpRuntime(mcpEvidence, test as BusinessCase)
+      : {
+          ready:
+            mcpEvidence?.mcpServers.some(
+              (server) => server.status === 'connected',
+            ) ?? false,
+        };
     const usageComplete =
       folderRows.known &&
       !!folderRows.usage &&
@@ -355,7 +531,10 @@ export function reassessPromptfoo(runDirectory: string) {
       sdkModelMatches: folderRows.identityVerified,
       contextVerified: context.verified,
       freshState,
-      auditMatched: audit.matched,
+      auditMatched: audit.matched && fixtureStateReconciled,
+      mcpRuntimeReady: mcpRuntime.ready,
+      toolUnavailable: audit.toolUnavailableCalls.length > 0,
+      fixtureBypass: audit.bypassedFixtureCalls.length > 0,
       onlyAllowedTools: business.checks.onlyAllowedTools,
       businessPass: business.pass,
       gateway,
@@ -368,7 +547,9 @@ export function reassessPromptfoo(runDirectory: string) {
       ...assessment,
       businessPass: business.pass,
       businessChecks: business.checks,
+      fixtureStateReconciled,
       caseDefinitionVerified: casesMatchSource,
+      fixtureDefinitionVerified,
       gatewayVerificationRequired: gateway,
       sdkModelMatches: folderRows.identityVerified,
       identityBasis:
@@ -377,17 +558,24 @@ export function reassessPromptfoo(runDirectory: string) {
           : 'gateway_pending',
       gates: {
         modelIdentity: folderRows.identityVerified && !gateway,
-        independentFixture: audit.matched,
+        independentFixture: audit.matched && fixtureStateReconciled,
+        mcpRuntimeReady: mcpRuntime.ready,
+        toolUnavailable: audit.toolUnavailableCalls.length > 0,
+        fixtureBypass: audit.bypassedFixtureCalls.length > 0,
+        fixtureStateReconciled,
         freshState,
         terminalClassified: trace.reason !== null,
         usageReconciled: usageComplete && folderRows.scopeIsolated,
         contextVerified: context.verified,
       },
       usage: folderRows.usage,
+      fixtureAudit: audit,
       elapsedMs: trace.elapsedMs ?? null,
       logicalRunMs: trace.logicalRunMs ?? null,
       sourceHashes: Object.fromEntries(
-        sourceFiles.map((file) => [path.basename(file), sha256(file)]),
+        [...sourceFiles, ...mcpLogFiles, mcpRuntimeEvidenceFile]
+          .filter((file) => fs.existsSync(file))
+          .map((file) => [path.relative(attemptDirectory, file), sha256(file)]),
       ),
     });
   }
@@ -398,6 +586,7 @@ export function reassessPromptfoo(runDirectory: string) {
       .sort(([left], [right]) => left - right)
       .map(([, result]) => result),
   );
+  const successfulFixtureCalls = countSuccessfulFixtureCalls(reassessed as any);
   const revisionHash = hash([
     fs.readFileSync(new URL('../assertions/spike.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('../assertions/audit.ts', import.meta.url), 'utf8'),
@@ -415,30 +604,74 @@ export function reassessPromptfoo(runDirectory: string) {
       new URL('./reassess-promptfoo.ts', import.meta.url),
       'utf8',
     ),
+    fs.readFileSync(new URL('./cases.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(
+      new URL('../mcp-fixture-server/server.ts', import.meta.url),
+      'utf8',
+    ),
+    fs.readFileSync(
+      new URL('../providers/commerceagent-provider.ts', import.meta.url),
+      'utf8',
+    ),
     fs.readFileSync(new URL('../scripts/report.ts', import.meta.url), 'utf8'),
   ]);
   const report = {
     schemaVersion: 1,
     source: 'trace-fixture-ledger-messages-db-context-fresh-state',
+    reassessmentMethod: {
+      contextExpectedSnapshotUsed: false,
+      contextExpectedRecomputedFrom:
+        'versioned-profile-and-observed-runtime-evidence',
+      fixtureMcpStatusAndRequiredToolsRecomputedFrom:
+        'Runner SDK system/init logs',
+      gatewayMarkerRecomputedFromCandidateEndpointAndDeclaration: true,
+      fixtureStateRecomputedFromLedger: true,
+    },
     runId: path.basename(runDirectory),
     sourceHashes: {
       executionSequence: sha256(executionFile),
       order: sha256(orderFile),
       promptfooResults: sha256(promptfooFile),
       candidateMatrix: sha256(path.join(runDirectory, 'candidates.json')),
+      runMetadata: fs.existsSync(metadataFile) ? sha256(metadataFile) : null,
       cases: sha256(path.join(runDirectory, 'cases.used.json')),
-      caseDefinition: sha256(caseFile),
+      caseDefinition: hash(
+        caseSourceFiles.map((file) => [
+          path.relative(path.dirname(caseFile), file),
+          sha256(file),
+        ]),
+      ),
+      fixtureDefinitions: hash(
+        fixtureSourceFiles.map((file) => [
+          path.relative(path.dirname(caseFile), file),
+          sha256(file),
+        ]),
+      ),
       profileDefinition: sha256(profileFile),
     },
     reassessmentRevision: revisionHash,
     evidenceComplete,
     executionOrderValid: order.valid,
+    split: savedSummary.split ?? null,
+    finalRun: savedSummary.finalRun ?? false,
+    splitValid,
+    fixtureDefinitionsMatch,
+    fixtureStatesReconciled,
+    cumulativeHoldoutRuns: savedSummary.cumulativeHoldoutRuns ?? null,
     providerParityValid: independentParity.valid,
     providerParityMismatchIndex: independentParity.mismatchIndex,
     providerParityMismatchFields: independentParity.mismatchFields ?? [],
+    successfulFixtureCalls,
     attempts: reassessed.length,
     measurementValidAttempts: reassessed.filter((row) => row.measurementValid)
       .length,
+    measurementValidityGate: measurementValidityGate({
+      split: savedSummary.split,
+      caseCount: copiedCases.length,
+      attempts: reassessed.length,
+      expectedAttempts: savedOrder.expectedAttempts,
+      validAttempts: reassessed.filter((row) => row.measurementValid).length,
+    }),
     businessPassedAttempts: reassessed.filter((row) => row.businessPass).length,
     failureCounts: countClassifications(reassessed, 'failure'),
     measurementFailureCounts: countClassifications(
@@ -450,8 +683,13 @@ export function reassessPromptfoo(runDirectory: string) {
     invalidRun:
       !evidenceComplete ||
       !casesMatchSource ||
+      !splitValid ||
+      !fixtureDefinitionsMatch ||
+      !fixtureStatesReconciled ||
       !order.valid ||
       !independentParity.valid ||
+      (reassessed.some((row) => row.gates?.mcpRuntimeReady !== undefined) &&
+        successfulFixtureCalls === 0) ||
       reassessed.length !== savedOrder.expectedAttempts,
     results: reassessed,
   };

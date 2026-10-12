@@ -72,6 +72,40 @@ describe('exact runtime attempt lifecycle', () => {
       output: '{"status":"answered"}',
     });
   });
+  test('does not confuse the stream IPC turn id with the persisted message turn id', async () => {
+    const result = await simulate((ws) => {
+      send(ws, start);
+      send(ws, {
+        type: 'stream_event',
+        chatJid: 'web:g',
+        agentId: 's',
+        runId: 'r',
+        event: {
+          eventType: 'status',
+          turnId: 'ipc-run-identity',
+        },
+      });
+      send(ws, finish('completed'));
+      send(ws, {
+        type: 'new_message',
+        chatJid: 'web:g',
+        agentId: 's',
+        message: {
+          is_from_me: true,
+          sender: 'commerceagent-agent',
+          content: '{"status":"answered"}',
+          turn_id: 'persisted-message-identity',
+          finalization_reason: 'completed',
+        },
+      });
+    });
+    expect(result).toMatchObject({
+      failure: null,
+      turnId: 'ipc-run-identity',
+      messageTurnId: 'persisted-message-identity',
+      output: '{"status":"answered"}',
+    });
+  });
   test('a host-confirmed Provider failure is not scored as a successful answer', async () => {
     const result = await simulate((ws) => {
       send(ws, start);

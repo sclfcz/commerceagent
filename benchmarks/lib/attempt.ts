@@ -1,5 +1,11 @@
 import { auditFixtureCalls } from '../assertions/audit.js';
 import { assertSpike } from '../assertions/spike.js';
+import {
+  assertBusinessCase,
+  fixtureStateMatchesLedger,
+  parseFixtureVariant,
+  type BusinessCase,
+} from './cases.js';
 import { buildAgentProfilePrompt } from '../../src/agent-profile-prompts.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import {
   hash,
-  renderCasePrompt,
+  renderCasePrompts,
   privateJson,
   workspaceBaseline,
   type Candidate,
@@ -25,6 +31,7 @@ import { startService, stopService, EvalApi, bootstrap } from './service.js';
 import { assessAttempt } from './assessment.js';
 import { FreshStateTracker } from './fresh-state.js';
 import { officialVendor } from './identity.js';
+import { assessMcpRuntime, readMcpRuntimeEvidence } from './mcp-runtime.js';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const bench = path.join(repositoryRoot, 'benchmarks');
@@ -70,7 +77,7 @@ export function persistAttemptResult(
 
 export async function attempt(
   candidate: Candidate,
-  test: SpikeCase,
+  test: SpikeCase | BusinessCase,
   directory: string,
   candidates: Candidate[],
   context: AttemptContext,
@@ -81,15 +88,30 @@ export async function attempt(
   const sourceHash = runtimeSourceHash(repository);
   if (sourceHash !== context.expectedRuntimeSourceHash)
     throw new ContextFailure();
-  const fixtureData = JSON.parse(
-    fs.readFileSync(path.join(bench, 'fixtures/commerce.json'), 'utf8'),
-  );
+  const isBusinessCase = 'fixture_variant' in test;
+  const fixtureVariant = isBusinessCase
+    ? parseFixtureVariant(test.fixture_variant)
+    : null;
+  const fixtureData =
+    fixtureVariant?.data ??
+    JSON.parse(
+      fs.readFileSync(path.join(bench, 'fixtures/commerce.json'), 'utf8'),
+    );
+  if (fixtureVariant)
+    privateJson(path.join(directory, 'fixture-snapshot.json'), {
+      data: fixtureVariant.data,
+      variant: fixtureVariant.variant,
+      config: fixtureVariant.config,
+    });
   const profile = parse(
     fs.readFileSync(path.join(bench, 'profile.yaml'), 'utf8'),
   );
   const fixture = await startFixtureServer({
     data: fixtureData,
-    scenario: test.scenario,
+    scenario: isBusinessCase ? 'normal' : test.scenario,
+    ...(fixtureVariant ? { variantConfig: fixtureVariant.config } : {}),
+    includeWorkflowWrites:
+      isBusinessCase && (test as BusinessCase).tags.includes('write-operation'),
     ledgerFile: path.join(directory, 'fixture.jsonl'),
     host: process.env.BENCH_FIXTURE_BIND_HOST || '127.0.0.1',
   });
@@ -140,15 +162,49 @@ export async function attempt(
       workspace_jid: runtime.workspaceJid,
       runtime_session_id: runtime.sessionId,
     });
-    const observation = await observeTurn({
-      baseUrl: service.baseUrl,
-      cookie: api.cookie,
-      workspaceJid: runtime.workspaceJid,
-      sessionId: runtime.sessionId,
-      prompt: renderCasePrompt(test),
-      timeoutMs,
-    });
-    turnObserved = true;
+    const turnPrompts = renderCasePrompts(test);
+    const turnObservations = [];
+    for (const prompt of turnPrompts) {
+      const turn = await observeTurn({
+        baseUrl: service.baseUrl,
+        cookie: api.cookie,
+        workspaceJid: runtime.workspaceJid,
+        sessionId: runtime.sessionId,
+        prompt,
+        timeoutMs,
+      });
+      turnObserved = true;
+      turnObservations.push(turn);
+      if (turn.failure) break;
+    }
+    const finalTurn = turnObservations.at(-1)!;
+    const observation = {
+      ...finalTurn,
+      output: finalTurn.output,
+      tools: turnObservations.flatMap((turn) => turn.tools),
+      apiRequests: turnObservations.flatMap((turn) => turn.apiRequests),
+      trace: turnObservations.flatMap((turn, index) =>
+        turn.trace.map((event) => ({ ...event, turnIndex: index + 1 })),
+      ),
+      elapsedMs: turnObservations.reduce(
+        (total, turn) => total + turn.elapsedMs,
+        0,
+      ),
+      logicalRunMs: turnObservations.every((turn) => turn.logicalRunMs !== null)
+        ? turnObservations.reduce(
+            (total, turn) => total + turn.logicalRunMs!,
+            0,
+          )
+        : null,
+      failure: turnObservations.find((turn) => turn.failure)?.failure ?? null,
+      turns: turnObservations.map((turn) => ({
+        output: turn.output,
+        turnId: turn.turnId,
+        messageTurnId: turn.messageTurnId,
+        reason: turn.reason,
+        failure: turn.failure,
+      })),
+    };
     privateJson(path.join(directory, 'trace.json'), observation);
     const after = await api.request(route, {
       workspace_jid: runtime.workspaceJid,
@@ -189,13 +245,50 @@ export async function attempt(
       },
       candidate.model,
     );
-    const business = assertSpike(
-      observation.output,
-      test,
-      fixture.ledger,
-      observation.tools,
-    );
+    // Container Runner log lines are flushed when the per-attempt service
+    // exits. Stop it before reading the SDK init marker, then reassess only
+    // the durable file evidence.
+    const serviceData = service.data;
+    if (service) {
+      await stopService(service.child);
+      service = null;
+    }
+    const business = isBusinessCase
+      ? assertBusinessCase(
+          observation.output,
+          test,
+          fixtureVariant!,
+          fixture.ledger,
+          observation.tools,
+          fixture.state,
+        )
+      : assertSpike(
+          observation.output,
+          test,
+          fixture.ledger,
+          observation.tools,
+        );
     const audit = auditFixtureCalls(fixture.ledger, observation.tools);
+    const mcpRuntimeEvidence = readMcpRuntimeEvidence(
+      path.join(serviceData, 'groups', runtime.folder, 'logs'),
+    );
+    const mcpRuntime = isBusinessCase
+      ? assessMcpRuntime(mcpRuntimeEvidence, test as BusinessCase)
+      : {
+          ready:
+            mcpRuntimeEvidence?.mcpServers.some(
+              (server) => server.status === 'connected',
+            ) ?? false,
+        };
+    privateJson(path.join(directory, 'mcp-runtime-evidence.json'), {
+      evidence: mcpRuntimeEvidence,
+      assessment: mcpRuntime,
+    });
+    const fixtureStateReconciled = fixtureStateMatchesLedger(
+      fixture.ledger,
+      fixture.state,
+    );
+    const auditMatched = audit.matched && fixtureStateReconciled;
     const usageComplete =
       usage.known &&
       !!usage.usage &&
@@ -213,7 +306,10 @@ export async function attempt(
       sdkModelMatches: usage.identityVerified,
       contextVerified: contextEvidence.verified,
       freshState,
-      auditMatched: audit.matched,
+      auditMatched,
+      mcpRuntimeReady: mcpRuntime.ready,
+      toolUnavailable: audit.toolUnavailableCalls.length > 0,
+      fixtureBypass: audit.bypassedFixtureCalls.length > 0,
       onlyAllowedTools: business.checks.onlyAllowedTools,
       businessPass: business.pass,
       gateway: candidate.gateway,
@@ -238,7 +334,11 @@ export async function attempt(
       unexpectedUsageRecords: usage.unexpectedRecordCount,
       gates: {
         modelIdentity: usage.identityVerified && !candidate.gateway,
-        independentFixture: audit.matched,
+        independentFixture: auditMatched,
+        mcpRuntimeReady: mcpRuntime.ready,
+        toolUnavailable: audit.toolUnavailableCalls.length > 0,
+        fixtureBypass: audit.bypassedFixtureCalls.length > 0,
+        fixtureStateReconciled,
         freshState,
         terminalClassified: observation.reason !== null,
         usageReconciled: usageComplete && usage.scopeIsolated,
@@ -247,14 +347,26 @@ export async function attempt(
       contextFingerprint: contextEvidence.fingerprint,
       observedPromptHashes: contextEvidence.observedPromptHashes,
       caseHash: hash(test),
-      requestPromptHash: hash(renderCasePrompt(test)),
+      requestPromptHash: hash(turnPrompts),
       runtimeSourceHash: sourceHash,
       workspaceBaselineHash,
       profileContentHash: hash(profile),
-      fixtureHash: hash(fixtureData),
+      fixtureHash: hash({
+        data: fixtureData,
+        variant:
+          fixtureVariant?.variant ??
+          ('scenario' in test ? test.scenario : null),
+        config: fixtureVariant?.config ?? null,
+      }),
       toolSchemaHash: hash(
-        (await import('../mcp-fixture-server/server.js')).toolDefinitions,
+        (await import('../mcp-fixture-server/server.js')).definitionsForFixture(
+          isBusinessCase &&
+            (test as BusinessCase).tags.includes('write-operation'),
+        ),
       ),
+      fixtureStateHash: hash(fixture.state),
+      fixtureStateReconciled,
+      fixtureAudit: audit,
       fixtureLedgerSummary: fixture.ledger.map((call) => ({
         name: call.name,
         arguments: call.arguments,
@@ -273,6 +385,8 @@ export async function attempt(
     throw error;
   } finally {
     if (service) await stopService(service.child);
+    if (isBusinessCase)
+      privateJson(path.join(directory, 'fixture-state.json'), fixture.state);
     await fixture.close();
   }
 }

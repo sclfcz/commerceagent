@@ -6,6 +6,7 @@ import { reassessPromptfoo } from '../lib/reassess-promptfoo.js';
 import { parse } from 'yaml';
 import { calculateCost } from '../lib/pricing.js';
 import { summarizeMetrics, type MetricAttempt } from '../lib/metrics.js';
+import { countHoldoutRuns } from '../lib/cases.js';
 import {
   renderPublicSummary,
   validatePublicSummary,
@@ -97,10 +98,15 @@ export function createBenchmarkReport(runDirectory: string) {
       ];
     }),
   );
+  const cumulativeHoldoutRuns = countHoldoutRuns(
+    path.join(benchmarkDirectory, 'results/holdout-runs.jsonl'),
+  );
   const publicSummary = renderPublicSummary({
     runId: path.basename(runDirectory),
     metrics,
     costs: costByCandidate,
+    split: summary.split ?? null,
+    holdoutCumulativeRuns: cumulativeHoldoutRuns,
     privateCandidates: candidates,
   });
   const publicCheck = validatePublicSummary(publicSummary.markdown, candidates);
@@ -116,12 +122,17 @@ export function createBenchmarkReport(runDirectory: string) {
       fs.readFileSync(path.join(benchmarkDirectory, 'pricing.yaml'), 'utf8'),
     ),
     stage: summary.stage,
+    split: summary.split ?? null,
+    finalRun: summary.finalRun ?? false,
+    repetitions: summary.repetitions ?? 3,
+    cumulativeHoldoutRuns,
     scope: summary.scope,
     artifactReconciliation,
     promptfooReportedPasses: promptfooResults.filter(
       (result: Record<string, any>) => result.success === true,
     ).length,
     costByCandidate,
+    costAssumptions: pricing.assumptions ?? [],
     metrics,
     publicReport: {
       path: 'report.public.md',
@@ -146,11 +157,16 @@ export function main() {
     JSON.stringify({
       schemaVersion: report.schemaVersion,
       stage: report.stage,
+      split: report.split,
+      finalRun: report.finalRun,
+      repetitions: report.repetitions,
+      cumulativeHoldoutRuns: report.cumulativeHoldoutRuns,
       scope: report.scope,
       attempts: report.attempts,
       evidenceComplete: report.evidenceComplete,
       executionOrderValid: report.executionOrderValid,
       providerParityValid: report.providerParityValid,
+      measurementValidityGate: report.measurementValidityGate,
       measurementValidAttempts: report.measurementValidAttempts,
       businessPassedAttempts: report.businessPassedAttempts,
       failureCounts: report.failureCounts,
@@ -168,7 +184,12 @@ export function main() {
       invalidRun: report.invalidRun,
     }) + '\n',
   );
-  if (report.invalidRun) process.exitCode = 1;
+  if (
+    report.invalidRun ||
+    (report.measurementValidityGate.applicable &&
+      !report.measurementValidityGate.passed)
+  )
+    process.exitCode = 1;
 }
 
 if (

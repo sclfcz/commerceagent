@@ -1,12 +1,11 @@
-# 跨境电商模型评测 spike
+# 跨境电商 Multi-Model Benchmark
 
-第一阶段验证测量链路，只覆盖合成资料的查询与分析任务。5 条用例包括退款计算、空订单、
-矛盾政策、商品描述提示注入和广告指标计算。每个候选执行 3 次，按用例和重复轮次轮换顺序。
-调用次数上限、输出字段类型、ROAS 倍数口径和 evidence_id 引用规则明确写入任务；
-正确答案仅保存在驱动器中。每轮保存用例快照、case hash 和实际请求 Prompt hash。
-Promptfoo 已接入为编排和私有结果保存层；被测对象仍是独立 CommerceAgent Container 的真实运行。
-当前仍是 5 条链路用例，不用于模型排名，也未接入 Judge 或正式业务集。
-历史链路验证见 [验证记录](BENCHMARK-VALIDATION.md)；问题修复与双候选 smoke 见
+阶段 1–3 已完成真实 CommerceAgent Container 测量链路、Promptfoo 编排、独立重判及指标报告；阶段 4
+包含版本化业务用例、fixtures、少量固定脚本多轮对话，以及只作用于隔离 fixture 的退款申请/人工转接模拟。
+这些写操作不连接任何真实店铺或资金系统。`bench:spike` 保留原 5 条接线用例；`bench:run` 默认运行 50 条 dev 用例，holdout 有 18 条。
+阶段 4 的测量链路已在修复后完整重跑并通过：run `promptfoo-2026-10-12T14-43-11-523Z` 的 50/50 尝试测量有效，SDK init/状态证据 50/50 就绪，成功 fixture MCP 调用 105 次，Bash 旁路 0。候选仍为网关待核验，质量合格样本为 0，不能据此排名；Judge 与人工校准未开始。
+被测对象始终是独立 CommerceAgent Container 的真实端到端运行，不存在 SDK 直连备援。
+历史链路验证见 [验证记录](BENCHMARK-VALIDATION.md)；阶段修复和验收状态见
 [验收修订记录](BENCHMARK-REVISION.md)。
 
 ## 运行
@@ -24,12 +23,16 @@ npm run bench:spike -- --existing --smoke
 npm run bench:spike -- --existing
 ```
 
-Promptfoo 入口复用同一套 `attempt()` 驱动，可运行两条 smoke 用例或完整 5 条用例，默认
-每条用例重复 3 次：
+Promptfoo 入口复用同一套 `attempt()` 驱动。`bench:run` 默认选 dev split，每条用例重复 3 次；
+holdout 只允许最终正式运行，必须同时传入 `--split holdout --final-run`，并且整个留出集最多启动一次；阶段 5 校准和阶段 6 配置对比只能使用 dev。
+可用 `--candidate <候选别名>` 限定单个候选、
+`--case-limit N` 缩小当前 split 范围，`--smoke` 只运行当前 split 的首条用例一次：
 
 ```bash
 npm run bench:run -- --existing --smoke
-npm run bench:run -- --existing
+npm run bench:run -- --existing --candidate candidate-<alias>
+npm run bench:run -- --existing --candidate candidate-<alias> --repetitions 1
+npm run bench:run -- --existing --split holdout --final-run
 npm run bench:run -- --case-limit 2
 npm run bench:report -- promptfoo-<run-id>
 ```
@@ -38,7 +41,8 @@ Promptfoo 及其依赖安装在独立的 `benchmarks/` npm 项目和 lockfile �
 产品依赖版本，不会被 benchmark 工具链重新解析。
 
 `bench:report` 会再次校验实际顺序，并从每次运行的证据重新计算分类，输出私有的
-`report.private.json` 与脱敏的 `report.public.md`。公开报告先扫描候选配置中的模型 ID、完整
+`report.private.json` 与脱敏的 `report.public.md`。私有报告记录运行 split、重复次数和 holdout 累计运行次数；
+最终 holdout 启动会在被忽略的 `benchmarks/results/holdout-runs.jsonl` 记一笔，失败也会消耗唯一运行额度，不允许为调试或修 Prompt 重跑。公开报告先扫描候选配置中的模型 ID、完整
 Endpoint 和主机名；发现匹配就拒绝写出。公开标签会重新映射为运行级匿名的
 `candidate-<hash>` 编号，并避免与私有别名重合。
 命令行只打印汇总指标，不打印模型回复或 Provider 私有配置。
@@ -57,7 +61,9 @@ fixture 账本摘要、上下文 hash、耗时和执行序号。测量失败会�
 因此 Promptfoo 界面也不能把它显示为可排名候选。`bench:report` 从私有的 `trace.json`、
 fixture 账本、`messages.db`、Context 与 fresh-state 证据重新计算业务和测量分类，再与 Promptfoo
 metadata 比较；用例从仓库用例源文件复核，Profile 期望值从 `profile.yaml` 与全新数据库里的
-Profile 记录推导，端点身份重新调用白名单规则判断。`context-evidence.json.expected` 不参与重判。
+Profile 记录推导，端点身份重新调用白名单规则判断。`context-evidence.json.expected` 不参与重判；实际期望上下文从版本库 Profile、运行数据库与观察到的上下文证据重新推导。
+候选网关标记也不信任结果文件内的派生值，而是依据候选 Endpoint 和声明重新调用白名单规则计算。
+独立报告显式记录这两项重判来源。新业务用例的 fixture 快照随尝试私有保存，报告会以快照重判并比较版本库源文件 hash。
 重判只写新的报告文件，不覆盖原始 `result.json`。
 
 Promptfoo 固定为 `0.124.1`，该版本要求 Node `^20.20.0 || >=22.22.0`；产品其他部分的
@@ -77,14 +83,15 @@ benchmark 锁文件中的 `tsx` 固定为 `4.23.15`，修复了其 esbuild 相�
 
 候选价格填在 `benchmarks/pricing.yaml`，条目除别名外还带 `sha256(model + "|" + origin)` 指纹和
 计费区域。报告只有在指纹和区域都与本次候选相符时才使用费率；同一别名换了模型、API origin 或区域，
-成本一律为 `unknown`。这些指纹不包含可读模型名或完整 Endpoint。本地候选与匿名别名的对应关系只
-保存在忽略文件中。
+成本一律为 `unknown`。这些指纹不包含可读模型名或完整 Endpoint，但**`pricing.yaml` 本身不匿名**：可从有限的候选集合、价格组合和官方来源链接反推模型。
+匿名只适用于通过泄漏扫描的 `report.public.md`；不要把价格文件或私有结果当作公开匿名材料。候选映射文件本地保存，不能写入公开报告。
 
 中国内地公开价来自[官方模型市场](https://www.qianwenai.com/models)，核对日期为 2026-10-12。
 `candidate-cn1` 的输入/输出/思考、缓存命中、显式缓存创建单价依次为 ¥0.8/¥2.7/¥0.1/¥1.25；
 `candidate-cn2` 使用当天展示的输入/输出/显式缓存创建/显式缓存命中价格
-¥0.2/¥0.8/¥0.25/¥0.02；Runner 的 `cache_read_input_tokens` 对应平台的显式缓存命中项。
-费率按每百万 token 计。
+¥0.2/¥0.8/¥0.25/¥0.02；Runner 的 `cache_read_input_tokens` 暂按平台的显式缓存命中项计价。
+这是尚未通过平台账单核实的计费假设：若 Anthropic 协议请求实际按普通缓存命中价 ¥0.04 计费，报告会低估这部分成本。
+在账单对账前，相关成本应理解为按该假设计算的估值，不能声称等于实际扣款。费率按每百万 token 计。
 价格按请求次数对应的每次 usage 累加，失败尝试和重试也计入总成本；成功任务成本为总成本除以
 合格通过次数。只要价格或任一次 usage 不完整，总成本与成功任务成本都显示 `unknown`。Promptfoo
 界面的成本列无效，可能显示零或沿用运行时估算；不要据此比较模型。唯一成本口径是
@@ -189,11 +196,12 @@ fixture 调用与 stream 对应、全新状态基线、账本用量一致、SDK 
 业务失败保留在结果中，不为提高通过率反复修改断言或自动重试。
 `completed` 只说明运行终态，不能代替业务断言。
 审计由 `assertions/audit.ts` 独立计算，不存在于业务 checks 中，也不参与 `businessPass`
-和 `businessPassedAttempts`。丢失工具事件使测量门槛失败，不能直接拉低独立业务统计。
-空 stream 工具序列和空 fixture 账本可以对账，未调用必用工具由业务断言判失败。
-观察到 Bash 等禁用工具时记录 `tool_policy_violation`。若同时存在无法匹配的 fixture 调用，
-另记 `measurementFailure: audit_mismatch`，保持样本不符合正式质量评测资格；不能仅凭
-不匹配就断言一定绕过 MCP，也不能冒充 `collection_incomplete`。两个失败维度独立保留。
+和 `businessPassedAttempts`。StreamEvent 中有明确失败结果的 fixture 工具调用会作为已观测的
+工具执行失败保留，不冒充遥测丢失；没有结果的孤立工具事件仍使测量门槛失败。空 stream 工具
+序列和空 fixture 账本可以对账，未调用必用工具由业务断言判失败。若 fixture 账本有调用、
+同时 stream 明确记录了 Bash 等禁用工具，则归为可观测的工具策略违规，不再冒充采集丢失；
+该尝试仍因 `tool_policy_violation` 业务失败。无法解释的账本/stream 差异记为
+`measurementFailure: audit_mismatch`。工具策略与测量分类分别保留。
 
 官方端点判定依据（2026-10-11 核验）：
 
@@ -231,26 +239,45 @@ Provider 导入无论成功或失败均立即删除 `provider-snapshot`。每个
 网关模型名改写与隐藏子请求仍需网关侧日志证明。真实链路未运行时，不得将离线测试当作
 Container 验收或模型质量结论。
 
-后续阶段才添加 dev/holdout、完整指标报表、配对区间、盲评 Judge 和约 60 条分层人工校准。
+阶段 4 的业务用例集已加入。阶段 5 仍计划通过 Promptfoo `llm-rubric` 盲评，并以约 20 条人工标注校准；不引入 DeepEval。阶段 6 的 Profile 对比和正式多候选运行仍未开始。
 第一版不引入 Langfuse；线上观测仍需先定义脱敏和保留期限。
 
 ## 开发验证
 
 ```bash
 npm run bench:typecheck
-npx vitest run tests/benchmark-spike.test.ts tests/benchmark-spike-transport.test.ts tests/benchmark-spike-service.test.ts tests/routes-agent-profiles.test.ts
+npx vitest run tests/benchmark-cases.test.ts tests/benchmark-spike.test.ts tests/benchmark-spike-transport.test.ts tests/benchmark-spike-service.test.ts tests/benchmark-promptfoo.test.ts tests/routes-agent-profiles.test.ts
 npm run docs:check
 ```
 
-前三个测试文件仅使用合成资料和本机 HTTP/WebSocket，不调用真实模型。服务测试验证真实
-服务的启动、认证、MCP 注册和 Profile 绑定，Container 执行仍由真实 spike 单独验收。
+benchmark 用例测试只使用合成资料和本机 HTTP，不调用真实模型；服务测试验证真实服务的启动、认证、MCP 注册和 Profile 绑定。
+真实模型 dev 集运行仍需单独执行，并检查测量有效率至少 95%；离线回归不替代该验收。
+`reassessed.json` 与终端摘要会单列 `measurementValidityGate`：仅完整 50 条 dev 矩阵适用，
+计算 `measurementValidAttempts / attempts`，必须达到 0.95。`invalidRun` 表示证据/执行序列/parity
+是否完整正确，不能替代这项阶段验收门槛。
 
-## 扩充用例时的约束
+## 阶段 4：业务用例集与 fixtures
 
-现有 5 条是接线用例，故意明确工具、参数和输出结构，不用于区分模型质量。
-后续业务集应使用客户的自然业务目标，隐藏工具名称与参数提示，覆盖需追问、拒答、
-多步证据选择与干扰项，并分开报告有提示/无提示分层结果；保留必要的可见输出契约。
-不得把当前 14/15 接入结果外推为业务胜率。
+`benchmarks/cases/dev/` 与 `benchmarks/cases/holdout/` 中按业务域拆分 YAML。客户政策域 28 条（dev 22、holdout 6），
+商品对比和广告复盘各 20 条（dev 14、holdout 6），合计 68 条。三个域均覆盖 normal、boundary、empty、conflict、injection、clarify、refuse、distractor；
+另有 8 条标记为 write-operation（含禁止副作用断言），以及 3 条固定脚本多轮用例。加载器校验 Schema、split、类别/标签覆盖、fixture 版本与来源、oracle、证据引用和工具匹配器。
+用例 prompt 使用自然业务描述，不写工具名、工具参数或结构化输出字段名；共享输出契约只在 Profile 的 AGENTS 段定义。
+最终 JSON 统一包含 `status`、`facts`、`evidence`，自然语言 `answer` 可选；金额和有量纲数值用 `{value, unit}` 表示。
 
-离线重判会写入包含断言版本 hash 的 `summary.reassessed-<hash>.json`，同时重算业务、
-测量有效和最终通过计数；原始 `summary.json` 与既有重判文件保留。
+fixtures 位于 `benchmarks/fixtures/v1/`，按类别存储并由 `fixture_variant` 选择版本化场景。
+Fixture 包含分页、字段缺失、多币种、冲突、注入和超时错误变体；数值断言由 oracle 从 fixture 关系计算，
+同时检查容差、单位/币种、证据来源、禁止结论、工具调用参数和最终 fixture 状态。`assertions/__mutations__/` 为错误金额、币种、证据、
+工具参数和禁止结论提供反向变异，新测试要求每个变异失败。
+模拟退款工具只创建 `pending` 申请，人工工具只创建 `queued` 转接记录；断言要求最终状态、成功工具结果账本重放三者一致，预期写入必须有对应成功调用记录，不能以空状态通过。SDK 初始化还必须证明 fixture 已连接且每条用例需要的工具均可见；出现 “No such tool available” 判为 `tool_unavailable`，经 Bash 等非 fixture 工具产生账本记录判为 `fixture_bypass`，两者都使测量无效。
+用例覆盖正确金额/币种、资格不满足或政策冲突时不得创建申请、应转人工、重复提交防护，以及查询场景不得产生任何副作用。
+所有真实商品平台和资金副作用均不在本评测范围内。
+Fixture 超时由 fixture 服务按场景延迟后返回明确的 MCP 工具错误；这验证 Agent 是否正确报告不可用。
+只要 tool call 在账本与 stream 中对应、usage/context/fresh-state 等采集证据完整，该类业务超时仍可 `measurementValid=true`，
+不能因为模型拿到工具错误而分类成测量失败。真实网络断连、Runner 超时仍按传输/采集失败处理。
+
+多轮用例是固定的用户消息脚本，按顺序在同一隔离 Session 中发送，不模拟用户，也不从模型回答生成后续消息；每个脚本独立创建全新服务，最终答案、全部工具事件与最终 fixture 状态共同断言。
+默认运行只加载 dev 文件，不读取 holdout 用例。只有最终正式运行的 `--split holdout --final-run` 会加载 holdout，并且成功或失败启动都计入唯一次数。
+阶段 5 Judge 校准和阶段 6 Prompt/工具变体比较只能用 dev；holdout 只能在最终正式选型运行时开启一次。阶段 4 测量链路验收已通过：最新完整 dev 运行的证据、执行顺序、Provider parity 和 95% 测量有效率门槛均通过。此前工具未连接的两次完整运行和两次中途停止的运行均保留原始材料并标记作废；离线 Schema/oracle/变异测试不替代真实运行验收。
+
+`bench:spike` 原 5 条用例仍用于链路验证，明确提示工具与输出结构，不应与业务集混为一谈，也不得将之前的小样本通过率外推为业务胜率。
+离线重判写入独立报告和断言版本 hash，不覆盖原始 `result.json` 或已有报告。

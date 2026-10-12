@@ -156,6 +156,35 @@ describe('fixture audit outside the Runner', () => {
       await server.close();
     }
   });
+  test('returns an MCP-compliant string server version for numeric fixture versions', async () => {
+    const directory = fs.mkdtempSync(
+      path.join(temp, 'numeric-server-version-'),
+    );
+    const server = await startFixtureServer({
+      data: { ...data, version: 1 },
+      scenario: 'normal',
+      ledgerFile: path.join(directory, 'fixture.jsonl'),
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/rpc`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${server.token}` },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: '2025-03-26' },
+        }),
+      });
+      const body = (await response.json()) as any;
+      expect(body.result.serverInfo).toEqual({
+        name: 'commerce_fixture',
+        version: '1',
+      });
+    } finally {
+      await server.close();
+    }
+  });
   test('the actual stdio bridge initializes, lists tools and executes an audited call', async () => {
     const directory = fs.mkdtempSync(path.join(temp, 'bridge-'));
     const fixture = await startFixtureServer({
@@ -213,6 +242,35 @@ describe('fixture audit outside the Runner', () => {
       if (child.exitCode === null) await once(child, 'exit');
       lines.close();
       await fixture.close();
+    }
+  });
+  test('numeric v1 fixture schema version is serialized as a string in MCP initialize', async () => {
+    const directory = fs.mkdtempSync(path.join(temp, 'numeric-mcp-version-'));
+    const server = await startFixtureServer({
+      data: { ...data, version: 1 },
+      scenario: 'normal',
+      ledgerFile: path.join(directory, 'fixture.jsonl'),
+    });
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/rpc`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${server.token}` },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: '2025-03-26' },
+        }),
+      });
+      const payload = (await response.json()) as {
+        result: { serverInfo: { name: string; version: string } };
+      };
+      expect(payload.result.serverInfo).toEqual({
+        name: 'commerce_fixture',
+        version: '1',
+      });
+    } finally {
+      await server.close();
     }
   });
   test.each(['normal', 'conflict', 'injection'] as const)(

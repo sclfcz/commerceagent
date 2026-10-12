@@ -2,6 +2,8 @@
 # Rates are currency units per million tokens.
 effective_date: 2026-10-12
 currency: CNY
+assumptions:
+  - candidate-cn2 cache_read is billed at the explicit cache-hit rate shown by the official price card. This has not been reconciled against a platform invoice; if the compatible endpoint uses the ordinary cache-hit rate, modeled cost is understated.
 candidates:
   candidate-cn1:
     effective_date: 2026-10-12

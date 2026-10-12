@@ -8,6 +8,7 @@ import path from 'node:path';
 import { assertSpike } from '../benchmarks/assertions/spike.js';
 import {
   assessAttempt,
+  measurementValidityGate,
   rotateCandidates,
   summarizeCandidates,
 } from '../benchmarks/lib/assessment.js';
@@ -31,6 +32,7 @@ const healthy = {
   contextVerified: true,
   freshState: true,
   auditMatched: true,
+  mcpRuntimeReady: true,
   onlyAllowedTools: true,
   businessPass: true,
   gateway: false,
@@ -45,6 +47,41 @@ const example: SpikeCase = {
 };
 
 describe('measurement and behavior are separate', () => {
+  test('the complete 50-case dev gate requires at least 95% measurement validity', () => {
+    expect(
+      measurementValidityGate({
+        split: 'dev',
+        caseCount: 50,
+        attempts: 50,
+        expectedAttempts: 50,
+        validAttempts: 46,
+      }),
+    ).toEqual({
+      applicable: true,
+      minimumRate: 0.95,
+      rate: 0.92,
+      passed: false,
+    });
+    expect(
+      measurementValidityGate({
+        split: 'dev',
+        caseCount: 50,
+        attempts: 50,
+        expectedAttempts: 50,
+        validAttempts: 48,
+      }).passed,
+    ).toBe(true);
+    expect(
+      measurementValidityGate({
+        split: 'dev',
+        caseCount: 2,
+        attempts: 2,
+        expectedAttempts: 2,
+        validAttempts: 2,
+      }).applicable,
+    ).toBe(false);
+  });
+
   test('no tool calls is a business failure with a matching empty audit', () => {
     const business = assertSpike(
       JSON.stringify(example.expected),
@@ -58,7 +95,7 @@ describe('measurement and behavior are separate', () => {
       assessAttempt({ ...healthy, businessPass: business.pass }),
     ).toMatchObject({ measurementValid: true, failure: 'business_assertion' });
   });
-  test('forbidden shell plus unmatched fixture calls is a policy violation, not collection loss', () => {
+  test('unmatched fixture call with a forbidden shell is an invalid bypass', () => {
     const business = assertSpike(
       JSON.stringify(example.expected),
       example,
@@ -76,13 +113,14 @@ describe('measurement and behavior are separate', () => {
     const result = assessAttempt({
       ...healthy,
       auditMatched: false,
+      fixtureBypass: true,
       onlyAllowedTools: business.checks.onlyAllowedTools,
       businessPass: business.pass,
     });
     expect(result).toMatchObject({
-      failure: 'tool_policy_violation',
+      failure: 'fixture_bypass',
       businessFailure: 'tool_policy_violation',
-      measurementFailure: 'audit_mismatch',
+      measurementFailure: 'fixture_bypass',
       qualityEligible: false,
     });
   });
@@ -151,6 +189,108 @@ describe('measurement and behavior are separate', () => {
       measurementFailure: 'audit_mismatch',
       businessFailure: null,
       pass: false,
+    });
+  });
+  test('a recorded failed fixture tool result explains the absent ledger call', () => {
+    const audit = auditFixtureCalls(
+      [],
+      [
+        {
+          name: 'mcp__commerce_fixture__get_order',
+          resultObserved: true,
+          failed: true,
+        },
+      ],
+    );
+    expect(audit).toMatchObject({
+      matched: true,
+      failedBeforeFixture: ['get_order'],
+      unexplainedStream: [],
+    });
+  });
+  test('a fixture ledger call observed alongside a forbidden tool is a policy bypass, not lost telemetry', () => {
+    const ledger = [
+      {
+        sequence: 1,
+        name: 'get_order',
+        arguments: { order_id: 'ORD-100' },
+        result: {},
+        success: true,
+      },
+    ];
+    const audit = auditFixtureCalls(ledger, [{ name: 'Bash' }]);
+    expect(audit).toMatchObject({
+      matched: true,
+      bypassedFixtureCalls: ['get_order'],
+    });
+    const business = assertSpike(
+      JSON.stringify(example.expected),
+      example,
+      ledger,
+      [{ name: 'Bash' }],
+    );
+    expect(business.checks.onlyAllowedTools).toBe(false);
+    expect(
+      assessAttempt({
+        ...healthy,
+        auditMatched: audit.matched,
+        fixtureBypass: audit.bypassedFixtureCalls.length > 0,
+        onlyAllowedTools: business.checks.onlyAllowedTools,
+        businessPass: business.pass,
+      }),
+    ).toMatchObject({
+      measurementValid: false,
+      measurementFailure: 'fixture_bypass',
+      failure: 'fixture_bypass',
+      businessFailure: 'tool_policy_violation',
+    });
+  });
+  test('disconnected MCP or a missing required tool is a measurement failure', () => {
+    expect(assessAttempt({ ...healthy, mcpRuntimeReady: false })).toMatchObject(
+      {
+        measurementValid: false,
+        measurementFailure: 'tool_unavailable',
+      },
+    );
+  });
+  test('an explicit No such tool result is a measurement failure', () => {
+    const audit = auditFixtureCalls(
+      [],
+      [
+        {
+          name: 'mcp__commerce_fixture__get_order',
+          resultObserved: true,
+          failed: false,
+          unavailable: true,
+        },
+      ],
+    );
+    expect(audit.toolUnavailableCalls).toEqual(['get_order']);
+    expect(
+      assessAttempt({
+        ...healthy,
+        toolUnavailable: audit.toolUnavailableCalls.length > 0,
+      }),
+    ).toMatchObject({
+      measurementValid: false,
+      measurementFailure: 'tool_unavailable',
+    });
+  });
+  test('an unmatched fixture tool event without a collected result remains an audit failure', () => {
+    expect(
+      auditFixtureCalls(
+        [],
+        [
+          {
+            name: 'mcp__commerce_fixture__get_order',
+            resultObserved: false,
+            failed: null,
+          },
+        ],
+      ),
+    ).toMatchObject({
+      matched: false,
+      unexplainedStream: ['get_order'],
     });
   });
   test('dirty state rejects an otherwise correct answer', () => {

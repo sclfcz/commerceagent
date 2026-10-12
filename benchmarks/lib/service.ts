@@ -91,6 +91,8 @@ export async function startService(options: {
     TZ: 'UTC',
     ADMIN_HOST_ONLY_MODE: 'false',
     MAIN_AGENT_CONTEXT_SOURCE: 'managed',
+    COMMERCEAGENT_BENCHMARK_MODE: '1',
+    COMMERCEAGENT_BENCHMARK_ALWAYS_LOAD_MCP_SERVER: 'commerce_fixture',
     FALLBACK_MODEL: '',
     PLUGIN_AUTO_SCAN: 'false',
     CONTAINER_IMAGE: options.image,

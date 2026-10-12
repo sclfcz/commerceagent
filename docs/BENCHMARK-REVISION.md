@@ -233,3 +233,61 @@ snake_case、camelCase 和省略输入字段测试全部失败。
   provider snapshot 和 key 格式痕迹均为 0。
 
 阶段 3 的代码修正、全量验证和真实指标矩阵现已完成，等待验收；阶段 4 尚未开始。
+
+### 阶段 4 范围补充与实现记录（2026-10-12）
+
+遵照阶段 4 的两项范围补充，六阶段结构和顺序不变：
+
+- 在隔离 fixture MCP 中加入 `create_refund_request` 与 `escalate_to_human` 两个模拟写工具。退款工具只创建 `pending` 申请，人工工具只创建 `queued` 跟进记录；不会连接真实店铺或资金系统。8 条用例断言最终状态，覆盖正确金额/币种、不符合资格或政策冲突时不退款并转人工、重复申请防护，以及查询场景不得产生副作用。
+- 增加 3 条固定脚本多轮用例。每条将用户消息按序发到同一全新 Session，不模拟用户、不根据模型回复生成后续内容；最后一轮回复、全轮工具事件和最终 fixture 状态都进入确定性检查。
+- 用例共 68 条：客户政策 28 条（dev 22、holdout 6），商品对比及广告复盘各 20 条（dev 14、holdout 6），dev 总计 50 条、holdout 18 条。
+- Holdout 现在必须同时显式传入 `--split holdout --final-run`；不可 `--smoke`、`--case-limit`、单候选筛选或重复启动。留出集只在最终正式选型运行中使用；阶段 5 Judge 校准和阶段 6 配置对比都只能使用 dev。失败的最终运行也消耗唯一 holdout 运行额度。
+- `reassess` 不采用 `context-evidence.json.expected`，从版本库 Profile、运行数据库和实际上下文重新构造期望值；网关标记从候选端点和原始声明重新计算，不信任派生字段。写操作最终状态从 fixture MCP 调用账本重放并与私有状态快照比较。独立报告显式输出这三项重判来源。
+- 费率文件注明：缓存读取按显式命中价计费仍是未经平台账单核对的假设；若实际按普通缓存命中价计费，模型成本会被低估。`pricing.yaml` 可由候选集合、价目与来源反推模型，匿名只适用于通过泄漏检查的公开报告。
+
+#### 本轮验证与未完成验收
+
+- `tests/benchmark-cases.test.ts`、spike/transport/service/gates 与 Promptfoo 专项测试：**91 项通过**；benchmark 类型检查、`docs:check` 通过。覆盖 68 条 Schema/标签矩阵、oracle、金额/币种/证据/工具/禁止结论变异、分页、缺字段、模拟超时业务分类、写操作状态和重复申请幂等性。
+- 使用一个本地已配置但身份待核验的候选执行过早期 42 条 dev 尝试。其原始逐次结果有 22/42 被初始逻辑标记为 measurement-valid（52.4%），其中 18 次 `audit_mismatch`、2 次超时、2 次上游错误，未达到 95% 门槛；此外当时重判在 `summary.json` 写出前读取 split 信息而失败。该矩阵不是可接受报告：之后用例定义和工具断言发生了变更，不能用于质量指标或通过率结论。
+- 另有一条早期 smoke 的 1/1 尝试 measurement-valid，但业务检查被标为 `tool_policy_violation`，候选身份仍待核验；当时也没有生成完整报告。现已在评测开始时写入 `run-metadata.json`，并由重判读取，覆盖“报告尚未写出”的顺序问题。旧运行保留，仅作诊断，不追加或覆盖原模型调用。
+- **当前阶段 4 尚未验收通过**：最终 68 条矩阵下的 dev Container 全量测量有效率 ≥95% 还未复验。下一步应先确认 fixture 调用账本与 stream 事件能稳定一一对应，再以一个候选跑完整 50 条 dev；若仍低于 95%，报告为阻塞并调查，不得用重复运行筛掉失败样本。
+
+阶段 4 实现已按新范围更新，但真实 dev 门槛仍待通过；阶段 5、6 均未开始。
+
+### 阶段 4 账本/stream 对账诊断（2026-10-12）
+
+- 检查旧的 42 条 dev 运行 `promptfoo-2026-10-12T04-20-04-695Z` 的原始文件后，确认它只用了一个网关候选。18 条旧 `audit_mismatch` 不能一概解释为 WebSocket 漏事件：其中 17 条是 stream 有 fixture 工具开始事件而 fixture 账本没有对应记录；这组里有 11 条最终回答明确记载工具不可用，证据指向工具调用在抵达 fixture 前失败。另有 2 条是 fixture 账本有调用而 stream 没有 fixture MCP 调用，同时出现 Bash，符合绕过 MCP 的工具策略违规。多条不匹配还伴随其他禁用工具调用。
+- 旧 trace 没有保留工具结果事件的错误标记，因此无法事后严格区分 MCP 执行失败和工具遥测缺失；不通过修改旧证据来重判。`commerceagent-provider.ts` 现将工具结果是否明确失败、结果是否收齐及工具 ID 关联写入新的私有 trace。审计会把明确失败的调用计作可观察的工具执行失败，并把“账本调用 + 可见禁用工具”归为工具策略违规；只有无法解释的差异仍为 `audit_mismatch`。
+- 模拟写操作工具现在只对带 `write-operation` 标签的用例开放；其他业务用例只收到只读工具定义，避免把写能力无条件暴露给整套用例。
+- 新增离线断言覆盖三类情形：明确失败的工具结果、带 Bash 的 fixture 账本调用、没有结果的孤立 stream 工具事件。阶段 4 50 条 dev 全矩阵尚未重跑，测量有效率门槛仍未验收；本轮未运行 holdout，也未进入阶段 5/6。
+
+### 阶段 4 首次完整 dev 验收与采集修正（2026-10-12）
+
+- 使用固定镜像 `sha256:e7a2989fbcfaaa0ea922924d27f718ce2fc0787609f0f6cd6b619da1ee897d1e`、一个本地网关候选，完成 50 条 dev × 1 次运行：`promptfoo-2026-10-12T07-43-05-334Z`。原始结果 `summary.json` 显示证据完整、执行顺序正确、Provider parity 通过；测量有效 46/50（92%），低于 95%，因此阶段 4 门槛未通过。测量失败为 1 次上游错误（`runner_exit`）和 3 次 `collection_incomplete`。业务通过 3/50；34 次工具策略违规和 13 次业务断言失败。候选为网关待核验，质量合格样本为 0，成本未知；不生成排名结论。
+- 对 3 条多轮失败的只读证据核对显示：Runner 日志中的 `turnId` 是 IPC 运行标识，`inputTurnId` 才与持久化消息 `message.turn_id` 对应。WebSocket 收集器把这两个不同用途的 ID 当成同一标识比较，丢弃了数据库中已完成的 `sdk_final` 回复，随后触发 5 秒收集超时。根因已确认在 benchmark 采集适配器，不在 fixture 账本；单独的上游错误仍需保留为失败。
+- `observeTurn` 现分别保留 StreamEvent `turnId` 和最终消息 `messageTurnId`，不再错误比较两者；加入 ID 不同但同一 Session 最终消息应被收集的 WebSocket 回归测试。重判报告新增完整 50 条 dev 的 `measurementValidityGate`，阈值固定为 95%；`invalidRun` 继续只表示证据/顺序/parity 完整性，不能掩盖测量有效率未达标。
+- 原始 50 条结果及其 `result.json` 未覆盖。原 `summary.json` SHA-256 为 `050d2ff9a08ed45fef1ab640368a0b87423af1264cd86bf7c3a201b3c0da7b2a`；3 条多轮失败的原始 `result.json` hash 已在本地核验。修正后另起一轮完整 dev 运行，不向本轮追加或覆盖模型调用，也不运行 holdout。阶段 4 当前仍未验收，阶段 5、6 未开始。
+
+### 阶段 4 修正后验收（2026-10-12）
+
+- 新建完整运行 `promptfoo-2026-10-12T08-43-34-666Z`，固定镜像 ID 与前轮一致，一个本地网关候选、50 条 dev × 1 次。独立重判报告显示 `evidenceComplete=true`、`executionOrderValid=true`、`providerParityValid=true`，50/50 测量有效（100%），`measurementValidityGate` 阈值 95%、通过。公开摘要泄漏扫描通过；holdout 累计运行数仍为 0。
+- 之前失败的 3 条多轮用例本轮都收齐最终回复，每条脚本两轮消息 ID 均有记录；8 条写操作用例都由实际 fixture 最终状态与调用账本重放完成核对。
+- 网关候选仍是 `gateway_pending`，`qualityEligibleAttempts=0`，业务全项通过 2/50，成本未知。因此仅阶段 4 的测量链路验收通过；没有模型排名结论。阶段 5 和 6 未开始，等待阶段验收。
+- 最新检查：`make test` **3010 项通过、24 项跳过**；`make typecheck`、`make build`、benchmark 类型检查、格式、文档和 diff 检查通过。结果摘要 SHA-256 为 `5f8783db0265ba1a345cf07df45fef47608395bbed6dd5fd5d989416664be0ff`。
+
+### 阶段 4 MCP 工具可用性复核（2026-10-12，前述验收结论撤销）
+
+- 对原始 `trace.json`、fixture 调用账本和模型回复复核后，两次完整 50 条运行均没有成功的 fixture MCP 工具结果。较新的运行有 39/50 输出为结构化 `unavailable`、21/50 尝试含 Bash，5 次尝试中共有 12 条 fixture 账本记录，均属于绕道；较早运行同样为 0 次成功 fixture MCP 结果。原 `summary.json` 与 `result.json` 保留不动，私有目录新增 `invalidated.json`，记录原因、计数和摘要 hash。两次运行均不参与质量统计或排名。
+- 根因是版本化 fixture 的数值 `version` 被放进 MCP `serverInfo.version`，违反 SDK 的字符串 schema，造成 MCP 初始化失败。服务现在将该值序列化为字符串。Container 内固定镜像 SDK 初始化探针验证 `commerce_fixture` 为 `connected`，六个工具均出现在 init 工具列表；探针使用回环 fixture，在模型请求前中断。
+- eval 实例启用 MCP `alwaysLoad`，benchmark Runner 的 `allowedTools` 收敛到 `mcp__commerce_fixture__*`，从可调用工具层阻止 Bash/Read 等旁路；Runner 将 MCP server 状态和可见工具写入脱敏 init 标记。运行和独立重判均据此验证服务已连接、当前用例必需工具齐全。显式 “No such tool available” 分类为 `tool_unavailable`；fixture 账本调用与非 fixture 工具同现则分类为 `fixture_bypass`，两者均使测量无效。整轮成功 fixture MCP 结果数为 0 时整次运行无效。
+- 写操作断言现在同时检查服务最终状态与成功 MCP 结果账本重放；空账本即使状态快照看似符合，也无法满足预期退款/转接记录。回归覆盖 MCP 不可用、显式缺工具、Bash 绕道、写操作无账本证据和 fixture MCP 正常连接。
+- 固定镜像 init 探针确认连接及六个工具；5 个专项测试文件 **106 项通过、24 项跳过**，benchmark 类型检查和项目类型检查通过。接下来需完成格式/构建/全量测试，再以新 run-id 运行完整 50 条 dev。新运行结果未产生；阶段 4 仍未验收，holdout 未运行，阶段 5/6 未开始。
+- 后续一次新 run 在第 4 条后停止：成功 fixture MCP 调用已在 StreamEvent 和账本中出现，但 attempt 在服务进程退出前读取尚未 flush 的 Runner 日志，把 SDK init 证据误判为缺失；同时发现 benchmark 的 `alwaysLoad` MCP 覆盖当时未纳入 capability preview hash，导致上下文 hash 不一致。该部分运行另有 `invalidated.json`，原始逐次文件未改，未纳入指标。现在先停止并等待每次服务退出以读取 durable init 日志，并让 capability preview 与 Runner 使用相同的 `alwaysLoad` 变换；须由后续真实运行验证这两项修正。
+
+### 阶段 4 修复后完整 dev 测量验收（2026-10-12）
+
+- 修正 fixture MCP 初始化的字符串版本字段；benchmark 模式将 Agent SDK 的内建工具集设为 `[]`，只开放 fixture MCP，避免 `allowedTools` 仅自动授权却未禁用 Bash 的问题。对每条用例的 Profile MCP 设置强制 `alwaysLoad`，并让 capability preview 与实际 Runner 使用相同变换，因此 MCP manifest hash 与实际上下文证据一致。
+- 不再只依赖偶发缺失的 `system/init` 日志。Runner 在 SDK 最终结果时主动查询 `mcpServerStatus()`，只写入脱敏的服务名、连接状态和工具名；每次服务停止、日志落盘后，驱动器再读取该证据。对所需工具缺失、MCP 返回 “No such tool available”、fixture 绕道分别做 fail-closed 测量分类；成功 fixture MCP 调用数为 0 时整轮作废。预期写操作同时核对 fixture 状态快照和成功调用账本重放。
+- 新 run `promptfoo-2026-10-12T14-43-11-523Z`：完整 50 条 dev × 1 次，测量有效 **50/50（100%）**，MCP 已连接且必需工具可见 **50/50**，成功 fixture MCP 结果 **105**，fixture 绕道 **0**、Bash 事件 **0**；账本/状态对账 **50/50**。执行顺序、证据完整与 Provider parity 全部通过，95% 测量门槛通过，`invalidRun=false`。私有 `mcp-integrity-review.json` 保存上述计数及来源 hash。
+- 8 条写操作用例全部完成状态与账本核对，业务状态检查通过 4/8；完整业务断言通过 3/50，另有 2 次工具策略违规。唯一候选身份仍为 `gateway_pending`，质量合格样本 0，成本未知，因此只验收阶段 4 测量链路，不做排名或业务能力结论。holdout 运行数为 0；阶段 5/6 尚未开始。
+- 工程验证：`make test` **3020 项通过、24 项跳过**；`make typecheck`、`npm run bench:typecheck`、`make build`、`npm run format:check`、`npm run docs:check` 和 `git diff --check` 均通过。此次运行本身 `evidenceComplete=true`、`executionOrderValid=true`、`providerParityValid=true`，测量有效率 100%。此前 `07-43-05-334Z`、`08-43-34-666Z` 两次完整运行以及 `13-23-44-848Z`、`14-34-31-892Z` 两次中途运行都保留原始数据并有 `invalidated.json`，不参与指标。

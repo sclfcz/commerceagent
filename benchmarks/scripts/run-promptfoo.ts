@@ -8,11 +8,15 @@ import {
 } from '../promptfoo/build-tests.js';
 import { configurePromptfooStorage } from '../promptfoo/runtime.js';
 import { preflight } from './spike.js';
+import { parseCandidates, privateJson } from '../lib/contracts.js';
 import {
-  parseCandidates,
-  privateJson,
-  type SpikeCase,
-} from '../lib/contracts.js';
+  countHoldoutRuns,
+  loadBusinessCases,
+  parseBenchmarkSplit,
+  recordHoldoutRun,
+  type BusinessCase,
+  type CaseSplit,
+} from '../lib/cases.js';
 import { reassessPromptfoo } from '../lib/reassess-promptfoo.js';
 import { aggregatePromptfooCosts } from '../lib/pricing.js';
 
@@ -20,10 +24,19 @@ const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
 
 export async function main() {
+  const split: CaseSplit = parseBenchmarkSplit(process.argv.slice(2));
   const runId = `promptfoo-${new Date().toISOString().replace(/[:.]/g, '-')}`;
   const runDirectory = path.join(benchmarkDirectory, 'results', runId);
   fs.mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
-  const checks = await preflight(runDirectory);
+  const candidateIndex = process.argv.indexOf('--candidate');
+  const selectedAlias =
+    candidateIndex >= 0 ? process.argv[candidateIndex + 1] : undefined;
+  if (
+    candidateIndex >= 0 &&
+    (!selectedAlias || !/^candidate-[a-z0-9]+$/.test(selectedAlias))
+  )
+    throw new Error('invalid_candidate_selection');
+  const checks = await preflight(runDirectory, selectedAlias);
   const ready =
     checks.docker &&
     checks.imagePresent &&
@@ -58,9 +71,23 @@ export async function main() {
   }
 
   const candidates = parseCandidates(checks.candidates);
-  const allCases = parse(
-    fs.readFileSync(path.join(benchmarkDirectory, 'cases/spike.yaml'), 'utf8'),
-  ) as SpikeCase[];
+  const holdoutLedger = path.join(
+    benchmarkDirectory,
+    'results/holdout-runs.jsonl',
+  );
+  if (split === 'holdout') {
+    if (
+      process.argv.includes('--smoke') ||
+      process.argv.includes('--case-limit') ||
+      process.argv.includes('--candidate') ||
+      (process.argv.includes('--repetitions') &&
+        Number(process.argv[process.argv.indexOf('--repetitions') + 1]) !== 1)
+    )
+      throw new Error('holdout_requires_full_final_matrix');
+    if (countHoldoutRuns(holdoutLedger) > 0)
+      throw new Error('holdout_already_used');
+  }
+  const allCases: BusinessCase[] = loadBusinessCases(split, benchmarkDirectory);
   const smoke = process.argv.includes('--smoke');
   const caseLimitIndex = process.argv.indexOf('--case-limit');
   const caseLimit =
@@ -77,9 +104,27 @@ export async function main() {
     : caseLimit === null
       ? allCases
       : allCases.slice(0, caseLimit);
-  const repetitions = smoke ? 1 : 3;
+  const repetitionsIndex = process.argv.indexOf('--repetitions');
+  const requestedRepetitions =
+    repetitionsIndex >= 0 ? Number(process.argv[repetitionsIndex + 1]) : 3;
+  if (!Number.isSafeInteger(requestedRepetitions) || requestedRepetitions < 1)
+    throw new Error('invalid_repetitions');
+  const repetitions =
+    split === 'holdout' ? 1 : smoke ? 1 : requestedRepetitions;
   const tests = buildTests(cases, candidates, repetitions);
   privateJson(path.join(runDirectory, 'cases.used.json'), cases);
+  const cumulativeHoldoutRuns =
+    split === 'holdout'
+      ? recordHoldoutRun(holdoutLedger, runId, true)
+      : countHoldoutRuns(holdoutLedger);
+  privateJson(path.join(runDirectory, 'run-metadata.json'), {
+    split,
+    finalRun: process.argv.includes('--final-run'),
+    repetitions,
+    cumulativeHoldoutRuns,
+    stage: smoke ? 'smoke' : 'benchmark',
+    scope: 'synthetic-commerce-workflows',
+  });
   const promptfooDirectory = path.join(runDirectory, 'promptfoo');
   configurePromptfooStorage(promptfooDirectory);
   process.env.BENCH_RUN_DIRECTORY = runDirectory;
@@ -151,7 +196,11 @@ export async function main() {
       ...independent,
       schemaVersion: 1,
       stage: smoke ? 'smoke' : 'benchmark',
-      scope: 'synthetic-query-analysis',
+      split,
+      finalRun: process.argv.includes('--final-run'),
+      repetitions,
+      cumulativeHoldoutRuns,
+      scope: 'synthetic-commerce-workflows',
       promptfooResultPath: 'promptfoo/results.json',
       costByCandidate,
       promptfooReportedPasses: promptfooResults.filter(
@@ -164,15 +213,21 @@ export async function main() {
       JSON.stringify({
         schemaVersion: report.schemaVersion,
         stage: report.stage,
+        split: report.split,
+        finalRun: report.finalRun,
+        repetitions: report.repetitions,
+        cumulativeHoldoutRuns: report.cumulativeHoldoutRuns,
         scope: report.scope,
         attempts: report.attempts,
         evidenceComplete: report.evidenceComplete,
         executionOrderValid: report.executionOrderValid,
         providerParityValid: report.providerParityValid,
+        measurementValidityGate: report.measurementValidityGate,
         measurementValidAttempts: report.measurementValidAttempts,
         businessPassedAttempts: report.businessPassedAttempts,
         failureCounts: report.failureCounts,
         measurementFailureCounts: report.measurementFailureCounts,
+        successfulFixtureCalls: report.successfulFixtureCalls,
         businessFailureCounts: report.businessFailureCounts,
         identityByCandidate: report.identityByCandidate,
         costByCandidate: report.costByCandidate,
@@ -185,7 +240,9 @@ export async function main() {
     if (
       !order.valid ||
       independent.invalidRun ||
-      independent.attempts !== tests.length
+      independent.attempts !== tests.length ||
+      (independent.measurementValidityGate.applicable &&
+        !independent.measurementValidityGate.passed)
     )
       process.exitCode = 1;
   } catch {

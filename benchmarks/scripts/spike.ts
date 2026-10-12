@@ -36,7 +36,7 @@ let pinnedImage = image;
 let expectedRuntimeSourceHash: string | null = null;
 const timeoutMs = Number(process.env.BENCH_TIMEOUT_MS || 180000);
 
-export async function preflight(runDirectory: string) {
+export async function preflight(runDirectory: string, selectedAlias?: string) {
   expectedRuntimeSourceHash = runtimeSourceHash(repository);
   let docker = false;
   let imagePresent = false;
@@ -79,6 +79,13 @@ export async function preflight(runDirectory: string) {
     }
   } catch {
     /* don't print endpoint/config parse errors */
+  }
+  if (selectedAlias) {
+    const selected = candidates.find(
+      (candidate) => candidate.alias === selectedAlias,
+    );
+    if (!selected) throw new Error('benchmark_candidate_not_found');
+    candidates = [selected];
   }
   importCandidateCredentials(repository, candidates);
   if (process.argv.includes('--with-opencode-go')) {

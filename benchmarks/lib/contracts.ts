@@ -5,6 +5,8 @@ import path from 'node:path';
 
 export type Failure =
   | 'audit_mismatch'
+  | 'tool_unavailable'
+  | 'fixture_bypass'
   | 'state_not_fresh'
   | 'tool_policy_violation'
   | 'business_assertion'
@@ -48,8 +50,28 @@ export interface SpikeCase {
   requiredTools: Array<{ name: string; arguments: Record<string, unknown> }>;
   maxCalls: number;
 }
-export function renderCasePrompt(test: SpikeCase): string {
-  return `${test.prompt}\n本次任务工具调用总上限：${test.maxCalls} 次。evidence 数组使用工具结果中的完整 evidence_id。`;
+type RenderableBenchmarkCase = {
+  prompt: string;
+  turns?: string[];
+  tools: { max_calls: number };
+};
+
+export function renderCasePrompts(
+  test: SpikeCase | RenderableBenchmarkCase,
+): string[] {
+  if ('maxCalls' in test) return [renderCasePrompt(test)];
+  const callLimit = `本次任务工具调用总上限：${test.tools.max_calls} 次。`;
+  return [test.prompt, ...(test.turns ?? [])].map(
+    (prompt) => `${prompt}\n${callLimit}`,
+  );
+}
+
+export function renderCasePrompt(
+  test: SpikeCase | RenderableBenchmarkCase,
+): string {
+  if ('maxCalls' in test)
+    return `${test.prompt}\n本次任务工具调用总上限：${test.maxCalls} 次。evidence 数组使用工具结果中的完整 evidence_id。`;
+  return renderCasePrompts(test)[0];
 }
 export interface UsageTotals {
   inputTokens: number;

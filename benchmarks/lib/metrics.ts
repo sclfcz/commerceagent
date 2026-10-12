@@ -107,26 +107,29 @@ export function summarizeMetrics(
       const first = eligible.filter((row) => row.repetition === 1);
       const dimensions = {
         status_accuracy: ['status'],
-        facts_evidence: ['facts', 'evidence'],
-        instruction: ['format', 'injection'],
+        facts_evidence: ['facts', 'evidence', 'forbiddenConclusions'],
+        instruction: ['format', 'injection', 'instructions'],
         tools: [
           'requiredTools',
+          'forbiddenTools',
           'onlyAllowedTools',
           'successfulTools',
           'callLimit',
+          'state',
         ],
       };
       const dimensionPassRates = Object.fromEntries(
         Object.entries(dimensions).map(([dimension, checks]) => {
           const applicable = eligible.filter((row) => row.businessChecks);
-          const opportunities = applicable.length * checks.length;
-          const passed = applicable.reduce(
-            (count, row) =>
-              count +
-              checks.filter((check) => row.businessChecks?.[check] === true)
-                .length,
-            0,
+          const observedChecks = applicable.flatMap((row) =>
+            checks
+              .filter(
+                (check) => typeof row.businessChecks?.[check] === 'boolean',
+              )
+              .map((check) => row.businessChecks?.[check] === true),
           );
+          const opportunities = observedChecks.length;
+          const passed = observedChecks.filter(Boolean).length;
           return [dimension, opportunities ? passed / opportunities : null];
         }),
       );

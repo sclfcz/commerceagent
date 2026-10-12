@@ -16,6 +16,7 @@ import {
   type Candidate,
   type SpikeCase,
 } from '../lib/contracts.js';
+import type { BusinessCase } from '../lib/cases.js';
 import { calculateCost, loadPrices } from '../lib/pricing.js';
 import { officialVendor } from '../lib/identity.js';
 import type {
@@ -30,7 +31,7 @@ const benchmarkDirectory = path.join(repository, 'benchmarks');
 
 interface CandidateRunState {
   candidates: Candidate[];
-  cases: SpikeCase[];
+  cases: Array<SpikeCase | BusinessCase>;
   context: ReturnType<typeof createAttemptContext>;
   prices: ReturnType<typeof loadPrices>;
   runDirectory: string;
@@ -99,12 +100,9 @@ async function getState(): Promise<CandidateRunState> {
           fs.readFileSync(path.join(runDirectory, 'candidates.json'), 'utf8'),
         ),
       );
-      const cases = parse(
-        fs.readFileSync(
-          path.join(benchmarkDirectory, 'cases/spike.yaml'),
-          'utf8',
-        ),
-      ) as SpikeCase[];
+      const cases = JSON.parse(
+        fs.readFileSync(path.join(runDirectory, 'cases.used.json'), 'utf8'),
+      ) as Array<SpikeCase | BusinessCase>;
       const pinnedImage = process.env.BENCH_PINNED_IMAGE || '';
       const expectedRuntimeSourceHash =
         process.env.BENCH_RUNTIME_SOURCE_HASH || '';
