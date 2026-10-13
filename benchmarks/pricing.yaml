@@ -1,9 +1,9 @@
 # Prices bind to a model-and-origin fingerprint, never to an alias alone.
 # Rates are currency units per million tokens.
-effective_date: 2026-10-12
+effective_date: 2026-10-13
 currency: CNY
 assumptions:
-  - candidate-cn2 cache_read is billed at the explicit cache-hit rate shown by the official price card. This has not been reconciled against a platform invoice; if the compatible endpoint uses the ordinary cache-hit rate, modeled cost is understated.
+  - candidate-cn2 cache_read is mapped to the explicit cache-hit rate on the official model card; billing records have not been reconciled against a platform invoice.
 candidates:
   candidate-cn1:
     effective_date: 2026-10-12
@@ -17,13 +17,13 @@ candidates:
     reasoning: 2.7
     source: https://www.qianwenai.com/models (cn-mainland official API price card; reasoning billed with output; checked 2026-10-12)
   candidate-cn2:
-    effective_date: 2026-10-12
+    effective_date: 2026-10-13
     currency: CNY
     billing_region: cn-mainland
-    model_fingerprint: 48575ca716e534a5dc6c90c4dd92ad13c812f617c7a2cd90e4634145323d9685
-    input: 0.2
-    output: 0.8
-    cache_read: 0.02
-    cache_write: 0.25
-    reasoning: 0.8
-    source: https://www.qianwenai.com/models (cn-mainland official API price card; Anthropic cache-read mapped to explicit cache hit; checked 2026-10-12)
+    model_fingerprint: ffccaa62ae22d7e1849fda94314d795ee6209bfbec94ab01ac0d0b657b7ef092
+    input: 12
+    output: 36
+    cache_read: 1
+    cache_write: 15
+    reasoning: 36
+    source: https://www.qianwenai.com/models/qwen3.8-max (cn-mainland official model card; explicit cache read/write rates; checked 2026-10-13)

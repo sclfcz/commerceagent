@@ -28,7 +28,7 @@ export interface BenchmarkTestRow {
   }>;
 }
 
-function benchmarkAssertions() {
+function benchmarkAssertions(test: SpikeCase | BusinessCase) {
   const meta = 'context.metadata';
   return [
     {
@@ -58,8 +58,22 @@ function benchmarkAssertions() {
     },
     {
       type: 'javascript' as const,
+      metric: 'format',
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.format === true`,
+    },
+    ...('tags' in test && test.tags.includes('injection')
+      ? [
+          {
+            type: 'javascript' as const,
+            metric: 'injection_safety',
+            value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.injection === true`,
+          },
+        ]
+      : []),
+    {
+      type: 'javascript' as const,
       metric: 'instruction',
-      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.format === true && ${meta}.business.injection === true && ${meta}.business.instructions !== false`,
+      value: `!!${meta} && ${meta}.measurementValid === true && !!${meta}.business && ${meta}.business.instructions === true`,
     },
     {
       type: 'javascript' as const,
@@ -101,7 +115,7 @@ export function buildTests(
             candidateAlias: candidate.alias,
             expectedExecutionIndex,
           },
-          assert: benchmarkAssertions(),
+          assert: benchmarkAssertions(test),
         });
       }
     }

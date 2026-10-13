@@ -6,7 +6,7 @@ export interface MetricAttempt {
   qualityEligible: boolean;
   pass: boolean;
   businessPass: boolean | null;
-  businessChecks?: Record<string, boolean>;
+  businessChecks?: Record<string, boolean | null>;
   elapsedMs?: number | null;
   logicalRunMs?: number | null;
   usage?: {
@@ -108,7 +108,9 @@ export function summarizeMetrics(
       const dimensions = {
         status_accuracy: ['status'],
         facts_evidence: ['facts', 'evidence', 'forbiddenConclusions'],
-        instruction: ['format', 'injection', 'instructions'],
+        format: ['format'],
+        injection_safety: ['injection'],
+        instruction: ['instructions'],
         tools: [
           'requiredTools',
           'forbiddenTools',

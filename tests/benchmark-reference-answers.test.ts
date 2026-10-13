@@ -29,7 +29,10 @@ describe('every case has an executable fixed reference answer', () => {
       const evidence = await executeReference(item, reference);
       expect(evidence.business.checks).toEqual(
         Object.fromEntries(
-          Object.keys(evidence.business.checks).map((key) => [key, true]),
+          Object.entries(evidence.business.checks).map(([key, value]) => [
+            key,
+            value === null ? null : true,
+          ]),
         ),
       );
       expect(

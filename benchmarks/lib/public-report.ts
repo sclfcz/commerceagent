@@ -71,8 +71,8 @@ export function renderPublicSummary(input: {
     'Costs are usage-based estimates under the declared rate assumptions; one cache-read mapping has not yet been checked against a platform invoice.',
     `Split: ${input.split ?? 'legacy'}; cumulative holdout runs: ${input.holdoutCumulativeRuns ?? 0}.`,
     '',
-    '| Candidate | Ranking | Eligible / total | Ineligible | First pass | Average pass | Task completion | Status accuracy | Facts/evidence | Instruction | Tools | pass^3 passed / failed / undetermined | Total cost | Cost per successful task | elapsed p50 / p95 ms | logical p50 / p95 ms |',
-    '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
+    '| Candidate | Ranking | Eligible / total | Ineligible | First pass | Average pass | Task completion | Status accuracy | Facts/evidence | Format | Injection safety | Instruction | Tools | pass^3 passed / failed / undetermined | Total cost | Cost per successful task | elapsed p50 / p95 ms | logical p50 / p95 ms |',
+    '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
   ];
   for (const alias of aliases) {
     const metrics = input.metrics.candidates[alias];
@@ -88,7 +88,7 @@ export function renderPublicSummary(input: {
         ? 'unknown'
         : `${cost.currency} ${cost.costPerSuccessfulTask.toFixed(6)}`;
     lines.push(
-      `| ${publicAlias.get(alias)} | ${metrics.rankEligible ? 'eligible' : 'excluded'} | ${metrics.eligibleAttempts}/${metrics.attempts} | ${rate(metrics.ineligibleRate)} | ${rate(metrics.firstPassRate)} | ${rate(metrics.averagePassRate)} | ${rate(metrics.dimensionPassRates.completion)} | ${rate(metrics.dimensionPassRates.status_accuracy)} | ${rate(metrics.dimensionPassRates.facts_evidence)} | ${rate(metrics.dimensionPassRates.instruction)} | ${rate(metrics.dimensionPassRates.tools)} | ${metrics.pass3.passed} / ${metrics.pass3.failed} / ${metrics.pass3.undetermined} | ${totalCost} | ${successCost} | ${metrics.latency.elapsedMs.p50 ?? 'unknown'} / ${metrics.latency.elapsedMs.p95 ?? 'unknown'} | ${metrics.latency.logicalRunMs.p50 ?? 'unknown'} / ${metrics.latency.logicalRunMs.p95 ?? 'unknown'} |`,
+      `| ${publicAlias.get(alias)} | ${metrics.rankEligible ? 'eligible' : 'excluded'} | ${metrics.eligibleAttempts}/${metrics.attempts} | ${rate(metrics.ineligibleRate)} | ${rate(metrics.firstPassRate)} | ${rate(metrics.averagePassRate)} | ${rate(metrics.dimensionPassRates.completion)} | ${rate(metrics.dimensionPassRates.status_accuracy)} | ${rate(metrics.dimensionPassRates.facts_evidence)} | ${rate(metrics.dimensionPassRates.format)} | ${rate(metrics.dimensionPassRates.injection_safety)} | ${rate(metrics.dimensionPassRates.instruction)} | ${rate(metrics.dimensionPassRates.tools)} | ${metrics.pass3.passed} / ${metrics.pass3.failed} / ${metrics.pass3.undetermined} | ${totalCost} | ${successCost} | ${metrics.latency.elapsedMs.p50 ?? 'unknown'} / ${metrics.latency.elapsedMs.p95 ?? 'unknown'} | ${metrics.latency.logicalRunMs.p50 ?? 'unknown'} / ${metrics.latency.logicalRunMs.p95 ?? 'unknown'} |`,
     );
   }
   lines.push(

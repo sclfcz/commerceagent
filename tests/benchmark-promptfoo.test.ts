@@ -170,6 +170,58 @@ describe('Promptfoo benchmark adapter', () => {
     });
   });
 
+  test('keeps format failures separate from semantic dimensions and omits null checks', () => {
+    const report = summarizeMetrics([
+      {
+        candidate: 'candidate-a',
+        caseId: 'case-1',
+        repetition: 1,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: false,
+        businessPass: false,
+        businessChecks: {
+          format: false,
+          status: true,
+          facts: true,
+          evidence: true,
+          forbiddenConclusions: true,
+          injection: true,
+          instructions: true,
+          requiredTools: true,
+        },
+      },
+      {
+        candidate: 'candidate-a',
+        caseId: 'case-2',
+        repetition: 1,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: false,
+        businessPass: false,
+        businessChecks: {
+          format: false,
+          status: null,
+          facts: null,
+          evidence: null,
+          forbiddenConclusions: null,
+          injection: null,
+          instructions: null,
+          requiredTools: true,
+        },
+      },
+    ]);
+    expect(report.candidates['candidate-a'].dimensionPassRates).toMatchObject({
+      format: 0,
+      injection_safety: 1,
+      instruction: 1,
+      status_accuracy: 1,
+    });
+    expect(
+      report.candidates['candidate-a'].dimensionPassRates.facts_evidence,
+    ).toBe(1);
+  });
+
   test('paired bootstrap resamples shared case IDs and is deterministic', () => {
     const make = (candidate: string, passes: boolean[]) =>
       passes.map((pass, index) => ({
@@ -214,6 +266,8 @@ describe('Promptfoo benchmark adapter', () => {
               completion: 1,
               status_accuracy: 1,
               facts_evidence: 1,
+              format: 1,
+              injection_safety: 1,
               instruction: 1,
               tools: 1,
             },
@@ -263,6 +317,7 @@ describe('Promptfoo benchmark adapter', () => {
       'completion',
       'status_accuracy',
       'facts_evidence',
+      'format',
       'instruction',
       'tools',
     ]);
@@ -499,6 +554,7 @@ describe('Promptfoo benchmark adapter', () => {
                     evidence: true,
                     format: true,
                     injection: true,
+                    instructions: true,
                     requiredTools: true,
                     onlyAllowedTools: true,
                     successfulTools: true,
@@ -535,6 +591,7 @@ describe('Promptfoo benchmark adapter', () => {
               evidence: true,
               format: true,
               injection: true,
+              instructions: true,
               requiredTools: true,
               onlyAllowedTools: true,
               successfulTools: true,
@@ -549,6 +606,7 @@ describe('Promptfoo benchmark adapter', () => {
         completion: 0,
         status_accuracy: 1,
         facts_evidence: 1,
+        format: 1,
         instruction: 1,
         tools: 1,
       });

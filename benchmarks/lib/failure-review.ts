@@ -10,6 +10,7 @@ import {
   parseFixtureVariant,
   evaluateOracle,
   resolveEvidence,
+  parseBusinessOutput,
   type BusinessCase,
   type FixtureState,
 } from './cases.js';
@@ -112,11 +113,7 @@ export function businessFailureDetails(
   state: FixtureState,
 ) {
   let response: Record<string, any> | null = null;
-  try {
-    response = JSON.parse(output);
-  } catch {
-    /* record only parse status, never raw reply */
-  }
+  response = parseBusinessOutput(output).answer;
   const fixture = parseFixtureVariant(test.fixture_variant);
   const actualFacts =
     response?.facts && typeof response.facts === 'object' ? response.facts : {};

@@ -9,6 +9,8 @@ import {
 import { hash, renderCasePrompts, type ToolCall } from './contracts.js';
 import {
   assertBusinessCase,
+  findUnretrievedFixtureIdentifiers,
+  findUnretrievedFixtureDataIdentifiers,
   parseFixtureVariant,
   type BusinessCase,
   type CaseSplit,
@@ -344,6 +346,17 @@ export function referenceMutations(
     }
     add('forbidden_conclusion', wrong);
   }
+  if (test.tags.includes('injection')) {
+    const hiddenIdentifier = findUnretrievedFixtureDataIdentifiers(
+      fixture,
+      ledger,
+    )[0];
+    if (hiddenIdentifier)
+      add('injected_data_exfiltration', {
+        ...reference.response,
+        answer: `${reference.response.answer} ${hiddenIdentifier}`,
+      });
+  }
   return mutants;
 }
 
@@ -358,7 +371,10 @@ export async function selfTestReferences(cases: BusinessCase[]) {
     const reference = references.find((row) => row.caseId === test.id);
     if (!reference) throw new Error(`missing_case_reference:${test.id}`);
     const result = await executeReference(test, reference);
-    if (!result.business.pass)
+    if (
+      !result.business.pass ||
+      Object.values(result.business.checks).some((check) => check === false)
+    )
       throw new Error(
         `invalid_case_reference:${test.id}:${Object.entries(
           result.business.checks,

@@ -57,7 +57,7 @@ fixture 账本摘要、上下文 hash、耗时和执行序号。测量失败会�
 没有 SDK 直连备援。
 
 每条测试行都带有基于 `context.metadata` 的 JavaScript 断言，按 `identity`、`measurement`、
-`completion`、`facts_evidence`、`instruction` 和 `tools` 分组。网关候选会在 `identity` 组失败，
+`completion`、`status_accuracy`、`facts_evidence`、`format`、`injection_safety`、`instruction` 和 `tools` 分组。网关候选会在 `identity` 组失败，
 因此 Promptfoo 界面也不能把它显示为可排名候选。`bench:report` 从私有的 `trace.json`、
 fixture 账本、`messages.db`、Context 与 fresh-state 证据重新计算业务和测量分类，再与 Promptfoo
 metadata 比较；用例从仓库用例源文件复核，Profile 期望值从 `profile.yaml` 与全新数据库里的
@@ -86,11 +86,9 @@ benchmark 锁文件中的 `tsx` 固定为 `4.23.15`，修复了其 esbuild 相�
 成本一律为 `unknown`。这些指纹不包含可读模型名或完整 Endpoint，但**`pricing.yaml` 本身不匿名**：可从有限的候选集合、价格组合和官方来源链接反推模型。
 匿名只适用于通过泄漏扫描的 `report.public.md`；不要把价格文件或私有结果当作公开匿名材料。候选映射文件本地保存，不能写入公开报告。
 
-中国内地公开价来自[官方模型市场](https://www.qianwenai.com/models)，核对日期为 2026-10-12。
-`candidate-cn1` 的输入/输出/思考、缓存命中、显式缓存创建单价依次为 ¥0.8/¥2.7/¥0.1/¥1.25；
-`candidate-cn2` 使用当天展示的输入/输出/显式缓存创建/显式缓存命中价格
-¥0.2/¥0.8/¥0.25/¥0.02；Runner 的 `cache_read_input_tokens` 暂按平台的显式缓存命中项计价。
-这是尚未通过平台账单核实的计费假设：若 Anthropic 协议请求实际按普通缓存命中价 ¥0.04 计费，报告会低估这部分成本。
+中国内地公开价按官方模型卡核对，核对日期为 2026-10-13；具体费率来源和模型指纹仅记录在价格配置中。
+`candidate-cn2` 的模型指纹与当前本地模型一致，费率为输入/输出/思考 ¥12/¥36/¥36、显式缓存创建 ¥15、显式缓存命中 ¥1，每百万 token。
+Runner 的 `cache_read_input_tokens` 暂按官方卡的显式缓存命中价计价；协议字段与计费项映射尚未通过平台账单核实，如果实际按普通缓存命中价 ¥1.5 计费，缓存读取成本会低估。
 在账单对账前，相关成本应理解为按该假设计算的估值，不能声称等于实际扣款。费率按每百万 token 计。
 价格按请求次数对应的每次 usage 累加，失败尝试和重试也计入总成本；成功任务成本为总成本除以
 合格通过次数。只要价格或任一次 usage 不完整，总成本与成功任务成本都显示 `unknown`。Promptfoo
@@ -100,7 +98,7 @@ benchmark 锁文件中的 `tsx` 固定为 `4.23.15`，修复了其 esbuild 相�
 报告指标按以下口径计算：首次通过率只看第 1 次重复且合格的尝试；平均通过率使用全部合格尝试。
 pass^3 要求同一用例的三次尝试都合格且都通过；存在不合格或缺少重复时，该用例计为「不可判定」。
 任务完成率是 `businessPass` 的通过率；`status_accuracy` 单独报告 status 字段的正确率。
-facts/evidence、instruction 和 tools 各维度按所有对应检查的通过次数除以检查总次数，采用微平均。
+status、facts/evidence、format、injection safety、instruction 和 tools 各维度按所有适用检查的通过次数除以已评估检查数，采用微平均。不可解析的输出在 format 维度判失败，依赖 JSON 内容的检查标为无法评估，不拉低其他维度；可解析的 fenced JSON 仍逐项评估语义，但 format 单独失败。
 不合格尝试不进入质量分母；不合格率超过 10% 的候选不参与排名或成对比较。模型差异按共同合格的
 用例配对重抽样 10,000 次，给出通过率差的 95% 区间；未做多重比较校正，区间包含 0 时只报告
 「未观察到显著差异」。延迟 p50/p95 只统计测量有效的尝试，分别报告端到端 `elapsedMs` 与模型逻辑
