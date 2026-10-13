@@ -293,3 +293,18 @@ Fixture 超时由 fixture 服务按场景延迟后返回明确的 MCP 工具错�
 
 `bench:spike` 原 5 条用例仍用于链路验证，明确提示工具与输出结构，不应与业务集混为一谈，也不得将之前的小样本通过率外推为业务胜率。
 离线重判写入独立报告和断言版本 hash，不覆盖原始 `result.json` 或已有报告。
+
+### 阶段 5：Judge 与人工校准
+
+Judge 只读取已保存运行中的 measurement-valid、quality-eligible 回答，不重新调用参赛模型。仅使用 dev 集；默认按业务类别和确定性通过/失败分层，盲抽 20 条。测试变量不含候选别名或模型信息。Promptfoo 的 `llm-rubric` 分四项独立评分：完整度、事实依据、追问/拒答/升级是否恰当、专业语气；评分为 1–5，4 分以上判通过。Judge 与确定性断言分开保存和报告。
+
+执行 Judge 与导出人工盲标模板：
+
+```bash
+npm run bench:judge -- benchmarks/results/<run-id>
+npm run bench:calibrate -- benchmarks/results/<run-id>
+```
+
+Judge 使用 OpenCode Go 的 OpenAI-compatible Chat Completions 接口。API Key 通过被 Git 忽略的一次性本地文件 `benchmarks/opencode-go.local.json` 输入；进程导入密钥后会删除文件。请求关闭缓存、分享、遥测与自动重试，并在每条盲评样本中使用稳定 session 标识。Judge 配置、评分、原始候选回答和人工标注文件都保存在私有 `results/<run-id>/judge/`。
+
+`bench:calibrate` 首次运行生成 `judge/human-labels.jsonl`，人工只填写四项 1–5 分及备注；该文件不包含 Judge 分数或候选身份。填完后再次执行以计算逐维度和整体 Cohen's kappa、通过一致率、误通过和误拒绝。人工校准样本少于 20 条，或整体 kappa 低于 0.6 时，Judge 仅作参考，不进入排名。注入鲁棒性探针必须先通过，Judge 才会开始整批评分。

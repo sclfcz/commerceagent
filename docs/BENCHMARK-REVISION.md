@@ -332,3 +332,11 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 - 核对官方模型卡后，将本地候选的模型/origin 指纹价格绑定到 candidate-cn2：输入 ¥12、输出 ¥36、cache-read ¥1（显式命中）、cache-write ¥15、reasoning ¥36 每百万 token。原始运行成本无需补跑模型即可重算；缓存账单映射仍未核实。
 - 对 run `promptfoo-2026-10-13T12-35-00-032Z` 执行只读离线重评：业务通过从 40/50 修正为 43/50；剩余 7 条为 1 条事实编造和 6 条格式错误。pass^3 因只有一次重复，50 条均不可判定。重评保存为带来源 hash 的私有 sidecar 与脱敏公开摘要，原始结果保持不变；模型 API 调用数为 0。
 - 本轮无真实模型重跑。阶段 5 的 Judge 尚待 OpenCode Go Judge 模型 ID 与本地凭据；当前参赛模型属于 Qwen，Judge 应选不同模型家族。holdout 保持未运行。
+
+### 阶段 5 Judge 接入准备（2026-10-13）
+
+- 增加 `bench:judge` 和 `bench:calibrate`。Judge 只读已保存的 dev 运行，过滤 measurement-valid 与 quality-eligible 尝试，按类别和确定性通过/失败分层抽取 20 条；每条分完整度、事实依据、决策恰当性和专业语气四项，4/5 分为通过。确定性断言与 Judge 结果单独保存。
+- 使用 Promptfoo 内建 `llm-rubric` 评分 Provider，主 Provider 仅从本地结果回放候选回答。生成的评测上下文不含候选别名或模型字段；API Key 只从一次性本地文件进入进程环境，配置、回答和评分写入权限为 0600 的 Git 忽略目录。整批调用前先进行合成提示注入探针，探针失败立即停止。
+- `bench:calibrate` 先导出不含 Judge 评分或候选身份的人工 JSONL，再据此计算逐维度/整体一致率、Cohen's kappa、误通过和误拒绝；20 条不足或整体 kappa 低于 0.6 时，Judge 仅作参考。
+- 本机已生成最终待审阅的 20 条盲评请求预览（80 个评分请求加 1 个合成注入探针），仅含合成 benchmark 问题、期望事实、rubric 和已保存候选输出；预览检查确认候选身份信息未泄漏。生成预览没有调用任何 API。
+- 本轮全量验证：3110 项通过、24 项跳过；类型检查、构建、格式、文档与 diff 检查通过。实际 Judge API 调用尚未运行，需先明确批准将该预览内容发送到 OpenCode Go。

@@ -11,7 +11,9 @@
     "report": "tsx scripts/report.ts",
     "selftest": "tsx scripts/selftest-cases.ts",
     "review": "tsx scripts/review-failures.ts",
-    "regrade": "tsx scripts/regrade-business.ts"
+    "regrade": "tsx scripts/regrade-business.ts",
+    "judge": "tsx scripts/judge.ts",
+    "calibrate": "tsx scripts/calibrate.ts"
   },
   "devDependencies": {
     "promptfoo": "0.124.1",
