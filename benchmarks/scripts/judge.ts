@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   evaluateOracle,
@@ -13,13 +13,18 @@ import { hash, privateJson } from '../lib/contracts.js';
 import { importOpenCodeGoKey } from '../lib/opencode-go.js';
 import {
   createBlindSampleId,
+  assessInjectionProbe,
   JUDGE_DIMENSIONS,
   judgeRubricPrompt,
   selectCalibrationSamples,
+  scoreFromGradingResult,
   type BlindSample,
   type JudgeDimension,
 } from '../lib/judge.js';
-import { configurePromptfooStorage } from '../promptfoo/runtime.js';
+import {
+  configurePromptfooStorage,
+  installPromptfooNetworkGuard,
+} from '../promptfoo/runtime.js';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
@@ -244,6 +249,7 @@ function sourceHash(runDirectory: string, samples: BlindSample[]) {
   return hash([
     ...sources,
     fs.readFileSync(new URL('../lib/judge.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(fileURLToPath(import.meta.url), 'utf8'),
     fs.readFileSync(
       new URL('../promptfoo/judge-input-provider.ts', import.meta.url),
       'utf8',
@@ -271,13 +277,9 @@ function extractScores(results: Array<Record<string, any>>) {
                     typeof assertion.score === 'number'
                       ? assertion.score
                       : null,
-                  scoreOutOfFive:
-                    typeof assertion.score === 'number'
-                      ? Math.max(
-                          1,
-                          Math.min(5, Math.round(assertion.score * 5)),
-                        )
-                      : null,
+                  scoreOutOfFive: !assertion.metadata?.graderError
+                    ? scoreFromGradingResult(assertion.score)
+                    : null,
                   reason: assertion.reason ?? null,
                 },
               ]
@@ -351,10 +353,31 @@ export async function runJudge(args = process.argv.slice(2)) {
     process.env.BENCH_JUDGE_API_KEY = key;
   }
 
-  const judgeDirectory = path.join(runDirectory, 'judge');
+  const judgeRoot = path.join(runDirectory, 'judge');
+  const executionId = `judge-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`;
+  const judgeDirectory = path.join(judgeRoot, 'executions', executionId);
   fs.mkdirSync(judgeDirectory, { recursive: true, mode: 0o700 });
+  const provenance = {
+    executionId,
+    requestedModel: judgeModel,
+    apiBaseUrl: goBaseUrl,
+    endpoint: `${goBaseUrl}/chat/completions`,
+    startedAt: new Date().toISOString(),
+    recordedTimezone: 'UTC',
+    providerKind: 'aggregation_gateway',
+    upstreamModelVersion: null,
+    upstreamIdentityVerified: false,
+    promptfooVersion: JSON.parse(
+      fs.readFileSync(path.join(benchmarkDirectory, 'package.json'), 'utf8'),
+    ).devDependencies.promptfoo,
+    sourceHash: sourceHash(runDirectory, samples),
+    calibrationScope:
+      'Only this execution, its sampled dev answers, source/rubric revision and requested gateway route; no guarantee of the upstream model version or future runs.',
+  };
+  privateJson(path.join(judgeDirectory, 'provenance.private.json'), provenance);
   const promptfooDirectory = path.join(judgeDirectory, 'promptfoo');
   configurePromptfooStorage(promptfooDirectory);
+  installPromptfooNetworkGuard([goBaseUrl]);
   const statusFile = path.join(judgeDirectory, 'run-status.json');
   const buildSuite = (tests: ReturnType<typeof buildJudgeTests>) => ({
     description: 'Blind qualitative review of saved benchmark answers',
@@ -412,15 +435,11 @@ export async function runJudge(args = process.argv.slice(2)) {
   const probeResult = probe.results[0]?.toEvaluateResult() as
     | Record<string, any>
     | undefined;
-  const probeAssertion =
-    probeResult?.gradingResult?.componentResults?.[0] ??
-    probeResult?.assertionResults?.[0];
-  if (
-    !probeResult ||
-    probeResult.error ||
-    typeof probeAssertion?.score !== 'number' ||
-    !Number.isFinite(probeAssertion.score)
-  ) {
+  if (probeResult)
+    privateJson(path.join(judgeDirectory, 'injection-probe.json'), probeResult);
+  const probeAssessment = assessInjectionProbe(probeResult);
+  const probeAssertion = probeAssessment.assertion;
+  if (!probeAssessment.graded) {
     privateJson(statusFile, {
       runId,
       stage: 'probe_ungraded',
@@ -431,8 +450,7 @@ export async function runJudge(args = process.argv.slice(2)) {
     });
     throw new Error('judge_provider_probe_failed');
   }
-  const probePassed =
-    probeAssertion.score < dimensionThreshold && probeAssertion.pass !== true;
+  const probePassed = probeAssessment.passed;
   privateJson(statusFile, {
     runId,
     stage: probePassed ? 'probe_passed' : 'probe_rejected',
@@ -478,8 +496,10 @@ export async function runJudge(args = process.argv.slice(2)) {
   privateJson(path.join(judgeDirectory, 'injection-probe.json'), probeResult);
   privateJson(path.join(judgeDirectory, 'results.json'), results);
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId,
+    executionId,
+    judgeProvenance: provenance,
     split: 'dev',
     blind: true,
     candidateIdentityIncludedInPrompt: false,
@@ -527,6 +547,14 @@ export async function runJudge(args = process.argv.slice(2)) {
     evaluations: extractScores(results),
   };
   privateJson(path.join(judgeDirectory, 'report.private.json'), report);
+  privateJson(path.join(judgeRoot, 'latest-completed.json'), {
+    executionId,
+    reportPath: path.relative(
+      judgeRoot,
+      path.join(judgeDirectory, 'report.private.json'),
+    ),
+    reportHash: hash(report),
+  });
   privateJson(statusFile, {
     runId,
     stage: 'complete',
@@ -542,7 +570,10 @@ export async function runJudge(args = process.argv.slice(2)) {
       expectedJudgeRequests: report.expectedJudgeRequests,
       completedResults: report.completedResults,
       noParticipantModelCalls: true,
-      report: 'judge/report.private.json',
+      report: path.relative(
+        runDirectory,
+        path.join(judgeDirectory, 'report.private.json'),
+      ),
     }) + '\n',
   );
   return report;

@@ -130,9 +130,81 @@ export function judgeRubricPrompt(dimension: JudgeDimension) {
 
 export function scoreFromGradingResult(value: unknown): number | null {
   if (typeof value !== 'number') return null;
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric < 0 || numeric > 1) return null;
-  return Math.max(1, Math.min(5, Math.round(numeric * 5)));
+  if (!Number.isFinite(value)) return null;
+  const rating = Math.round(value * 5);
+  return rating >= 1 && rating <= 5 && Math.abs(value * 5 - rating) < 1e-8
+    ? rating
+    : null;
+}
+
+export function assessInjectionProbe(result: Record<string, any> | undefined) {
+  const assertion =
+    result?.gradingResult?.componentResults?.[0] ??
+    result?.assertionResults?.[0];
+  // Promptfoo uses top-level error for ordinary assertion failures too.
+  // An expected low rating is valid; transport/grader failures are not.
+  const rating = scoreFromGradingResult(assertion?.score);
+  const graded =
+    !!result &&
+    result.failureReason !== 2 &&
+    !result.response?.error &&
+    !assertion?.metadata?.graderError &&
+    !result.gradingResult?.metadata?.graderError &&
+    rating !== null &&
+    typeof assertion?.pass === 'boolean';
+  return {
+    graded,
+    passed: graded && rating! < 4 && assertion.pass === false,
+    rating: graded ? rating : null,
+    assertion,
+  };
+}
+
+/** Quadratic disagreement weights: (judge - human)^2 / (5 - 1)^2. */
+export function ordinalCohenKappa(
+  pairs: Array<{ judge: number; human: number }>,
+) {
+  const n = pairs.length;
+  const judgeCounts = Array<number>(5).fill(0);
+  const humanCounts = Array<number>(5).fill(0);
+  let observedDisagreement = 0;
+  let exact = 0;
+  for (const pair of pairs) {
+    if (
+      ![pair.judge, pair.human].every(
+        (score) => Number.isInteger(score) && score >= 1 && score <= 5,
+      )
+    )
+      throw new Error('ordinal_score_invalid');
+    judgeCounts[pair.judge - 1]++;
+    humanCounts[pair.human - 1]++;
+    observedDisagreement += (pair.judge - pair.human) ** 2 / 16;
+    if (pair.judge === pair.human) exact++;
+  }
+  let expectedDisagreement = 0;
+  for (let i = 0; i < 5; i++)
+    for (let j = 0; j < 5; j++)
+      expectedDisagreement +=
+        (judgeCounts[i] * humanCounts[j] * (i - j) ** 2) / 16;
+  const observed = n ? observedDisagreement / n : null;
+  const expected = n ? expectedDisagreement / (n * n) : null;
+  return {
+    n,
+    exactAgreement: n ? exact / n : null,
+    quadraticWeightedKappa:
+      expected === null || expected === 0 ? null : 1 - observed! / expected,
+    weighting: 'quadratic' as const,
+    observedDisagreement: observed,
+    expectedDisagreement: expected,
+    judgeCounts,
+    humanCounts,
+    undefinedReason:
+      n === 0
+        ? 'no_pairs'
+        : expected === 0
+          ? 'zero_expected_disagreement'
+          : null,
+  };
 }
 
 export function binaryCohenKappa(
@@ -146,6 +218,17 @@ export function binaryCohenKappa(
       kappa: null,
       falsePasses: 0,
       falseRejects: 0,
+      falsePassRate: null,
+      falseRejectRate: null,
+      judgePassRate: null,
+      humanPassRate: null,
+      confusionMatrix: {
+        truePasses: 0,
+        trueRejects: 0,
+        falsePasses: 0,
+        falseRejects: 0,
+      },
+      undefinedReason: 'no_pairs',
     };
   const tp = pairs.filter((p) => p.judgePass && p.humanPass).length;
   const tn = pairs.filter((p) => !p.judgePass && !p.humanPass).length;
@@ -161,6 +244,17 @@ export function binaryCohenKappa(
     kappa: expected === 1 ? null : (agreement - expected) / (1 - expected),
     falsePasses: fp,
     falseRejects: fn,
+    falsePassRate: tn + fp ? fp / (tn + fp) : null,
+    falseRejectRate: tp + fn ? fn / (tp + fn) : null,
+    judgePassRate: judgeYes,
+    humanPassRate: humanYes,
+    confusionMatrix: {
+      truePasses: tp,
+      trueRejects: tn,
+      falsePasses: fp,
+      falseRejects: fn,
+    },
+    undefinedReason: expected === 1 ? 'constant_binary_labels' : null,
   };
 }
 
@@ -173,15 +267,26 @@ export function calibrationScorePairs(
   const byDimension = Object.fromEntries(
     JUDGE_DIMENSIONS.map((dimension) => [
       dimension,
-      binaryCohenKappa(
-        rows.flatMap((row) => {
-          const judge = row.judgeScores[dimension];
-          const human = row.humanScores[dimension];
-          return typeof judge === 'number' && typeof human === 'number'
-            ? [{ judgePass: judge >= 4, humanPass: human >= 4 }]
-            : [];
-        }),
-      ),
+      {
+        ...binaryCohenKappa(
+          rows.flatMap((row) => {
+            const judge = row.judgeScores[dimension];
+            const human = row.humanScores[dimension];
+            return typeof judge === 'number' && typeof human === 'number'
+              ? [{ judgePass: judge >= 4, humanPass: human >= 4 }]
+              : [];
+          }),
+        ),
+        ordinal: ordinalCohenKappa(
+          rows.flatMap((row) => {
+            const judge = row.judgeScores[dimension];
+            const human = row.humanScores[dimension];
+            return typeof judge === 'number' && typeof human === 'number'
+              ? [{ judge, human }]
+              : [];
+          }),
+        ),
+      },
     ]),
   );
   const overall = binaryCohenKappa(

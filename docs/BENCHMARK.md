@@ -305,6 +305,10 @@ npm run bench:judge -- benchmarks/results/<run-id>
 npm run bench:calibrate -- benchmarks/results/<run-id>
 ```
 
-Judge 使用 OpenCode Go 的 OpenAI-compatible Chat Completions 接口。API Key 通过被 Git 忽略的一次性本地文件 `benchmarks/opencode-go.local.json` 输入；进程导入密钥后会删除文件。请求关闭缓存、分享、遥测与自动重试，并在每条盲评样本中使用稳定 session 标识。Judge 配置、评分、原始候选回答和人工标注文件都保存在私有 `results/<run-id>/judge/`。
+Judge 使用 OpenCode Go 的 OpenAI-compatible Chat Completions 接口。API Key 通过被 Git 忽略的一次性本地文件 `benchmarks/opencode-go.local.json` 输入；进程导入密钥后会删除文件。请求关闭缓存、分享、遥测与自动重试，并在每条盲评样本中使用稳定 session 标识。锁定版 Promptfoo 仅设置遥测关闭变量时仍会尝试发送一次 opt-out 事件，因此还在导入前安装 fetch 地址限制：Judge 只允许已授权 API 路径，端到端测试驱动只允许本机回环请求；非白名单请求和重定向被拒绝。该限制只作用于本地评测进程，不影响隔离 Runner 的真实模型请求。
 
-`bench:calibrate` 首次运行生成 `judge/human-labels.jsonl`，人工只填写四项 1–5 分及备注；该文件不包含 Judge 分数或候选身份。填完后再次执行以计算逐维度和整体 Cohen's kappa、通过一致率、误通过和误拒绝。人工校准样本少于 20 条，或整体 kappa 低于 0.6 时，Judge 仅作参考，不进入排名。注入鲁棒性探针必须先通过，Judge 才会开始整批评分。
+每次 Judge 执行使用独立的私有 `results/<run-id>/judge/executions/<execution-id>/` 目录，保存配置、评分、原始候选回答、人工标注和来源记录。来源记录包含请求模型、接口地址、UTC 时间、Promptfoo 版本及评分源码 hash；上游实际模型版本记为未知，不把网关请求模型名当成版本核验。
+
+`bench:calibrate` 通过带 hash 的 `judge/latest-completed.json` 定位已完成执行，首次在该执行目录生成 `human-labels.jsonl`。人工先盲标四项 1–5 分及备注，再查看 Judge 评分；标注文件不包含 Judge 分数或候选身份。填完后再次执行以计算逐维度和整体二分通过一致率、Cohen's kappa、误通过和误拒绝；每个 1–5 分维度另报告原始评分完全一致率、二次加权 kappa 及两方评分分布。二次分歧权重为 `(Judge分数 − 人工分数)^2 / 16`。极端不平衡或恒定评分分布可能让 kappa 很低或不可定义，此时报告 `null` 和原因，不将原始一致率替代既定门槛。
+
+人工校准样本少于 20 条，或整体二分 kappa 低于 0.6/不可定义时，Judge 仅作参考，不进入排名。20 条属于小样本校准；即使达到门槛，结论也只适用于本次抽样、rubric/源码版本、请求模型与网关路径，不能外推到未来网关版本或其他任务。正式选型报告引用 Judge 结论时必须附此限制。报告同时绑定 Judge 报告和人工标注 hash。注入鲁棒性探针必须先通过，Judge 才会开始整批评分；Promptfoo 的普通断言不通过不等于 Provider 故障，探针应正常得到低分并拒绝注入。

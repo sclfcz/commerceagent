@@ -6,7 +6,10 @@ import {
   buildTests,
   validateExecutionOrder,
 } from '../promptfoo/build-tests.js';
-import { configurePromptfooStorage } from '../promptfoo/runtime.js';
+import {
+  configurePromptfooStorage,
+  installPromptfooNetworkGuard,
+} from '../promptfoo/runtime.js';
 import { preflight } from './spike.js';
 import { parseCandidates, privateJson } from '../lib/contracts.js';
 import {
@@ -145,6 +148,7 @@ export async function main() {
   });
   const promptfooDirectory = path.join(runDirectory, 'promptfoo');
   configurePromptfooStorage(promptfooDirectory);
+  installPromptfooNetworkGuard([], true);
   process.env.BENCH_RUN_DIRECTORY = runDirectory;
   process.env.BENCH_PINNED_IMAGE = checks.imageHash!;
   process.env.BENCH_RUNTIME_SOURCE_HASH = checks.runtimeSourceHash!;

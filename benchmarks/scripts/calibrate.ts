@@ -2,13 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { calibrationScorePairs, JUDGE_DIMENSIONS } from '../lib/judge.js';
-import { privateJson } from '../lib/contracts.js';
+import { hash, privateJson } from '../lib/contracts.js';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
 
 interface JudgeReport {
   runId: string;
+  executionId?: string;
+  judgeProvenance?: Record<string, unknown>;
+  sourceHash?: string;
   samples: Array<{
     sampleId: string;
     category: string;
@@ -71,6 +74,19 @@ export function analyzeHumanLabels(
     humanScores: Record<string, unknown>;
   }>,
 ) {
+  const expectedIds = new Set(report.samples.map((sample) => sample.sampleId));
+  if (
+    expectedIds.size !== report.samples.length ||
+    new Set(labels.map((label) => label.sampleId)).size !== labels.length ||
+    labels.length !== expectedIds.size ||
+    labels.some((label) => !expectedIds.has(label.sampleId))
+  )
+    throw new Error('calibration_sample_set_invalid');
+  if (
+    new Set(report.evaluations.map((row) => row.sampleId)).size !==
+    report.evaluations.length
+  )
+    throw new Error('judge_sample_set_invalid');
   const judgeById = new Map(
     report.evaluations.map((evaluation) => [evaluation.sampleId, evaluation]),
   );
@@ -97,11 +113,20 @@ export function analyzeHumanLabels(
   });
   const metrics = calibrationScorePairs(rows);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     runId: report.runId,
     annotatedSamples: rows.length,
     minimumRecommendedSamples: 20,
     kappaThreshold: 0.6,
+    calibratedScope: {
+      executionId: report.executionId ?? null,
+      judgeProvenance: report.judgeProvenance ?? null,
+      sourceHash: report.sourceHash ?? null,
+      judgeReportHash: hash(report),
+      humanLabelsHash: hash(labels),
+      limitation:
+        'Pilot calibration of these sampled dev answers only; not evidence of stable gateway routing, future Judge versions or general accuracy.',
+    },
     judgeEligibleForRanking:
       rows.length >= 20 && (metrics.overall.kappa ?? -1) >= 0.6,
     metrics,
@@ -109,9 +134,23 @@ export function analyzeHumanLabels(
 }
 
 export function calibrate(runDirectory: string) {
-  const judgeDirectory = path.join(path.resolve(runDirectory), 'judge');
+  const judgeRoot = path.join(path.resolve(runDirectory), 'judge');
+  const latestFile = path.join(judgeRoot, 'latest-completed.json');
+  const latest = fs.existsSync(latestFile)
+    ? JSON.parse(fs.readFileSync(latestFile, 'utf8'))
+    : null;
+  const judgeDirectory = latest
+    ? path.dirname(path.resolve(judgeRoot, latest.reportPath))
+    : judgeRoot;
+  if (
+    latest &&
+    !judgeDirectory.startsWith(path.join(judgeRoot, 'executions') + path.sep)
+  )
+    throw new Error('judge_report_path_invalid');
   const reportFile = path.join(judgeDirectory, 'report.private.json');
   const report = JSON.parse(fs.readFileSync(reportFile, 'utf8')) as JudgeReport;
+  if (latest && hash(report) !== latest.reportHash)
+    throw new Error('judge_report_hash_mismatch');
   const labelFile = path.join(judgeDirectory, 'human-labels.jsonl');
   if (!fs.existsSync(labelFile)) {
     jsonlWrite(labelFile, buildHumanLabelTemplate(report));
@@ -127,23 +166,34 @@ export function calibrate(runDirectory: string) {
   if (labels.length !== report.samples.length)
     throw new Error('calibration_sample_count_mismatch');
   const result = analyzeHumanLabels(report, labels);
-  privateJson(
-    path.join(judgeDirectory, 'calibration-summary.private.json'),
-    result,
+  const summaryFile = path.join(
+    judgeDirectory,
+    `calibration-summary.${hash(result).slice(0, 12)}.private.json`,
   );
+  if (!fs.existsSync(summaryFile)) privateJson(summaryFile, result);
   return {
     stage: 'calibration_complete',
     annotatedSamples: result.annotatedSamples,
     overallKappa: result.metrics.overall.kappa,
+    overallAgreement: result.metrics.overall.agreement,
+    ordinalByDimension: Object.fromEntries(
+      Object.entries(result.metrics.byDimension).map(([key, value]) => [
+        key,
+        value.ordinal,
+      ]),
+    ),
     judgeEligibleForRanking: result.judgeEligibleForRanking,
     falsePasses: result.metrics.overall.falsePasses,
     falseRejects: result.metrics.overall.falseRejects,
-    report: 'judge/calibration-summary.private.json',
+    report: path.relative(path.resolve(runDirectory), summaryFile),
   };
 }
 
 const runDirectory = process.argv[2];
-if (runDirectory) {
+if (
+  runDirectory &&
+  path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)
+) {
   try {
     process.stdout.write(JSON.stringify(calibrate(runDirectory)) + '\n');
   } catch (error) {
