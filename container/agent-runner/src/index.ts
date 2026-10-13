@@ -26,6 +26,7 @@ import {
   PreCompactHookInput,
   createSdkMcpServer,
   type Query,
+  type McpServerConfig,
   type SDKAssistantMessageError,
   type SDKControlGetContextUsageResponse,
   type SDKRateLimitInfo,
@@ -36,6 +37,7 @@ import { getChannelFromJid } from './channel-prefixes.js';
 import {
   resolveAllowedTools,
   resolveAvailableBuiltInTools,
+  resolveMcpServers,
 } from './eval-tool-policy.js';
 
 import type {
@@ -2669,10 +2671,11 @@ async function runQueryAttempt(
       ...(activeAgentMcpPolicy.strictMcpConfig
         ? { strictMcpConfig: true }
         : {}),
-      mcpServers: {
-        ...userMcpServers,
-        commerceagent: mcpServerConfig,
-      },
+      mcpServers: resolveMcpServers<McpServerConfig>(
+        containerInput.benchmarkMode === true,
+        userMcpServers as Record<string, McpServerConfig>,
+        mcpServerConfig,
+      ),
       hooks: {
         PreToolUse: [
           {
