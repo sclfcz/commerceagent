@@ -355,6 +355,7 @@ export async function runJudge(args = process.argv.slice(2)) {
   fs.mkdirSync(judgeDirectory, { recursive: true, mode: 0o700 });
   const promptfooDirectory = path.join(judgeDirectory, 'promptfoo');
   configurePromptfooStorage(promptfooDirectory);
+  const statusFile = path.join(judgeDirectory, 'run-status.json');
   const buildSuite = (tests: ReturnType<typeof buildJudgeTests>) => ({
     description: 'Blind qualitative review of saved benchmark answers',
     prompts: ['{{candidateOutput}}'],
@@ -382,12 +383,32 @@ export async function runJudge(args = process.argv.slice(2)) {
   const probeTest = buildInjectionProbeTest();
   const probeSuite = buildSingleTestSuite(probeTest);
   privateJson(path.join(judgeDirectory, 'probe-config.json'), probeSuite);
-  const probe = await evaluate(probeSuite as never, {
-    maxConcurrency: 1,
-    cache: false,
-    showProgressBar: false,
-    silent: true,
+  privateJson(statusFile, {
+    runId,
+    stage: 'probe_started',
+    expectedExternalRequests: 1,
+    externalReceiptKnown: false,
+    updatedAt: new Date().toISOString(),
   });
+  let probe;
+  try {
+    probe = await evaluate(probeSuite as never, {
+      maxConcurrency: 1,
+      cache: false,
+      showProgressBar: false,
+      silent: true,
+    });
+  } catch {
+    privateJson(statusFile, {
+      runId,
+      stage: 'probe_failed',
+      expectedExternalRequests: 1,
+      externalReceiptKnown: false,
+      failureCategory: 'provider_or_evaluator_error',
+      updatedAt: new Date().toISOString(),
+    });
+    throw new Error('judge_provider_probe_failed');
+  }
   const probeResult = probe.results[0]?.toEvaluateResult() as
     | Record<string, any>
     | undefined;
@@ -399,23 +420,60 @@ export async function runJudge(args = process.argv.slice(2)) {
     probeResult.error ||
     typeof probeAssertion?.score !== 'number' ||
     !Number.isFinite(probeAssertion.score)
-  )
+  ) {
+    privateJson(statusFile, {
+      runId,
+      stage: 'probe_ungraded',
+      expectedExternalRequests: 1,
+      externalReceiptKnown: false,
+      failureCategory: 'provider_returned_no_grade',
+      updatedAt: new Date().toISOString(),
+    });
     throw new Error('judge_provider_probe_failed');
-  if (
-    probeAssertion.score >= dimensionThreshold ||
-    probeAssertion.pass === true
-  )
-    throw new Error('judge_injection_probe_failed');
+  }
+  const probePassed =
+    probeAssertion.score < dimensionThreshold && probeAssertion.pass !== true;
+  privateJson(statusFile, {
+    runId,
+    stage: probePassed ? 'probe_passed' : 'probe_rejected',
+    expectedExternalRequests: 1,
+    externalReceiptKnown: true,
+    injectionResistant: probePassed,
+    score: probeAssertion.score,
+    assertionPassed: probeAssertion.pass === true,
+    updatedAt: new Date().toISOString(),
+  });
+  if (!probePassed) throw new Error('judge_injection_probe_failed');
 
   const tests = buildJudgeTests(samples);
   const config = buildSuite(tests);
   privateJson(path.join(judgeDirectory, 'resolved-config.json'), config);
-  const evaluation = await evaluate(config as never, {
-    maxConcurrency: 1,
-    cache: false,
-    showProgressBar: false,
-    silent: true,
+  privateJson(statusFile, {
+    runId,
+    stage: 'blind_scoring_started',
+    expectedExternalRequests: samples.length * JUDGE_DIMENSIONS.length,
+    probeRequestCompleted: true,
+    updatedAt: new Date().toISOString(),
   });
+  let evaluation;
+  try {
+    evaluation = await evaluate(config as never, {
+      maxConcurrency: 1,
+      cache: false,
+      showProgressBar: false,
+      silent: true,
+    });
+  } catch {
+    privateJson(statusFile, {
+      runId,
+      stage: 'blind_scoring_failed',
+      expectedExternalRequests: samples.length * JUDGE_DIMENSIONS.length,
+      completedRequests: null,
+      failureCategory: 'provider_or_evaluator_error',
+      updatedAt: new Date().toISOString(),
+    });
+    throw new Error('judge_scoring_failed');
+  }
   const results = evaluation.results.map((row) => row.toEvaluateResult());
   privateJson(path.join(judgeDirectory, 'injection-probe.json'), probeResult);
   privateJson(path.join(judgeDirectory, 'results.json'), results);
@@ -469,6 +527,14 @@ export async function runJudge(args = process.argv.slice(2)) {
     evaluations: extractScores(results),
   };
   privateJson(path.join(judgeDirectory, 'report.private.json'), report);
+  privateJson(statusFile, {
+    runId,
+    stage: 'complete',
+    probeRequestCompleted: true,
+    expectedExternalRequests: report.expectedJudgeRequests,
+    completedJudgeAssertions: report.completedJudgeAssertions,
+    updatedAt: new Date().toISOString(),
+  });
   process.stdout.write(
     JSON.stringify({
       runId,
