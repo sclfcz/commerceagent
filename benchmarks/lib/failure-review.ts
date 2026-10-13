@@ -15,6 +15,7 @@ import {
 } from './cases.js';
 import { executeReference, loadReferenceAnswers } from './reference-answers.js';
 import { hash, type ToolCall } from './contracts.js';
+import { definitionsForFixture } from '../mcp-fixture-server/server.js';
 
 export type FailureCategory =
   | 'model_error'
@@ -29,10 +30,15 @@ export function classifyFailure(input: {
   fixtureReplayMatches: boolean;
   measurementValid: boolean;
   checksMatch: boolean;
+  fixtureDiscoverabilityFailure?: boolean;
 }): FailureCategory {
   if (!input.caseMatches || !input.referencePass || !input.checksMatch)
     return 'case_or_assertion_error';
-  if (!input.fixtureReplayMatches || !input.measurementValid)
+  if (
+    !input.fixtureReplayMatches ||
+    !input.measurementValid ||
+    input.fixtureDiscoverabilityFailure
+  )
     return 'fixture_error';
   return 'model_error';
 }
@@ -175,6 +181,7 @@ export function businessFailureDetails(
         (!!call.result &&
           typeof call.result === 'object' &&
           'error' in call.result),
+      resultSummary: summarizeToolResult(call.result),
     })),
     callLimit: { actual: ledger.length, maximum: test.tools.max_calls },
     answerLength: {
@@ -187,6 +194,33 @@ export function businessFailureDetails(
     finalState: state,
     expectedState: test.expected.state ?? { refund_requests: [], handoffs: [] },
   };
+}
+
+function summarizeToolResult(result: unknown) {
+  if (!result || typeof result !== 'object' || Array.isArray(result))
+    return { type: result === null ? 'null' : typeof result };
+  const value = result as Record<string, unknown>;
+  if (typeof value.error === 'string')
+    return { error: value.error, fields: Object.keys(value).sort() };
+  const collections = Object.fromEntries(
+    Object.entries(value)
+      .filter(([, child]) => Array.isArray(child))
+      .map(([key, rows]) => {
+        const list = rows as Array<unknown>;
+        const evidenceIds = new Set<string>();
+        const collect = (item: unknown) => {
+          if (Array.isArray(item)) item.forEach(collect);
+          else if (item && typeof item === 'object')
+            for (const [field, child] of Object.entries(item))
+              if (field === 'evidence_id' && typeof child === 'string')
+                evidenceIds.add(child);
+              else collect(child);
+        };
+        collect(list);
+        return [key, { rowCount: list.length, evidenceIds: [...evidenceIds] }];
+      }),
+  );
+  return { fields: Object.keys(value).sort(), collections };
 }
 
 export async function reviewFailures(runDirectory: string) {
@@ -240,6 +274,31 @@ export async function reviewFailures(runDirectory: string) {
       trace.tools,
       state,
     );
+    const visibleSchemaHash = hash(
+      definitionsForFixture(
+        test.tags.includes('write-operation'),
+        fixture.data,
+      ),
+    );
+    const savedResult = JSON.parse(
+      fs.readFileSync(path.join(directory, 'result.json'), 'utf8'),
+    );
+    const emptyQueryCall = ledger.some((call) => {
+      if (
+        !['search_policy', 'list_products'].includes(call.name) ||
+        !call.success
+      )
+        return false;
+      const collection =
+        call.name === 'search_policy' ? 'policies' : 'products';
+      const rows = (call.result as Record<string, unknown>)?.[collection];
+      return Array.isArray(rows) && rows.length === 0;
+    });
+    // Before enum values were published, the schema offered no way to learn
+    // the accepted locale-independent query codes. An empty result from that
+    // schema is a fixture contract failure when the expected query is known.
+    const fixtureDiscoverabilityFailure =
+      emptyQueryCall && savedResult.toolSchemaHash !== visibleSchemaHash;
     const changedCheckNames = Object.entries(business.checks)
       .filter(([key, value]) => value !== row.businessChecks?.[key])
       .map(([key]) => key);
@@ -273,6 +332,7 @@ export async function reviewFailures(runDirectory: string) {
       fixtureReplayMatches: replay.matches,
       measurementValid: row.measurementValid,
       checksMatch,
+      fixtureDiscoverabilityFailure,
     });
     reviews.push({
       candidate: row.candidate,
@@ -296,6 +356,10 @@ export async function reviewFailures(runDirectory: string) {
         fixtureReplayMismatchIndexes: replay.mismatchIndexes,
         checksMatch,
         measurementValid: row.measurementValid,
+        fixtureDiscoverabilityFailure,
+        fixtureToolSchemaHash: savedResult.toolSchemaHash ?? null,
+        currentVisibleToolSchemaHash: visibleSchemaHash,
+        emptyQueryCall,
       },
       details: {
         ...businessFailureDetails(test, trace.output, ledger, state),

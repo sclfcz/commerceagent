@@ -184,7 +184,10 @@ export async function startService(options: {
 
 export class EvalApi {
   cookie = '';
-  constructor(readonly baseUrl: string) {}
+  constructor(
+    readonly baseUrl: string,
+    readonly requestTimeoutMs = 20000,
+  ) {}
   async request<T = Record<string, any>>(
     route: string,
     body?: unknown,
@@ -196,7 +199,7 @@ export class EvalApi {
         ...(this.cookie ? { Cookie: this.cookie } : {}),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(this.requestTimeoutMs),
       redirect: 'error',
     });
     if (!response.ok) throw new Error(`api_status_${response.status}`);
@@ -210,13 +213,15 @@ export async function provisionProfiles(
   api: EvalApi,
   profile: Record<string, any>,
   candidates: Candidate[],
+  onStage?: (stage: string) => void,
 ) {
   const bindings: Array<{
     alias: string;
     providerId: string;
     profile: Record<string, any>;
   }> = [];
-  for (const configured of candidates) {
+  for (const [index, configured] of candidates.entries()) {
+    onStage?.(`provider_upsert_${index + 1}`);
     const provider = await api.request('/api/config/claude/providers', {
       name: configured.alias,
       type: 'third_party',
@@ -228,6 +233,7 @@ export async function provisionProfiles(
         : 'anthropicApiKey']: process.env[configured.apiKeyEnv],
       customEnv: candidateEnvironment(configured),
     });
+    onStage?.(`profile_create_${index + 1}`);
     const created = await api.request('/api/agent-profiles', {
       ...profile,
       model_config_id: provider.id,
@@ -247,12 +253,16 @@ export async function bootstrap(
   profile: Record<string, any>,
   data: string,
   candidates: Candidate[] = [candidate],
+  onStage?: (stage: string) => void,
 ) {
+  onStage?.('initial_database');
   const initialDatabase = databaseState(data);
+  onStage?.('auth_setup');
   const auth = await api.request('/api/auth/setup', {
     username: 'benchmark',
     password: randomBytes(24).toString('base64url'),
   });
+  onStage?.('fixture_mcp_register');
   await api.request('/api/mcp-servers', {
     id: 'commerce_fixture',
     scope: 'user',
@@ -260,7 +270,7 @@ export async function bootstrap(
     args: ['/workspace/group/fixture-bridge.mjs'],
     description: 'Synthetic commerce fixture',
   });
-  const bindings = await provisionProfiles(api, profile, candidates);
+  const bindings = await provisionProfiles(api, profile, candidates, onStage);
   const selected = bindings.find(
     (binding) => binding.alias === candidate.alias,
   );
@@ -268,6 +278,7 @@ export async function bootstrap(
     throw new Error('profile_binding');
   const created = { profile: selected.profile };
   const provider = { id: selected.providerId };
+  onStage?.('workspace_create');
   const workspace = await api.request('/api/groups', {
     name: 'Benchmark workspace',
     agent_profile_id: created.profile.id,
@@ -281,18 +292,21 @@ export async function bootstrap(
   const jid = encodeURIComponent(workspace.jid);
   // Workspace creation automatically prewarms its main Runner. Quiesce it
   // before measuring a separate cold Runtime Session or taking the baseline.
+  onStage?.('prewarm_runner_stop');
   await api.request(`/api/groups/${jid}/stop`, {});
   const folder = workspace.group.folder;
   const groupDir = path.join(data, 'groups', folder);
   fs.rmSync(path.join(groupDir, 'logs'), { recursive: true, force: true });
   // Explicit title avoids the auto_pending → sdkQuery title path.
   const beforeSession = databaseState(data);
+  onStage?.('session_create');
   const session = await api.request(`/api/groups/${jid}/sessions`, {
     name: 'Benchmark attempt',
   });
   privateJson(path.join(groupDir, 'business-context.json'), {
     businessDate: '2026-09-10',
   });
+  onStage?.('bootstrap_complete');
   return {
     initialDatabase,
     userAbsentBeforeSetup: !initialDatabase.users.includes(auth.user.id),

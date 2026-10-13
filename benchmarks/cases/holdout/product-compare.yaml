@@ -219,7 +219,7 @@
   split: holdout
   tags:
     - conflict
-  prompt: CH-USB4 的价格是多少？若来源列出两个不同价格，请先说明无法确定。
+  prompt: 充电器 CH-USB4 的价格是多少？若来源列出两个不同价格，请先说明无法确定。
   fixture_variant: product-compare/v1/conflict-price
   expected:
     status: conflict

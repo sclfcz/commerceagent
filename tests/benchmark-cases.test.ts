@@ -410,6 +410,62 @@ describe('versioned benchmark business-case matrix', () => {
 });
 
 describe('fixture edge conditions stay measurable', () => {
+  test('exposes market, policy topic, and product category enums in MCP tools/list', async () => {
+    const policyData = parseFixtureVariant('customer-policy/v1/default').data;
+    const productData = parseFixtureVariant('product-compare/v1/default').data;
+    const policyServer = await startFixtureServer({
+      data: policyData,
+      scenario: 'normal',
+      ledgerFile: path.join(temp, 'schema-policy-ledger.jsonl'),
+    });
+    const productServer = await startFixtureServer({
+      data: productData,
+      scenario: 'normal',
+      ledgerFile: path.join(temp, 'schema-product-ledger.jsonl'),
+    });
+    const listTools = async (server: typeof policyServer) => {
+      const response = await fetch(`http://127.0.0.1:${server.port}/rpc`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${server.token}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/list',
+          params: {},
+        }),
+      });
+      const body = (await response.json()) as {
+        result: { tools: Array<any> };
+      };
+      return body.result.tools;
+    };
+    try {
+      const policyTools = await listTools(policyServer);
+      const productTools = await listTools(productServer);
+      const policy = policyTools.find((tool) => tool.name === 'search_policy')!;
+      const products = productTools.find(
+        (tool) => tool.name === 'list_products',
+      )!;
+      expect(policy.inputSchema.properties.market).toMatchObject({
+        enum: expect.arrayContaining(['US', 'CA', 'CN']),
+        description: expect.stringContaining('美国'),
+      });
+      expect(policy.inputSchema.properties.topic).toMatchObject({
+        enum: ['exchange', 'return'],
+        description: expect.stringContaining('退货'),
+      });
+      expect(products.inputSchema.properties.category).toMatchObject({
+        enum: ['battery', 'cable', 'charger'],
+        description: expect.stringContaining('线材'),
+      });
+    } finally {
+      await Promise.all([policyServer.close(), productServer.close()]);
+    }
+  });
+
   test('write tools are exposed only to explicitly tagged write-operation cases', () => {
     expect(definitionsForFixture(false).map((tool) => tool.name)).not.toContain(
       'create_refund_request',

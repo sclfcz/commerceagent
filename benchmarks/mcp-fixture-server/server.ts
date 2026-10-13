@@ -48,39 +48,8 @@ const toolSchemas = [
 
 const writeToolNames = new Set(['create_refund_request', 'escalate_to_human']);
 
-export const toolDefinitions = toolSchemas.map((tool) => ({
-  name: tool.name,
-  description: tool.description,
-  inputSchema: {
-    type: 'object',
-    properties: Object.fromEntries(
-      [...tool.required, ...tool.optional].map((key) => [
-        key,
-        { type: key === 'amount' ? 'number' : 'string' },
-      ]),
-    ),
-    required: tool.required,
-    additionalProperties: false,
-  },
-  annotations: {
-    readOnlyHint: !['create_refund_request', 'escalate_to_human'].includes(
-      tool.name,
-    ),
-    destructiveHint: ['create_refund_request', 'escalate_to_human'].includes(
-      tool.name,
-    ),
-    idempotentHint: true,
-  },
-}));
-
-export function definitionsForFixture(includeWorkflowWrites: boolean) {
-  return includeWorkflowWrites
-    ? toolDefinitions
-    : toolDefinitions.filter((tool) => !writeToolNames.has(tool.name));
-}
-
 type Data = {
-  version: string | number;
+  version?: string | number;
   category?: string;
   orders?: Record<string, unknown>[];
   policies?: Record<string, unknown>[];
@@ -90,6 +59,98 @@ type Data = {
   ads?: Record<string, unknown>[];
   [key: string]: unknown;
 };
+
+const localizedValues: Record<string, Record<string, string>> = {
+  market: {
+    BR: '巴西',
+    CA: '加拿大',
+    CN: '中国大陆',
+    DE: '德国',
+    GB: '英国',
+    JP: '日本',
+    US: '美国',
+  },
+  topic: { exchange: '换货', return: '退货、退款' },
+  category: { battery: '电池', cable: '线材', charger: '充电器' },
+};
+// The case matrix intentionally includes a supported but empty Brazilian
+// policy query, so BR must remain discoverable without a matching policy row.
+const searchableMarkets = ['BR'];
+
+function enumValues(data: Data | undefined, field: string): string[] {
+  const rows: Record<string, unknown>[] =
+    field === 'market'
+      ? [
+          ...(data?.policies ?? []),
+          ...(data?.orders ?? []),
+          ...(data?.category === 'customer-policy'
+            ? searchableMarkets.map((market) => ({ market }))
+            : []),
+        ]
+      : field === 'topic'
+        ? (data?.policies ?? [])
+        : field === 'category'
+          ? (data?.products ?? [])
+          : [];
+  return [
+    ...new Set(
+      rows
+        .map((row) => row[field])
+        .filter((value): value is string => typeof value === 'string'),
+    ),
+  ].sort();
+}
+
+function propertySchema(toolName: string, field: string, data?: Data) {
+  const schema: Record<string, unknown> = {
+    type: field === 'amount' ? 'number' : 'string',
+  };
+  const enumField =
+    (toolName === 'search_policy' &&
+      (field === 'market' || field === 'topic')) ||
+    (toolName === 'list_products' && field === 'category');
+  if (enumField) {
+    const values = enumValues(data, field);
+    if (values.length) {
+      schema.enum = values;
+      const labels = values.map(
+        (value) => `${value}（${localizedValues[field]?.[value] ?? value}）`,
+      );
+      schema.description = `可选值：${labels.join('、')}。请按枚举中的英文代码传参。`;
+    }
+  }
+  return schema;
+}
+
+export function definitionsForFixture(
+  includeWorkflowWrites: boolean,
+  data?: Data,
+) {
+  return toolSchemas
+    .filter((tool) => includeWorkflowWrites || !writeToolNames.has(tool.name))
+    .map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: {
+        type: 'object',
+        properties: Object.fromEntries(
+          [...tool.required, ...tool.optional].map((key) => [
+            key,
+            propertySchema(tool.name, key, data),
+          ]),
+        ),
+        required: tool.required,
+        additionalProperties: false,
+      },
+      annotations: {
+        readOnlyHint: !writeToolNames.has(tool.name),
+        destructiveHint: writeToolNames.has(tool.name),
+        idempotentHint: true,
+      },
+    }));
+}
+
+export const toolDefinitions = definitionsForFixture(false);
 
 function filterVariantRows(
   rows: Record<string, unknown>[],
@@ -151,6 +212,7 @@ export async function startFixtureServer(options: {
     : toolSchemas.filter((tool) => !writeToolNames.has(tool.name));
   const exposedDefinitions = definitionsForFixture(
     options.includeWorkflowWrites === true,
+    options.data,
   );
   const state: FixtureState = {
     refund_requests: [],

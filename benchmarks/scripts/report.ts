@@ -143,13 +143,21 @@ export function createBenchmarkReport(runDirectory: string) {
   };
 }
 
+export function resolveRunDirectory(
+  argument: string,
+  repositoryRoot = repository,
+  benchmarkRoot = benchmarkDirectory,
+) {
+  const repositoryRelative = path.resolve(repositoryRoot, argument);
+  if (fs.existsSync(repositoryRelative)) return repositoryRelative;
+  return path.join(benchmarkRoot, 'results', argument);
+}
+
 export function main() {
   const argument = process.argv[2];
   if (!argument)
     throw new Error('usage: npm run bench:report -- <run-id-or-path>');
-  const runDirectory = path.isAbsolute(argument)
-    ? argument
-    : path.join(benchmarkDirectory, 'results', argument);
+  const runDirectory = resolveRunDirectory(argument);
   const report = createBenchmarkReport(runDirectory);
   privateJson(path.join(runDirectory, 'report.private.json'), report);
   privateJson(path.join(runDirectory, 'summary.reassessed.json'), report);

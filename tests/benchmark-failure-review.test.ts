@@ -56,6 +56,31 @@ test('failure attribution rejects case drift and fixture corruption before blami
   expect(classifyFailure(healthy)).toBe('model_error');
 });
 
+test('classifies empty fixture queries under a schema without discoverable enums as fixture errors', () => {
+  expect(
+    classifyFailure({
+      ...healthy,
+      fixtureDiscoverabilityFailure: true,
+    }),
+  ).toBe('fixture_error');
+  expect(classifyFailure(healthy)).toBe('model_error');
+});
+
+test('ad-05 is clarify when the report exists but its conversion field is missing', async () => {
+  const item = loadBusinessCases('dev').find((row) => row.id === 'ad-05')!;
+  const reference = loadReferenceAnswers('dev').find(
+    (row) => row.caseId === item.id,
+  )!;
+  const evidence = await executeReference(item, reference);
+  const reports = evidence.ledger[0]?.result as {
+    reports?: Array<Record<string, unknown>>;
+  };
+  expect(reports.reports).toHaveLength(1);
+  expect(reports.reports?.[0]).not.toHaveProperty('conversions');
+  expect(reference.response.status).toBe('clarify');
+  expect(evidence.business.pass).toBe(true);
+});
+
 test('negated causal and completion statements do not trip affirmative-claim checks', async () => {
   for (const id of ['ad-03', 'cp-13']) {
     const item = loadBusinessCases('dev').find((row) => row.id === id)!;

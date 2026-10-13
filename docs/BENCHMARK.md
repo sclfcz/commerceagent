@@ -262,11 +262,13 @@ benchmark 用例测试只使用合成资料和本机 HTTP，不调用真实模�
 
 广告查询使用含首尾的 UTC 日期区间重叠筛选，返回整个原始汇总周期，不对部分重叠按日拆算。等价调用可查询包含目标完整周期的更大区间，或一次查询所有活动；答案仍必须只使用题目指定周期。只查询目标周期的一部分不算完整的等价查询。所有广告题明确写出绝对日期；模拟退款题明确给出业务日期，并区分金额核算、资格判断和创建待审核申请。
 
+fixture MCP 的 `search_policy.market/topic` 和 `list_products.category` 在 `tools/list` 的 JSON Schema 中公开枚举值与中文含义，枚举从对应 fixture 数据生成；即使某个明确支持的市场当前没有政策记录，也会列为可查询市场。固定参考调用计划会验证参数符合该运行时 schema，且枚举值可从当轮/先前用户消息、中文说明或先前工具结果推出，再实际回放 fixture 检查可取得的数据。参考答案只通过断言不足以证明用例可解。
+
 每条用例有一份固定的 `benchmarks/references/{dev,holdout}/*.json` 标准答案和调用计划，包含明确的取值、证据及原始 case/fixture hash。测试在本地真实 fixture 上执行计划后检查全部断言，并对字段、金额、单位、证据、参数、次数、禁止结论和最终状态做变异。`npm run bench:selftest -- --all` 只做离线自检，不调用模型，也不消耗 holdout 的真实运行次数；真实 `bench:run` 在调用模型前自动自检所选用例并保存 `case-selftest.json`。
 
 `CLAUDE.md` 的“Agent 工具权限保持开放；不要虚构只读或受限工具模式”仍适用于产品工作区。用户明确授权的独立 benchmark 是实验例外：仅由宿主机 `COMMERCEAGENT_BENCHMARK_MODE=1` 开启，禁用 SDK 内建工具，并移除包括产品记忆 MCP 在内的非 fixture MCP；普通工作区没有这种产品模式。
 
-失败复核命令为 `npm run bench:review -- RUN_DIRECTORY`。它重新验证固定参考答案，逐条在隔离 fixture 中复放原始调用并比较结果/最终状态，再写入不可覆盖的私有 `failure-review.<hash>.json`。分类为 `model_error`、`case_or_assertion_error`、`fixture_error`；参考答案失败、源码契约漂移、fixture 响应无法复放或测量证据无效时，都不能归因于模型。该复核不调用真实模型，不修改评分或原始结果。
+失败复核命令为 `npm run bench:review -- RUN_DIRECTORY`。它重新验证固定参考答案，逐条在隔离 fixture 中复放原始调用并比较结果/最终状态，再写入不可覆盖的私有 `failure-review.<hash>.json`。分类为 `model_error`、`case_or_assertion_error`、`fixture_error`；参考答案失败、源码契约漂移、fixture 响应无法复放、测量证据无效，或旧工具 schema 无法让模型发现正确查询值而产生空结果时，都不能归因于模型。该复核不调用真实模型，不修改评分或原始结果。
 
 `benchmarks/cases/dev/` 与 `benchmarks/cases/holdout/` 中按业务域拆分 YAML。客户政策域 28 条（dev 22、holdout 6），
 商品对比和广告复盘各 20 条（dev 14、holdout 6），合计 68 条。三个域均覆盖 normal、boundary、empty、conflict、injection、clarify、refuse、distractor；
@@ -284,6 +286,8 @@ Fixture 包含分页、字段缺失、多币种、冲突、注入和超时错误
 Fixture 超时由 fixture 服务按场景延迟后返回明确的 MCP 工具错误；这验证 Agent 是否正确报告不可用。
 只要 tool call 在账本与 stream 中对应、usage/context/fresh-state 等采集证据完整，该类业务超时仍可 `measurementValid=true`，
 不能因为模型拿到工具错误而分类成测量失败。真实网络断连、Runner 超时仍按传输/采集失败处理。
+
+状态定义：查询条件完整且查询成功返回零条相关记录时为 `not_found`；记录存在但缺少完成计算或判断所需的字段时为 `clarify`；查询条件本身不足也为 `clarify`。例如广告报表存在但缺少转化数，不能计算每次转化成本，应说明缺失字段，而不是称为没有报表。
 
 多轮用例是固定的用户消息脚本，按顺序在同一隔离 Session 中发送，不模拟用户，也不从模型回答生成后续消息；每个脚本独立创建全新服务，最终答案、全部工具事件与最终 fixture 状态共同断言。
 默认运行只加载 dev 文件，不读取 holdout 用例。只有最终正式运行的 `--split holdout --final-run` 会加载 holdout，并且成功或失败启动都计入唯一次数。

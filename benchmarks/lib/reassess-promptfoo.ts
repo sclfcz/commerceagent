@@ -40,6 +40,7 @@ import {
   verifyContext,
   type ContextEvidence,
 } from './context.js';
+import { verifyInterruptionEvidence } from './interruption-evidence.js';
 import {
   validateAssessmentParity,
   validateExecutionOrder,
@@ -388,6 +389,12 @@ export function reassessPromptfoo(runDirectory: string) {
       candidate.model,
     );
     if (missingEvidence) {
+      const interruption = verifyInterruptionEvidence({
+        directory: attemptDirectory,
+        candidate: row.candidateAlias,
+        caseId: row.caseId,
+        executionIndex: index,
+      });
       let partialTrace: Record<string, any> | null = null;
       if (fs.existsSync(traceFile)) {
         try {
@@ -397,7 +404,8 @@ export function reassessPromptfoo(runDirectory: string) {
         }
       }
       const partialFailure =
-        partialTrace?.failure === 'upstream_error' ||
+        interruption?.failure ??
+        (partialTrace?.failure === 'upstream_error' ||
         partialTrace?.failure === 'queue_timeout' ||
         partialTrace?.failure === 'run_timeout' ||
         partialTrace?.failure === 'stream_disconnected' ||
@@ -405,8 +413,8 @@ export function reassessPromptfoo(runDirectory: string) {
         partialTrace?.failure === 'stopped' ||
         partialTrace?.failure === 'released'
           ? partialTrace.failure
-          : 'collection_incomplete';
-      evidenceComplete = false;
+          : 'collection_incomplete');
+      if (!interruption) evidenceComplete = false;
       reassessed.push({
         candidate: row.candidateAlias,
         caseId: row.caseId,
@@ -438,6 +446,13 @@ export function reassessPromptfoo(runDirectory: string) {
             .filter((file) => fs.existsSync(file))
             .map((file) => [path.basename(file), sha256(file)]),
         ),
+        ...(interruption
+          ? {
+              interruptionEvidenceHash: sha256(
+                path.join(attemptDirectory, 'interruption.json'),
+              ),
+            }
+          : {}),
       });
       continue;
     }

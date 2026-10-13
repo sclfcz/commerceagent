@@ -34,7 +34,10 @@ import {
   renderPublicSummary,
   validatePublicSummary,
 } from '../benchmarks/lib/public-report.js';
-import { createBenchmarkReport } from '../benchmarks/scripts/report.js';
+import {
+  createBenchmarkReport,
+  resolveRunDirectory,
+} from '../benchmarks/scripts/report.js';
 import {
   loadAllBusinessCases,
   parseFixtureVariant,
@@ -51,6 +54,33 @@ const cases = [
 ] as SpikeCase[];
 
 describe('Promptfoo benchmark adapter', () => {
+  test('resolves benchmark run IDs and repository-relative result paths', () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'benchmark-report-path-'),
+    );
+    try {
+      const benchmarkRoot = path.join(root, 'benchmarks');
+      const runDirectory = path.join(
+        benchmarkRoot,
+        'results',
+        'promptfoo-test-run',
+      );
+      fs.mkdirSync(runDirectory, { recursive: true });
+      expect(
+        resolveRunDirectory('promptfoo-test-run', root, benchmarkRoot),
+      ).toBe(runDirectory);
+      expect(
+        resolveRunDirectory(
+          'benchmarks/results/promptfoo-test-run',
+          root,
+          benchmarkRoot,
+        ),
+      ).toBe(runDirectory);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test('metrics exclude ineligible attempts and mark incomplete pass^3 as undetermined', () => {
     const rows = [
       ...[1, 2, 3].map((repetition) => ({

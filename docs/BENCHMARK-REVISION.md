@@ -310,3 +310,17 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 - 失败复核 `failure-review.e09fad3ccd50.json` 从固定标准答案、原始工具账本重放、最终 fixture 状态以及当前断言重新核对 26 条业务失败：`model_error=26`、`case_or_assertion_error=0`、`fixture_error=0`。评测后的命名空间检查也确保裸别名不作为 fixture 工具接受。原 run 的 summary/trace/result 没改，复核另写私有 sidecar。账本的 100 行包含 99 个成功 MCP 结果和 1 个预期超时错误；差额已在 `mcp-integrity-review.reconciled.json` 说明并保存原完整性文件 hash。
 - 业务全项通过 **24/50（48%）**，26 条失败都已有逐条检查名、事实差异、工具参数和哈希证据。失败复核通过只表示当前剩余失败可归于模型；业务表现本身仍偏低。候选身份仍为 `gateway_pending`，quality eligible=0，不产生排名或模型优劣结论，成本 unknown。
 - 最新全量检查：**3096 项通过、24 项跳过**；`make typecheck`、benchmark 类型检查、build、format、docs 和 diff 检查均通过。阶段 4 按“标准答案/断言与 fixture 通过自检、完整 dev 测量有效、剩余失败均可解释为模型错误”的标准通过；阶段 5/6 尚未开始，等待阶段验收。
+
+### 阶段 4 用例可发现性复核与修正（2026-10-13）
+
+- 撤销上面的 `promptfoo-2026-10-13T02-17-16-887Z` 用例质量结论。独立复读 50 份原始账本发现，当时工具 schema 未公开政策主题、市场和商品类别可选值；54 次政策/商品查询中有 44 次返回空（政策 29/30、商品 15/24）。该运行的测量采集仍可用于链路诊断，但不能用于业务通过率或模型归因。原始 summary、trace、账本、逐次结果均保留；私有 `case-contract-invalidated.json` 和 `case-contract-invalidated-ledger-review.json` 保存原因、逐账本 hash 与计数。
+- `search_policy` 现公开市场与主题枚举，`list_products` 公开类别枚举，并附中英文含义。值从 fixture 派生；对于有意查询空结果的巴西市场，枚举明确包含 `BR`。每次 attempt 的 `toolSchemaHash` 现在覆盖实际发给 SDK 的 schema。
+- 固定答案自检现检查每项参考调用是否符合实际 MCP inputSchema、每个枚举参数是否能从题面或前序查询结果推出，再调用隔离 fixture 确认数据可得。68 条 dev/holdout 参考答案全通过，932 个断言变异全部被拒；没有模型调用。46 项 fixture/归因专项测试通过。
+- 发现 `pc-05`、`pc-06`、`pc-08` 和 holdout `pc-19` 未告知商品类别；题面已补充自然语言类别信息，仅同步更新受影响的 caseHash，没有修改 oracle、标准数值、工具调用上限或评分断言。`ad-05` 保持 `clarify`：周期记录存在，但缺少 conversions，无法计算 CPA。Profile 已明确区分完整查询无记录的 `not_found`、记录存在但关键信息缺失的 `clarify`、参数不足的 `clarify`。
+- 本轮验证已通过 benchmark typecheck、专项测试 46/46、全量 `make test` 3099 项通过/24 项跳过、`make typecheck`、`make build`、格式、文档和 diff 检查。完整 dev 重跑尚待可用且已轮换的本地凭据；holdout 未运行，阶段 5/6 未开始。
+- 随后启动的 100 次完整 dev run 达到 99/100 测量有效，但独立 parity 因 1 个超时 attempt 的 `usageReconciled` gate 不一致而失败。运行时在停止服务前读取用量，重判时读取停止后的持久化数据库；唯一差异是该 gate。原始 run 保留并有 `invalidated.json` 记录，不能用于质量统计。已将 attempt 的 usage 读取移到服务退出后，确保运行时结果与独立重判都读最终数据库快照；34 项服务/失败归因专项测试及 benchmark 类型、格式、文档检查通过。修正后的完整 dev 矩阵仍待重跑。
+- 后续 100 次 dev run 的执行顺序正确、测量有效 96/100，但 3 次启动/采集异常没有 trace、context 和 fresh-state 文件，导致 `evidenceComplete=false`，且 Provider 将其记为 `environment`、重判只能归为 `collection_incomplete`。该 run 也已保留并作废。现在 attempt 在清理服务和落盘 fixture 最终状态后写入 `interruption.json`，只含阶段、错误类别和源文件 hash；重判验证 manifest 和每个文件 hash，再独立确定错误类别。相关 24 项中断、Promptfoo 和失败复核测试通过；最终完整 dev run 待验证。
+- 该轮作废运行的 12 次环境异常都发生在 bootstrap，原记录只保留 `DOMException`，无法区分配置 API 哪一步超时。现在 bootstrap 记录匿名阶段名，并把隔离 eval API 请求超时从 20 秒提高到 60 秒；中断清单只保留安全化错误名/错误码和阶段，不记录消息、模型或 Endpoint。下一轮完整 dev 将验证这项修正。
+- 用以上诊断改动执行的下一轮 100 次 dev run：证据完整、顺序和 parity 通过，但有 12 次 bootstrap 环境超时，测量有效率 84%，低于 95% 门槛。原始文件保留，私有 `invalidated.json` 标记该矩阵不得用于质量统计。为避免无必要的双候选成本，下一轮改为身份可核验候选跑完整 50 条 dev × 1 次，仍覆盖全体用例并验证测量门槛。
+- 最终 dev run `promptfoo-2026-10-13T12-35-00-032Z` 使用身份可核验候选和固定镜像，50/50 测量有效，执行顺序、独立 evidence、Provider parity 全部通过。身份 `verified`、50 个质量合格样本；业务通过 40/50。`bench:review` 逐条重放 10 个失败，分类 `model_error=10`、`case_or_assertion_error=0`、`fixture_error=0`；无补跑模型调用。成本因模型指纹与本地价格条目不匹配而记为 unknown。公开报告泄漏检查通过；holdout 未运行，阶段 5/6 未开始。
+- 报告 CLI 现在同时接受 run-id、绝对路径和仓库相对结果路径；对应路径解析测试已加入。最终全量门槛结果记录在阶段交付回复中。

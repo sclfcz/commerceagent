@@ -32,6 +32,7 @@ import { assessAttempt } from './assessment.js';
 import { FreshStateTracker } from './fresh-state.js';
 import { officialVendor } from './identity.js';
 import { assessMcpRuntime, readMcpRuntimeEvidence } from './mcp-runtime.js';
+import { persistInterruptionEvidence } from './interruption-evidence.js';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const bench = path.join(repositoryRoot, 'benchmarks');
@@ -117,6 +118,11 @@ export async function attempt(
   });
   let service: Awaited<ReturnType<typeof startService>> | null = null;
   let turnObserved = false;
+  let stage = 'service_start';
+  let interrupted: {
+    failure: 'environment' | 'context_mismatch' | 'collection_incomplete';
+    error: unknown;
+  } | null = null;
   try {
     service = await startService({
       repository,
@@ -124,18 +130,24 @@ export async function attempt(
       image: pinnedImage,
       timeoutMs,
     });
-    const api = new EvalApi(service.baseUrl);
+    stage = 'bootstrap';
+    const api = new EvalApi(service.baseUrl, 60000);
     const runtime = await bootstrap(
       api,
       candidate,
       profile,
       service.data,
       candidates,
+      (bootstrapStage) => {
+        stage = `bootstrap_${bootstrapStage}`;
+      },
     );
+    stage = 'fixture_bridge_install';
     fs.copyFileSync(
       path.join(bench, 'mcp-fixture-server/bridge.mjs'),
       path.join(runtime.groupDir, 'fixture-bridge.mjs'),
     );
+    stage = 'workspace_baseline';
     const workspaceBaselineHash = workspaceBaseline(runtime.groupDir);
     const evidence = {
       ...service.creationEvidence,
@@ -152,18 +164,21 @@ export async function attempt(
       workspaceBaselineHash,
     };
     const freshState = freshStates.verify(evidence);
+    stage = 'fresh_state_persist';
     privateJson(path.join(directory, 'fresh-state.json'), evidence);
     privateJson(path.join(runtime.groupDir, '.fixture-connection.json'), {
       url: `http://host.docker.internal:${fixture.port}/rpc`,
       token: fixture.token,
     });
     const route = `/api/agent-profiles/${runtime.profile.id}/effective-capabilities`;
+    stage = 'capability_preview';
     const preview = await api.request(route, {
       workspace_jid: runtime.workspaceJid,
       runtime_session_id: runtime.sessionId,
     });
     const turnPrompts = renderCasePrompts(test);
     const turnObservations = [];
+    stage = 'turn_observation';
     for (const prompt of turnPrompts) {
       const turn = await observeTurn({
         baseUrl: service.baseUrl,
@@ -205,7 +220,9 @@ export async function attempt(
         failure: turn.failure,
       })),
     };
+    stage = 'trace_persist';
     privateJson(path.join(directory, 'trace.json'), observation);
+    stage = 'post_turn_context';
     const after = await api.request(route, {
       workspace_jid: runtime.workspaceJid,
       runtime_session_id: runtime.sessionId,
@@ -231,13 +248,24 @@ export async function attempt(
       sessionId: runtime.sessionId,
       turnId: observation.turnId,
     };
+    stage = 'context_evidence_persist';
     privateJson(path.join(directory, 'context-evidence.json'), {
       actual: actualContext,
       expected: expectedContext,
     });
     const contextEvidence = verifyContext(actualContext, expectedContext);
+    // Container Runner log lines are flushed when the per-attempt service
+    // exits. Stop it before reading SDK init and usage evidence so both the
+    // live result and independent reassessment observe the same durable DB.
+    const serviceData = service.data;
+    stage = 'service_shutdown';
+    if (service) {
+      await stopService(service.child);
+      service = null;
+    }
+    stage = 'usage_reconciliation';
     const usage = readUsage(
-      path.join(service.data, 'db/messages.db'),
+      path.join(serviceData, 'db/messages.db'),
       {
         userId: runtime.userId,
         groupFolder: runtime.folder,
@@ -245,14 +273,6 @@ export async function attempt(
       },
       candidate.model,
     );
-    // Container Runner log lines are flushed when the per-attempt service
-    // exits. Stop it before reading the SDK init marker, then reassess only
-    // the durable file evidence.
-    const serviceData = service.data;
-    if (service) {
-      await stopService(service.child);
-      service = null;
-    }
     const business = isBusinessCase
       ? assertBusinessCase(
           observation.output,
@@ -362,6 +382,7 @@ export async function attempt(
         (await import('../mcp-fixture-server/server.js')).definitionsForFixture(
           isBusinessCase &&
             (test as BusinessCase).tags.includes('write-operation'),
+          fixtureData,
         ),
       ),
       fixtureStateHash: hash(fixture.state),
@@ -378,15 +399,44 @@ export async function attempt(
       logicalRunMs: observation.logicalRunMs,
       business: business.checks,
     };
+    stage = 'result_persist';
     return persistAttemptResult(directory, result, repetition);
   } catch (error) {
+    interrupted = {
+      failure:
+        error instanceof ContextFailure
+          ? 'context_mismatch'
+          : turnObserved
+            ? 'collection_incomplete'
+            : 'environment',
+      error,
+    };
     if (error instanceof ContextFailure) throw error;
     if (turnObserved) throw new CollectionFailure();
     throw error;
   } finally {
-    if (service) await stopService(service.child);
-    if (isBusinessCase)
-      privateJson(path.join(directory, 'fixture-state.json'), fixture.state);
-    await fixture.close();
+    try {
+      if (service) await stopService(service.child);
+    } finally {
+      try {
+        if (isBusinessCase)
+          privateJson(
+            path.join(directory, 'fixture-state.json'),
+            fixture.state,
+          );
+        await fixture.close();
+      } finally {
+        if (interrupted)
+          persistInterruptionEvidence({
+            directory,
+            candidate: candidate.alias,
+            caseId: test.id,
+            failure: interrupted.failure,
+            stage,
+            turnObserved,
+            error: interrupted.error,
+          });
+      }
+    }
   }
 }

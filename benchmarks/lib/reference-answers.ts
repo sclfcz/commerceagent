@@ -2,8 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { startFixtureServer } from '../mcp-fixture-server/server.js';
-import { hash, type ToolCall } from './contracts.js';
+import {
+  definitionsForFixture,
+  startFixtureServer,
+} from '../mcp-fixture-server/server.js';
+import { hash, renderCasePrompts, type ToolCall } from './contracts.js';
 import {
   assertBusinessCase,
   parseFixtureVariant,
@@ -28,6 +31,98 @@ export interface ReferenceAnswer {
     turn: number;
   }>;
   reviewNote: string;
+}
+
+function assertReferencePlanVisible(
+  test: BusinessCase,
+  reference: ReferenceAnswer,
+  fixtureData: Record<string, any>,
+) {
+  const definitions = definitionsForFixture(
+    test.tags.includes('write-operation'),
+    fixtureData,
+  );
+  const prompts = renderCasePrompts(test);
+  const priorResults: unknown[] = [];
+  const labels: Record<string, Record<string, string>> = {
+    market: {
+      BR: '巴西',
+      CA: '加拿大',
+      CN: '中国大陆',
+      DE: '德国',
+      GB: '英国',
+      JP: '日本',
+      US: '美国',
+    },
+    topic: { exchange: '换货', return: '退货、退款' },
+    category: { battery: '电池', cable: '线材', charger: '充电器' },
+  };
+  for (const call of reference.calls) {
+    const definition = definitions.find((item: any) => item.name === call.name);
+    if (!definition) throw new Error(`reference_tool_not_visible:${test.id}`);
+    const schema = definition.inputSchema;
+    const args = call.arguments;
+    if (
+      schema.additionalProperties === false &&
+      Object.keys(args).some((key) => !Object.hasOwn(schema.properties, key))
+    )
+      throw new Error(`reference_argument_not_in_schema:${test.id}`);
+    if (schema.required.some((key: string) => !Object.hasOwn(args, key)))
+      throw new Error(`reference_required_argument_missing:${test.id}`);
+    const prompt = prompts.slice(0, Math.max(1, call.turn)).join('\n');
+    for (const [key, value] of Object.entries(args)) {
+      const property = schema.properties[key];
+      if (!property)
+        throw new Error(`reference_argument_schema_missing:${test.id}`);
+      if (
+        typeof value !== property.type ||
+        (Array.isArray(property.enum) && !property.enum.includes(value))
+      )
+        throw new Error(`reference_argument_schema_invalid:${test.id}:${key}`);
+      if (property.enum) {
+        const literalVisible = prompt.includes(String(value));
+        const localizedVisible =
+          typeof value === 'string' &&
+          (labels[key]?.[value] ?? '\u0000')
+            .split(/[、/]/)
+            .some((label) => prompt.includes(label));
+        const priorOrderEvidence =
+          key === 'market' &&
+          priorResults.some((result) =>
+            JSON.stringify(result).includes(`"market":"${value}"`),
+          );
+        if (!literalVisible && !localizedVisible && !priorOrderEvidence)
+          throw new Error(`reference_enum_not_in_prompt:${test.id}:${key}`);
+      } else if (
+        typeof value === 'string' &&
+        /^(ORD-|CAMP-|[A-Z]{2,}-)/.test(value) &&
+        !prompt.includes(value)
+      ) {
+        throw new Error(`reference_identifier_not_in_prompt:${test.id}:${key}`);
+      }
+    }
+    // The reference tool plan is sequential. Later arguments may rely on
+    // evidence returned by earlier calls, just as they do for the Agent.
+    const fixtureRows =
+      call.name === 'get_order'
+        ? (fixtureData.orders ?? [])
+        : call.name === 'search_policy'
+          ? (fixtureData.policies ?? [])
+          : call.name === 'list_products'
+            ? (fixtureData.products ?? [])
+            : call.name === 'get_ad_report'
+              ? (fixtureData.ads ?? [])
+              : [];
+    priorResults.push(
+      fixtureRows.filter((row: Record<string, unknown>) =>
+        Object.entries(args).every(([key, expected]) =>
+          key === 'page_token' || key === 'start_date' || key === 'end_date'
+            ? true
+            : row[key] === expected,
+        ),
+      ),
+    );
+  }
 }
 
 export function loadReferenceAnswers(split: CaseSplit): ReferenceAnswer[] {
@@ -59,6 +154,7 @@ export async function executeReference(
     reference.fixtureHash !== hash(fixture)
   )
     throw new Error(`reference_snapshot_mismatch:${test.id}`);
+  assertReferencePlanVisible(test, reference, fixture.data);
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), 'commerce-case-reference-'),
   );

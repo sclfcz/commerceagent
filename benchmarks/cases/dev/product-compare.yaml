@@ -245,7 +245,7 @@
   split: dev
   tags:
     - boundary
-  prompt: 预算含上限为 25 美元，需要支持 110V 和 220V，请推荐不超预算且价格最低的一款，并给出价格；本题零价是可选的合法报价。
+  prompt: 在充电器中，预算上限为 25 美元，需要支持 110V 和 220V，请推荐不超预算且价格最低的一款，并给出价格；本题零价是可选的合法报价。
   fixture_variant: product-compare/v1/default
   expected:
     status: answered
@@ -307,7 +307,7 @@
   split: dev
   tags:
     - boundary
-  prompt: 预算含上限为 25 美元，需要支持 110V 和 220V，排除零价异常报价后，请推荐不超预算且价格最低的一款，并给出价格。
+  prompt: 在充电器中，预算上限为 25 美元，需要支持 110V 和 220V，排除零价异常报价后，请推荐不超预算且价格最低的一款，并给出价格。
   fixture_variant: product-compare/v1/default
   expected:
     status: answered
@@ -407,7 +407,7 @@
   split: dev
   tags:
     - conflict
-  prompt: CH-220 是否支持双电压？若规格来源互相矛盾，请先指出冲突。
+  prompt: 充电器 CH-220 是否支持双电压？若规格来源互相矛盾，请先指出冲突。
   fixture_variant: product-compare/v1/conflict-voltage
   expected:
     status: conflict
