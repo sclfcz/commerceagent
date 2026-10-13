@@ -19,6 +19,8 @@ import {
 } from '../lib/cases.js';
 import { reassessPromptfoo } from '../lib/reassess-promptfoo.js';
 import { aggregatePromptfooCosts } from '../lib/pricing.js';
+import { selfTestReferences } from '../lib/reference-answers.js';
+import { hash } from '../lib/contracts.js';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
@@ -113,6 +115,22 @@ export async function main() {
     split === 'holdout' ? 1 : smoke ? 1 : requestedRepetitions;
   const tests = buildTests(cases, candidates, repetitions);
   privateJson(path.join(runDirectory, 'cases.used.json'), cases);
+  const caseSelfTest = await selfTestReferences(cases);
+  privateJson(path.join(runDirectory, 'case-selftest.json'), {
+    ...caseSelfTest,
+    realModelCalls: 0,
+    caseHashes: Object.fromEntries(cases.map((test) => [test.id, hash(test)])),
+    assertionCodeHash: hash(
+      [
+        'lib/cases.ts',
+        'lib/date-range.ts',
+        'lib/reference-answers.ts',
+        'mcp-fixture-server/server.ts',
+      ].map((file) =>
+        fs.readFileSync(path.join(benchmarkDirectory, file), 'utf8'),
+      ),
+    ),
+  });
   const cumulativeHoldoutRuns =
     split === 'holdout'
       ? recordHoldoutRun(holdoutLedger, runId, true)
@@ -194,6 +212,7 @@ export async function main() {
     const independent = reassessPromptfoo(runDirectory);
     const report = {
       ...independent,
+      caseSelfTest,
       schemaVersion: 1,
       stage: smoke ? 'smoke' : 'benchmark',
       split,

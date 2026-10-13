@@ -3,7 +3,7 @@
 阶段 1–3 已完成真实 CommerceAgent Container 测量链路、Promptfoo 编排、独立重判及指标报告；阶段 4
 包含版本化业务用例、fixtures、少量固定脚本多轮对话，以及只作用于隔离 fixture 的退款申请/人工转接模拟。
 这些写操作不连接任何真实店铺或资金系统。`bench:spike` 保留原 5 条接线用例；`bench:run` 默认运行 50 条 dev 用例，holdout 有 18 条。
-阶段 4 的测量链路已在修复后完整重跑并通过：run `promptfoo-2026-10-12T14-43-11-523Z` 的 50/50 尝试测量有效，SDK init/状态证据 50/50 就绪，成功 fixture MCP 调用 105 次，Bash 旁路 0。候选仍为网关待核验，质量合格样本为 0，不能据此排名；Judge 与人工校准未开始。
+阶段 4 的用例契约修订后已重跑：完整 dev 矩阵 50/50 测量有效，固定标准答案自检 50/50 通过，932 个离线变异均被拒绝。逐条复核的 26 个业务失败均归为模型错误；0 个用例/断言错误、0 个 fixture 错误。此项验收不代表业务通过率达标。候选身份仍是网关待核验，质量合格样本为 0，不能据此排名；Judge 与人工校准未开始。
 被测对象始终是独立 CommerceAgent Container 的真实端到端运行，不存在 SDK 直连备援。
 历史链路验证见 [验证记录](BENCHMARK-VALIDATION.md)；阶段修复和验收状态见
 [验收修订记录](BENCHMARK-REVISION.md)。
@@ -257,6 +257,16 @@ benchmark 用例测试只使用合成资料和本机 HTTP，不调用真实模�
 是否完整正确，不能替代这项阶段验收门槛。
 
 ## 阶段 4：业务用例集与 fixtures
+
+用例的 `requested_facts` 是对模型公开的字段名和业务含义，不能包含预期取值或 oracle。驱动器把它附在最终一轮任务说明中；带 `business_date` 的用例明确给出业务日期。事实断言只要求必需字段正确，允许额外字段；额外字段不参与确定性事实评分。证据必须来自真实调用账本中的工具结果，允许引用实际检索过的比较对象，不要求证据数组与标准答案完全相等。
+
+广告查询使用含首尾的 UTC 日期区间重叠筛选，返回整个原始汇总周期，不对部分重叠按日拆算。等价调用可查询包含目标完整周期的更大区间，或一次查询所有活动；答案仍必须只使用题目指定周期。只查询目标周期的一部分不算完整的等价查询。所有广告题明确写出绝对日期；模拟退款题明确给出业务日期，并区分金额核算、资格判断和创建待审核申请。
+
+每条用例有一份固定的 `benchmarks/references/{dev,holdout}/*.json` 标准答案和调用计划，包含明确的取值、证据及原始 case/fixture hash。测试在本地真实 fixture 上执行计划后检查全部断言，并对字段、金额、单位、证据、参数、次数、禁止结论和最终状态做变异。`npm run bench:selftest -- --all` 只做离线自检，不调用模型，也不消耗 holdout 的真实运行次数；真实 `bench:run` 在调用模型前自动自检所选用例并保存 `case-selftest.json`。
+
+`CLAUDE.md` 的“Agent 工具权限保持开放；不要虚构只读或受限工具模式”仍适用于产品工作区。用户明确授权的独立 benchmark 是实验例外：仅由宿主机 `COMMERCEAGENT_BENCHMARK_MODE=1` 开启，禁用 SDK 内建工具，并移除包括产品记忆 MCP 在内的非 fixture MCP；普通工作区没有这种产品模式。
+
+失败复核命令为 `npm run bench:review -- RUN_DIRECTORY`。它重新验证固定参考答案，逐条在隔离 fixture 中复放原始调用并比较结果/最终状态，再写入不可覆盖的私有 `failure-review.<hash>.json`。分类为 `model_error`、`case_or_assertion_error`、`fixture_error`；参考答案失败、源码契约漂移、fixture 响应无法复放或测量证据无效时，都不能归因于模型。该复核不调用真实模型，不修改评分或原始结果。
 
 `benchmarks/cases/dev/` 与 `benchmarks/cases/holdout/` 中按业务域拆分 YAML。客户政策域 28 条（dev 22、holdout 6），
 商品对比和广告复盘各 20 条（dev 14、holdout 6），合计 68 条。三个域均覆盖 normal、boundary、empty、conflict、injection、clarify、refuse、distractor；

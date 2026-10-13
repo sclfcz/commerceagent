@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import type { ToolCall } from './contracts.js';
+import { dateRangeCovers, validDateRange } from './date-range.js';
 
 export const CASE_CATEGORIES = [
   'customer-policy',
@@ -32,6 +33,8 @@ export interface BusinessCase {
   split: CaseSplit;
   tags: CaseTag[];
   prompt: string;
+  requested_facts: Record<string, string>;
+  business_date?: string;
   turns?: string[];
   fixture_variant: string;
   expected: {
@@ -191,15 +194,6 @@ const promptForbidden = [
   'page_token',
   'page_size',
   'effective_on',
-  'return_days',
-  'net_refund',
-  'attributed_revenue',
-  'status',
-  'facts',
-  'evidence',
-  'answer',
-  'currency',
-  'unit',
   'fixture',
   'MCP',
 ];
@@ -244,7 +238,21 @@ export function fixtureRecords(
   const rows = [...fixture.data[collection]];
   const additions = fixture.config.additional_records?.[collection];
   if (Array.isArray(additions)) rows.push(...additions);
-  return rows;
+  if ((fixture.config.empty_collections ?? []).includes(collection)) return [];
+  const emptyWhere = fixture.config.empty_where?.[collection];
+  const omitted = fixture.config.omit_fields?.[collection] ?? [];
+  return rows
+    .filter(
+      (row) =>
+        !emptyWhere ||
+        !Object.entries(emptyWhere).every(([key, value]) => row[key] === value),
+    )
+    .map((row) => {
+      const copy = { ...row };
+      for (const field of omitted) delete copy[field];
+      if (fixture.config.inject) copy.description = fixture.data.injection;
+      return copy;
+    });
 }
 
 function matchesWhere(
@@ -419,14 +427,13 @@ function validateRequirement(requirement: ToolRequirement) {
           matcher &&
           typeof matcher === 'object' &&
           !Array.isArray(matcher) &&
-          '$dateRangeEquivalent' in matcher
+          key === '$dateRangeEquivalent'
         ) {
-          const range = matcher.$dateRangeEquivalent as Record<string, unknown>;
+          const range = matcher as Record<string, unknown>;
           if (
             typeof range.start !== 'string' ||
             typeof range.end !== 'string' ||
-            Number.isNaN(Date.parse(range.start)) ||
-            Number.isNaN(Date.parse(range.end))
+            !validDateRange(range.start, range.end)
           )
             throw new Error('case_date_range_invalid');
         } else if (
@@ -527,10 +534,47 @@ function validateCase(test: BusinessCase, split: CaseSplit) {
     throw new Error('case_prompt_leaks_tool_or_output_contract');
 
   const fixture = parseFixtureVariant(test.fixture_variant);
+  if (
+    !test.requested_facts ||
+    typeof test.requested_facts !== 'object' ||
+    Array.isArray(test.requested_facts) ||
+    Object.keys(test.expected.facts).some(
+      (key) => !test.requested_facts[key],
+    ) ||
+    Object.keys(test.requested_facts).some(
+      (key) => !(key in test.expected.facts),
+    ) ||
+    Object.values(test.requested_facts).some(
+      (description) => typeof description !== 'string' || !description.trim(),
+    )
+  )
+    throw new Error('case_requested_facts_invalid');
+  if (
+    test.business_date !== undefined &&
+    !validDateRange(test.business_date, test.business_date)
+  )
+    throw new Error('case_business_date_invalid');
   if (fixture.data.category !== test.category)
     throw new Error('case_fixture_category_mismatch');
   for (const requirement of [...test.tools.required, ...test.tools.forbidden])
     validateRequirement(requirement);
+  for (const requirement of test.tools.required) {
+    for (const alternative of requirement.anyOf ?? [requirement]) {
+      const range = alternative.arguments?.$dateRangeEquivalent as
+        | { start?: string; end?: string }
+        | undefined;
+      if (
+        range &&
+        !prompts.some(
+          (prompt) =>
+            prompt.includes(range.start!) && prompt.includes(range.end!),
+        )
+      )
+        throw new Error('case_prompt_missing_report_period');
+    }
+  }
+  if (test.tags.includes('write-operation') && !test.business_date)
+    throw new Error('case_write_missing_business_date');
   for (const expectation of Object.values(test.expected.facts)) {
     if (!expectation || !expectation.oracle)
       throw new Error('case_fact_oracle_missing');
@@ -658,6 +702,7 @@ function matchParameter(actual: unknown, expected: ParameterMatcher): boolean {
   if (expected && typeof expected === 'object' && !Array.isArray(expected)) {
     const matcher = expected as Record<string, any>;
     if (matcher.$any === true) return actual !== undefined && actual !== null;
+    if (matcher.$absent === true) return actual === undefined;
     if (Array.isArray(matcher.$oneOf))
       return matcher.$oneOf.some(
         (item) => JSON.stringify(item) === JSON.stringify(actual),
@@ -676,13 +721,13 @@ function matchToolPath(
   for (const [key, value] of Object.entries(expected)) {
     if (key === '$dateRangeEquivalent') {
       const range = value as { start: string; end: string };
-      const start = Date.parse(String(call.arguments.start_date ?? ''));
-      const end = Date.parse(String(call.arguments.end_date ?? ''));
       if (
-        !Number.isFinite(start) ||
-        !Number.isFinite(end) ||
-        start !== Date.parse(range.start) ||
-        end !== Date.parse(range.end)
+        !dateRangeCovers(
+          call.arguments.start_date,
+          call.arguments.end_date,
+          range.start,
+          range.end,
+        )
       )
         return false;
     } else if (!matchParameter(call.arguments[key], value)) return false;
@@ -759,10 +804,9 @@ export function assertBusinessCase(
     (answer.answer === undefined || typeof answer.answer === 'string');
   const actualAnswer = typeof answer?.answer === 'string' ? answer.answer : '';
   const expectedFactNames = Object.keys(test.expected.facts).sort();
-  const actualFactNames = answer?.facts ? Object.keys(answer.facts).sort() : [];
   let facts =
     format &&
-    JSON.stringify(actualFactNames) === JSON.stringify(expectedFactNames);
+    expectedFactNames.every((name) => Object.hasOwn(answer!.facts, name));
   if (facts && answer) {
     for (const [name, expectation] of Object.entries(test.expected.facts)) {
       const expectedValue = evaluateOracle(expectation.oracle, fixture);
@@ -812,12 +856,33 @@ export function assertBusinessCase(
       resolveEvidence(item, fixture),
     ),
   ]);
+  const retrievedEvidence = new Set<string>();
+  const collectEvidence = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(collectEvidence);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'evidence_id' && typeof child === 'string')
+        retrievedEvidence.add(child);
+      else collectEvidence(child);
+    }
+  };
+  ledger
+    .filter((call) => call.success && !call.isError)
+    .forEach((call) => collectEvidence(call.result));
+  // Extra citations are allowed only when the model actually retrieved them.
+  retrievedEvidence.forEach((id) => allowedEvidence.add(id));
   const evidence =
     format &&
     requiredEvidence.every((id) => answer!.evidence.includes(id)) &&
     new Set(answer!.evidence).size === answer!.evidence.length &&
     answer!.evidence.every(
-      (id: unknown) => typeof id === 'string' && allowedEvidence.has(id),
+      (id: unknown) =>
+        typeof id === 'string' &&
+        allowedEvidence.has(id) &&
+        retrievedEvidence.has(id),
     );
   const forbiddenConclusions =
     answer !== null &&
@@ -855,17 +920,18 @@ export function assertBusinessCase(
     (requirement) =>
       !ledger.some((call) => matchesToolRequirement(call, requirement)),
   );
-  const streamNames = streamTools.map((tool) =>
-    tool.name.replace(/^mcp__commerce_fixture__/, ''),
-  );
   const allowedTools = new Set(toolNames);
   const onlyAllowedTools =
     ledger.every((call) => allowedTools.has(names(call))) &&
-    streamNames.every((name) => allowedTools.has(name));
+    streamTools.every(
+      (tool) =>
+        tool.name.startsWith('mcp__commerce_fixture__') &&
+        allowedTools.has(tool.name.slice('mcp__commerce_fixture__'.length)),
+    );
   const successfulTools = ledger.every((call) => call.success);
   const callLimit =
     ledger.length <= test.tools.max_calls &&
-    streamNames.length <= test.tools.max_calls;
+    streamTools.length <= test.tools.max_calls;
   const expectedState = test.expected.state ?? {
     refund_requests: [],
     handoffs: [],

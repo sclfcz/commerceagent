@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { isIP, type AddressInfo } from 'node:net';
 import type { FixtureState } from '../lib/cases.js';
 import type { SpikeCase, ToolCall } from '../lib/contracts.js';
+import { dateRangesOverlap, validDateRange } from '../lib/date-range.js';
 
 const toolSchemas = [
   {
@@ -26,7 +27,8 @@ const toolSchemas = [
   },
   {
     name: 'get_ad_report',
-    description: '读取指定日期广告指标',
+    description:
+      '按闭区间日期重叠筛选广告汇总记录。记录保留原始统计周期，不对部分重叠按日拆分；可返回多个周期，需按用户要求选择。省略活动标识则返回各活动。',
     required: ['start_date', 'end_date'],
     optional: ['campaign_id', 'page_token'],
   },
@@ -233,7 +235,13 @@ export async function startFixtureServer(options: {
       let isError = !success;
       const config = options.variantConfig || {};
       if (!success) result = { error: 'invalid_tool_or_arguments' };
-      else if (name === 'create_refund_request') {
+      else if (
+        name === 'get_ad_report' &&
+        !validDateRange(args.start_date, args.end_date)
+      ) {
+        result = { error: 'invalid_date_range' };
+        isError = true;
+      } else if (name === 'create_refund_request') {
         const order = (options.data.orders || []).find(
           (entry) => entry.order_id === args.order_id,
         );
@@ -330,8 +338,12 @@ export async function startFixtureServer(options: {
           return (
             (args.campaign_id === undefined ||
               row.campaign_id === args.campaign_id) &&
-            row.start_date === args.start_date &&
-            row.end_date === args.end_date
+            dateRangesOverlap(
+              args.start_date,
+              args.end_date,
+              row.start_date,
+              row.end_date,
+            )
           );
         });
         rows = filterVariantRows(rows, collection, {
@@ -385,6 +397,7 @@ export async function startFixtureServer(options: {
         arguments: args && typeof args === 'object' ? args : {},
         result,
         success,
+        isError,
       };
       // Persist before acknowledging execution. Caller cannot read or mutate this ledger.
       fs.appendFileSync(options.ledgerFile, JSON.stringify(call) + '\n', {

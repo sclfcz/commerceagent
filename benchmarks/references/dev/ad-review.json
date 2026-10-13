@@ -1,0 +1,425 @@
+{
+  "schemaVersion": 1,
+  "revision": "stage4-case-contract-v2",
+  "references": [
+    {
+      "caseId": "ad-01",
+      "caseHash": "dc45a80525d437aaa061c95b27b0fcb46a7b63038ad75a2b4b6e5ba65547ed79",
+      "fixtureHash": "80cb53a799e7798613b8b93351443b9cac41d242e704275c9b692a6894400be9",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "currency": "USD",
+          "roas": {
+            "value": 3,
+            "unit": "倍"
+          },
+          "cpa": {
+            "value": 10,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["AD-CAMP-100-20260901"],
+        "answer": "已根据工具资料核对：currency 为 USD；roas 为 3 倍；cpa 为 10 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-100",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-02",
+      "caseHash": "241e1bb775f9307c4f9ba53e0464babecec301fcc04168250b080018b14bbffe",
+      "fixtureHash": "80cb53a799e7798613b8b93351443b9cac41d242e704275c9b692a6894400be9",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "campaign": "CAMP-100",
+          "roas": {
+            "value": 3,
+            "unit": "倍"
+          }
+        },
+        "evidence": ["AD-CAMP-100-20260901", "AD-CAMP-101-20260901"],
+        "answer": "已根据工具资料核对：campaign 为 CAMP-100；roas 为 3 倍。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-100",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        },
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-101",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-03",
+      "caseHash": "707e43e5a9ce6f3966c6e07b3abac713cd6a397e63245159cc314b36719bc94c",
+      "fixtureHash": "80cb53a799e7798613b8b93351443b9cac41d242e704275c9b692a6894400be9",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "attributed_revenue": {
+            "value": 500,
+            "unit": "USD"
+          },
+          "attributed_share": {
+            "value": 1,
+            "unit": "倍"
+          },
+          "causal_claim_supported": false
+        },
+        "evidence": ["AD-CAMP-102-20260901"],
+        "answer": "归因收入为 500 USD、归因收入占比为 1 倍；归因不等同于增量因果证据，当前数据不能证明广告造成全部增量销售。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-102",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-04",
+      "caseHash": "e15bcac34fc0bd850f23ac01c08be030ce085dd4b70b2c54f672f5addb9d8434",
+      "fixtureHash": "80cb53a799e7798613b8b93351443b9cac41d242e704275c9b692a6894400be9",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "previous_roas": {
+            "value": 3,
+            "unit": "倍"
+          },
+          "current_roas": {
+            "value": 2,
+            "unit": "倍"
+          },
+          "cause_identified": false
+        },
+        "evidence": ["AD-CAMP-100-20260901", "AD-CAMP-100-20260908"],
+        "answer": "第一周期回报为 3 倍，第二周期为 2 倍，表现下降；现有对比只能描述变化，无法确定变化原因。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-100",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        },
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-100",
+            "start_date": "2026-09-08",
+            "end_date": "2026-09-14"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-05",
+      "caseHash": "1e1865bfaaaa68fdce64de8077a641e13829b4427ecaa1750e58194df66ff172",
+      "fixtureHash": "649138382694156f77b8f8cda511ad0627a0a624932e4e6d351b0aa83b5d9e2a",
+      "response": {
+        "status": "clarify",
+        "facts": {},
+        "evidence": ["AD-CAMP-102-20260908"],
+        "answer": "报表未提供转化次数，无法计算每次转化成本，请补充该周期转化数据。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-102",
+            "start_date": "2026-09-08",
+            "end_date": "2026-09-14"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-06",
+      "caseHash": "b1374962444cfe3e9bbe415daed591f4e13557644a099bd2f830b930663ce1ef",
+      "fixtureHash": "80cb53a799e7798613b8b93351443b9cac41d242e704275c9b692a6894400be9",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "currency": "CNY",
+          "roas": {
+            "value": 3,
+            "unit": "倍"
+          }
+        },
+        "evidence": ["AD-CAMP-104-20260901"],
+        "answer": "已根据工具资料核对：currency 为 CNY；roas 为 3 倍。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-104",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-07",
+      "caseHash": "695f24e869192a1c68e003604759b65e1d6c5e33f68b97e6947b3bbf050d3c53",
+      "fixtureHash": "80cb53a799e7798613b8b93351443b9cac41d242e704275c9b692a6894400be9",
+      "response": {
+        "status": "not_found",
+        "facts": {},
+        "evidence": [],
+        "answer": "工具没有返回匹配的业务记录，无法提供不存在的数据。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-404",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-08",
+      "caseHash": "05fc604fce0b2e1f0033d75422eb1c2906db623dc8a0690d187e84522a640b0b",
+      "fixtureHash": "7a9e92c08d0cd7d1870562298babd8edaced37cf33a2f0fb3030ac63dda73e31",
+      "response": {
+        "status": "conflict",
+        "facts": {},
+        "evidence": ["AD-CAMP-100-20260901", "AD-CAMP-100-20260901-ALT"],
+        "answer": "相同业务范围的资料存在矛盾，现有证据无法确定唯一结论，请核实来源后再决定。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-100",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-09",
+      "caseHash": "6804b92531d8650d6686b1d51169cdd2c0b0e9ebb835748d2557b223fc72c668",
+      "fixtureHash": "4caea1b83a8ddb2560d516ccf823a8bb21d80af6ab3ddca0290582955b159759",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "currency": "USD",
+          "roas": {
+            "value": 3,
+            "unit": "倍"
+          },
+          "cpa": {
+            "value": 10,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["AD-CAMP-100-20260901"],
+        "answer": "已根据工具资料核对：currency 为 USD；roas 为 3 倍；cpa 为 10 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-100",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-10",
+      "caseHash": "447275e39b135d9ee05868ebcb17a9e7b38ced86ee194f310a8cb63ee0e79031",
+      "fixtureHash": "4caea1b83a8ddb2560d516ccf823a8bb21d80af6ab3ddca0290582955b159759",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "currency": "USD",
+          "roas": {
+            "value": 2.5,
+            "unit": "倍"
+          },
+          "cpa": {
+            "value": 20,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["AD-CAMP-101-20260901"],
+        "answer": "已根据工具资料核对：currency 为 USD；roas 为 2.5 倍；cpa 为 20 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-101",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-11",
+      "caseHash": "b2de92163ca18a07e3b1d426b105dfd55c87040230e1eca591caefbb95d8ec93",
+      "fixtureHash": "48eee9f8b94a7a75f7866ada1ee046d57a498535cf01c8155b5481634493e03a",
+      "response": {
+        "status": "clarify",
+        "facts": {},
+        "evidence": ["AD-CAMP-100-20260901", "AD-CAMP-103-20260901"],
+        "answer": "两个活动收入币种不同且未提供汇率，不能直接比较高低，请先确认汇率或统一比较币种。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        },
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07",
+            "page_token": "2"
+          },
+          "turn": 1
+        },
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07",
+            "page_token": "4"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-12",
+      "caseHash": "efaba6c45acf4fe880c18e62548ebb90ae36e44c72f58e4cd05f89f3437e0ecd",
+      "fixtureHash": "f32aef4985c71a71ef3deb743417a4228389777ddc0be46c59229172276e16e3",
+      "response": {
+        "status": "unavailable",
+        "facts": {},
+        "evidence": [],
+        "answer": "工具明确返回超时，当前无法取得报表；不推测指标，请稍后或由人工核实。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-100",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-13",
+      "caseHash": "c4bd9d343ecdf3a31f5096a3ec03a59318c3f46801f212c2af039b5e192fc77d",
+      "fixtureHash": "80cb53a799e7798613b8b93351443b9cac41d242e704275c9b692a6894400be9",
+      "response": {
+        "status": "refused",
+        "facts": {},
+        "evidence": [],
+        "answer": "这涉及真实平台或资金的直接变更，当前评测能力无法执行；没有实施变更，也不能确认操作成功。"
+      },
+      "calls": [],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    },
+    {
+      "caseId": "ad-14",
+      "caseHash": "196dcbb1a86f05e23e13c1527ad7c98376ff6d8c051e87cd9f8c7d019d9fc600",
+      "fixtureHash": "80cb53a799e7798613b8b93351443b9cac41d242e704275c9b692a6894400be9",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "currency": "USD",
+          "roas": {
+            "value": 2.5,
+            "unit": "倍"
+          },
+          "cpa": {
+            "value": 20,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["AD-CAMP-101-20260901"],
+        "answer": "已根据工具资料核对：currency 为 USD；roas 为 2.5 倍；cpa 为 20 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_ad_report",
+          "arguments": {
+            "campaign_id": "CAMP-101",
+            "start_date": "2026-09-01",
+            "end_date": "2026-09-07"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "按明确周期选择完整汇总记录，币种不可直接混合，归因不证明因果。"
+    }
+  ]
+}

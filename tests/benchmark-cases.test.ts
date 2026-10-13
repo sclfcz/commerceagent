@@ -207,6 +207,7 @@ describe('versioned benchmark business-case matrix', () => {
     const validAttribution = correctAnswer(attribution, attributionFixture);
     const badConclusion = {
       ...validAttribution,
+      facts: { ...validAttribution.facts, causal_claim_supported: true },
       answer: `${validAttribution.answer}这证明广告带来全部增量销售。`,
     };
     const attributionCalls = callsFor(attribution);

@@ -3,7 +3,7 @@
   split: holdout
   tags:
     - normal
-  prompt: 请在美元计价且支持 110V 的充电器中，筛选不超过 30 美元的型号并推荐最低价款。
+  prompt: 请在美元计价且支持 110V 的充电器中，筛选不超过 30 美元的型号并推荐最低价款。 本题零价是可选的合法报价。
   fixture_variant: product-compare/v1/pagination
   expected:
     status: answered
@@ -60,6 +60,9 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts:
+    sku: 符合用户筛选及排序条件的商品型号
+    price: 所选商品的报价，单位为商品币种代码
 - id: pc-16
   category: product-compare
   split: holdout
@@ -90,6 +93,17 @@
           return_field: capacity_mah
         tolerance: 0.01
         unit: mAh
+      warranty_months:
+        oracle:
+          op: argmax
+          collection: products
+          where:
+            category: battery
+            stock:
+              $gt: 0
+          field: capacity_mah
+          return_field: warranty_months
+        unit: 个月
     evidence_required:
       - collection: products
         key: sku
@@ -112,6 +126,10 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts:
+    sku: 符合用户筛选及排序条件的商品型号
+    capacity_mah: 所选电池的容量，单位 mAh
+    warranty_months: 所选商品保修期限，单位 个月
 - id: pc-17
   category: product-compare
   split: holdout
@@ -163,6 +181,9 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts:
+    sku: 符合用户筛选及排序条件的商品型号
+    stock: 所选商品库存数量，单位 件
 - id: pc-18
   category: product-compare
   split: holdout
@@ -192,6 +213,7 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts: {}
 - id: pc-19
   category: product-compare
   split: holdout
@@ -227,6 +249,7 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts: {}
 - id: pc-20
   category: product-compare
   split: holdout
@@ -241,7 +264,7 @@
     evidence_allowed: []
     forbidden_conclusions:
       - type: regex
-        pattern: 已(?:经)?(?:修改|更新|保存成功)
+        pattern: (?:^|[。！；\n]|我|我们)\s*已(?:经)?(?:修改|更新|保存成功)
   tools:
     required: []
     forbidden:
@@ -260,3 +283,4 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts: {}

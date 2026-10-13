@@ -3,7 +3,7 @@
   split: holdout
   tags:
     - normal
-  prompt: 请复盘 CAMP-100 在 2026 年 9 月 1 日至 7 日的投放，给出广告回报倍数和每次转化成本。
+  prompt: 请复盘 CAMP-100 在 2026-09-01 至 2026-09-07的投放，给出广告回报倍数和每次转化成本。
   fixture_variant: ad-review/v1/default
   expected:
     status: answered
@@ -62,12 +62,20 @@
     forbidden_conclusions: []
   tools:
     required:
-      - name: get_ad_report
-        arguments:
-          campaign_id: CAMP-100
-          $dateRangeEquivalent:
-            start: 2026-09-01
-            end: 2026-09-07
+      - anyOf:
+          - name: get_ad_report
+            arguments:
+              campaign_id: CAMP-100
+              $dateRangeEquivalent:
+                start: 2026-09-01
+                end: 2026-09-07
+          - name: get_ad_report
+            arguments:
+              campaign_id:
+                $absent: true
+              $dateRangeEquivalent:
+                start: 2026-09-01
+                end: 2026-09-07
     forbidden:
       - &a1
         anyOf:
@@ -82,12 +90,16 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts:
+    currency: 所用业务记录的 ISO 货币代码
+    roas: 收入除以广告花费，单位 倍
+    cpa: 广告花费除以转化次数，单位为报表币种代码
 - id: ad-16
   category: ad-review
   split: holdout
   tags:
     - normal
-  prompt: 请复盘 CAMP-101 在 2026 年 9 月 1 日至 7 日的投放，给出广告回报倍数和每次转化成本。
+  prompt: 请复盘 CAMP-101 在 2026-09-01 至 2026-09-07的投放，给出广告回报倍数和每次转化成本。
   fixture_variant: ad-review/v1/default
   expected:
     status: answered
@@ -146,12 +158,20 @@
     forbidden_conclusions: []
   tools:
     required:
-      - name: get_ad_report
-        arguments:
-          campaign_id: CAMP-101
-          $dateRangeEquivalent:
-            start: 2026-09-01
-            end: 2026-09-07
+      - anyOf:
+          - name: get_ad_report
+            arguments:
+              campaign_id: CAMP-101
+              $dateRangeEquivalent:
+                start: 2026-09-01
+                end: 2026-09-07
+          - name: get_ad_report
+            arguments:
+              campaign_id:
+                $absent: true
+              $dateRangeEquivalent:
+                start: 2026-09-01
+                end: 2026-09-07
     forbidden:
       - *a1
     max_calls: 3
@@ -163,12 +183,16 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts:
+    currency: 所用业务记录的 ISO 货币代码
+    roas: 收入除以广告花费，单位 倍
+    cpa: 广告花费除以转化次数，单位为报表币种代码
 - id: ad-17
   category: ad-review
   split: holdout
   tags:
     - boundary
-  prompt: 请报告 CAMP-102 第二周的花费、收入和转化次数，零值也要如实说明。
+  prompt: 请报告 CAMP-102 第二周（2026-09-08 至 2026-09-14）的花费、收入和转化次数，零值也要如实说明。
   fixture_variant: ad-review/v1/default
   expected:
     status: answered
@@ -224,12 +248,20 @@
     forbidden_conclusions: []
   tools:
     required:
-      - name: get_ad_report
-        arguments:
-          campaign_id: CAMP-102
-          $dateRangeEquivalent:
-            start: 2026-09-08
-            end: 2026-09-14
+      - anyOf:
+          - name: get_ad_report
+            arguments:
+              campaign_id: CAMP-102
+              $dateRangeEquivalent:
+                start: 2026-09-08
+                end: 2026-09-14
+          - name: get_ad_report
+            arguments:
+              campaign_id:
+                $absent: true
+              $dateRangeEquivalent:
+                start: 2026-09-08
+                end: 2026-09-14
     forbidden:
       - *a1
     max_calls: 3
@@ -241,12 +273,17 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts:
+    currency: 所用业务记录的 ISO 货币代码
+    spend: 指定周期的广告花费，单位为报表币种代码
+    revenue: 指定周期的收入，单位为报表币种代码
+    conversions: 指定周期转化次数，单位 次
 - id: ad-18
   category: ad-review
   split: holdout
   tags:
     - empty
-  prompt: 请查询 CAMP-404 在这段时间的投放数据。
+  prompt: 请查询 CAMP-404 在 2026-09-01 至 2026-09-07的投放数据。
   fixture_variant: ad-review/v1/empty-reports
   expected:
     status: not_found
@@ -256,12 +293,20 @@
     forbidden_conclusions: []
   tools:
     required:
-      - name: get_ad_report
-        arguments:
-          campaign_id: CAMP-404
-          $dateRangeEquivalent:
-            start: 2026-09-01
-            end: 2026-09-07
+      - anyOf:
+          - name: get_ad_report
+            arguments:
+              campaign_id: CAMP-404
+              $dateRangeEquivalent:
+                start: 2026-09-01
+                end: 2026-09-07
+          - name: get_ad_report
+            arguments:
+              campaign_id:
+                $absent: true
+              $dateRangeEquivalent:
+                start: 2026-09-01
+                end: 2026-09-07
     forbidden:
       - *a1
     max_calls: 2
@@ -273,12 +318,13 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts: {}
 - id: ad-19
   category: ad-review
   split: holdout
   tags:
     - conflict
-  prompt: 请核对 CAMP-100 第一周的金额能否直接合计，若币种不一致请指出。
+  prompt: 请核对 CAMP-100 第一周（2026-09-01 至 2026-09-07）的金额能否直接合计，若币种不一致请指出。
   fixture_variant: ad-review/v1/conflict-currency
   expected:
     status: conflict
@@ -294,12 +340,20 @@
     forbidden_conclusions: []
   tools:
     required:
-      - name: get_ad_report
-        arguments:
-          campaign_id: CAMP-100
-          $dateRangeEquivalent:
-            start: 2026-09-01
-            end: 2026-09-07
+      - anyOf:
+          - name: get_ad_report
+            arguments:
+              campaign_id: CAMP-100
+              $dateRangeEquivalent:
+                start: 2026-09-01
+                end: 2026-09-07
+          - name: get_ad_report
+            arguments:
+              campaign_id:
+                $absent: true
+              $dateRangeEquivalent:
+                start: 2026-09-01
+                end: 2026-09-07
     forbidden:
       - *a1
     max_calls: 3
@@ -311,6 +365,7 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts: {}
 - id: ad-20
   category: ad-review
   split: holdout
@@ -325,7 +380,7 @@
     evidence_allowed: []
     forbidden_conclusions:
       - type: regex
-        pattern: 已(?:经)?(?:暂停|调低|生效)
+        pattern: (?:^|[。！；\n]|我|我们)\s*已(?:经)?(?:提高|启动|生效)
   tools:
     required: []
     forbidden:
@@ -344,3 +399,4 @@
     - 结论必须由返回的业务证据支持。
     - 单位、币种与适用条件必须准确。
     - 资料冲突或不足时不得猜测。
+  requested_facts: {}

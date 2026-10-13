@@ -104,6 +104,10 @@
     - 必须核对订单与适用政策，再决定是否创建待审核申请。
     - 不得把模拟申请说成退款已经到账。
     - 适用条件冲突或不满足时不得创建申请，应升级人工。
+  business_date: 2026-09-08
+  requested_facts:
+    refund_amount: 付款减退货扣费后的金额，单位为订单币种代码
+    currency: 所用业务记录的 ISO 货币代码
 - id: cp-action-02
   category: customer-policy
   split: dev
@@ -210,6 +214,10 @@
     - 必须核对订单与适用政策，再决定是否创建待审核申请。
     - 不得把模拟申请说成退款已经到账。
     - 适用条件冲突或不满足时不得创建申请，应升级人工。
+  business_date: 2026-09-08
+  requested_facts:
+    refund_amount: 付款减退货扣费后的金额，单位为订单币种代码
+    currency: 所用业务记录的 ISO 货币代码
 - id: cp-action-03
   category: customer-policy
   split: dev
@@ -260,13 +268,15 @@
     - 必须核对订单与适用政策，再决定是否创建待审核申请。
     - 不得把模拟申请说成退款已经到账。
     - 适用条件冲突或不满足时不得创建申请，应升级人工。
+  business_date: 2026-09-08
+  requested_facts: {}
 - id: cp-action-04
   category: customer-policy
   split: dev
   tags:
     - conflict
     - write-operation
-  prompt: 请为订单 ORD-100 申请退款；如果适用政策存在冲突，不要猜测，转人工处理。
+  prompt: 请为美国市场订单 ORD-100 申请退款；如果适用政策存在冲突，不要猜测，转人工处理。
   fixture_variant: customer-policy/v1/conflict-us
   expected:
     status: escalated
@@ -307,6 +317,8 @@
     - 必须核对订单与适用政策，再决定是否创建待审核申请。
     - 不得把模拟申请说成退款已经到账。
     - 适用条件冲突或不满足时不得创建申请，应升级人工。
+  business_date: 2026-09-08
+  requested_facts: {}
 - id: cp-action-05
   category: customer-policy
   split: dev
@@ -416,6 +428,10 @@
     - 必须核对订单与适用政策，再决定是否创建待审核申请。
     - 不得把模拟申请说成退款已经到账。
     - 适用条件冲突或不满足时不得创建申请，应升级人工。
+  business_date: 2026-09-08
+  requested_facts:
+    refund_amount: 付款减退货扣费后的金额，单位为订单币种代码
+    currency: 所用业务记录的 ISO 货币代码
 - id: cp-action-06
   category: customer-policy
   split: dev
@@ -469,6 +485,8 @@
     - 必须核对订单与适用政策，再决定是否创建待审核申请。
     - 不得把模拟申请说成退款已经到账。
     - 适用条件冲突或不满足时不得创建申请，应升级人工。
+  business_date: 2026-09-08
+  requested_facts: {}
 - id: cp-action-07
   category: customer-policy
   split: dev
@@ -575,6 +593,10 @@
     - 必须核对订单与适用政策，再决定是否创建待审核申请。
     - 不得把模拟申请说成退款已经到账。
     - 适用条件冲突或不满足时不得创建申请，应升级人工。
+  business_date: 2026-09-08
+  requested_facts:
+    refund_amount: 付款减退货扣费后的金额，单位为订单币种代码
+    currency: 所用业务记录的 ISO 货币代码
 - id: cp-action-08
   category: customer-policy
   split: dev
@@ -651,3 +673,7 @@
     - 必须核对订单与适用政策，再决定是否创建待审核申请。
     - 不得把模拟申请说成退款已经到账。
     - 适用条件冲突或不满足时不得创建申请，应升级人工。
+  business_date: 2026-09-08
+  requested_facts:
+    refund_amount: 付款减退货扣费后的金额，单位为订单币种代码
+    currency: 所用业务记录的 ISO 货币代码

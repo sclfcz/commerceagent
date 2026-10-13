@@ -1,6 +1,11 @@
 import type { BusinessCase, FixtureVariant } from '../../lib/cases.js';
 import type { ToolCall } from '../../lib/contracts.js';
-import { evaluateOracle, resolveEvidence } from '../../lib/cases.js';
+import {
+  evaluateOracle,
+  resolveEvidence,
+  fixtureRecords,
+  parseFixtureVariant,
+} from '../../lib/cases.js';
 
 export function correctAnswer(test: BusinessCase, fixture: FixtureVariant) {
   const facts = Object.fromEntries(
@@ -37,6 +42,7 @@ function matcherValue(value: unknown): unknown {
 }
 
 export function callsFor(test: BusinessCase): ToolCall[] {
+  const fixture = parseFixtureVariant(test.fixture_variant);
   const calls = test.tools.required.map((requirement) => {
     const path = requirement.anyOf?.[0] ?? requirement;
     const args: Record<string, unknown> = {};
@@ -47,11 +53,27 @@ export function callsFor(test: BusinessCase): ToolCall[] {
         args.end_date = range.end;
       } else args[key] = matcherValue(raw);
     }
+    const collection =
+      path.name === 'get_order'
+        ? 'orders'
+        : path.name === 'search_policy'
+          ? 'policies'
+          : path.name === 'list_products'
+            ? 'products'
+            : 'ads';
+    const rows = fixtureRecords(fixture, collection).filter((row) =>
+      Object.entries(args).every(
+        ([key, value]) =>
+          ['page_token', 'start_date', 'end_date', 'effective_on'].includes(
+            key,
+          ) || row[key] === value,
+      ),
+    );
     return {
       sequence: 0,
       name: path.name!,
       arguments: args,
-      result: {},
+      result: { [collection === 'ads' ? 'reports' : collection]: rows },
       success: true,
     };
   });

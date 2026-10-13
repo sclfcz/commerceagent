@@ -37,6 +37,7 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   result: unknown;
   success: boolean;
+  isError?: boolean;
 }
 export interface SpikeCase {
   id: string;
@@ -54,6 +55,15 @@ type RenderableBenchmarkCase = {
   prompt: string;
   turns?: string[];
   tools: { max_calls: number };
+  requested_facts?: Record<string, string>;
+  business_date?: string;
+  instructions?: {
+    language?: 'zh' | 'en';
+    answer_required?: boolean;
+    max_answer_chars?: number;
+    required_phrases?: string[];
+    forbidden_phrases?: string[];
+  };
 };
 
 export function renderCasePrompts(
@@ -61,8 +71,28 @@ export function renderCasePrompts(
 ): string[] {
   if ('maxCalls' in test) return [renderCasePrompt(test)];
   const callLimit = `本次任务工具调用总上限：${test.tools.max_calls} 次。`;
-  return [test.prompt, ...(test.turns ?? [])].map(
-    (prompt) => `${prompt}\n${callLimit}`,
+  const prompts = [test.prompt, ...(test.turns ?? [])];
+  const outputRules = {
+    ...(test.instructions?.language
+      ? { language: test.instructions.language }
+      : {}),
+    ...(test.instructions?.answer_required !== undefined
+      ? { answer_required: test.instructions.answer_required }
+      : {}),
+    ...(test.instructions?.max_answer_chars !== undefined
+      ? { max_answer_chars: test.instructions.max_answer_chars }
+      : {}),
+    ...(test.instructions?.required_phrases?.length
+      ? { required_phrases: test.instructions.required_phrases }
+      : {}),
+    ...(test.instructions?.forbidden_phrases?.length
+      ? { forbidden_phrases: test.instructions.forbidden_phrases }
+      : {}),
+  };
+  const taskContract = `响应 facts 的必需字段及含义（允许补充其他有依据的字段）：${JSON.stringify(test.requested_facts ?? {})}。数值的单位或币种遵守 Profile 的输出约定。格式与语言要求：${JSON.stringify(outputRules)}。`;
+  return prompts.map(
+    (prompt, index) =>
+      `${test.business_date ? `业务日期：${test.business_date}。\n` : ''}${prompt}\n${callLimit}${index === prompts.length - 1 ? `\n${taskContract}` : ''}`,
   );
 }
 

@@ -55,6 +55,13 @@ export function auditFixtureCalls(
   return {
     matched: unmatchedStream.length === 0 && unexplainedLedger.length === 0,
     ledgerCount: ledger.length,
+    fixtureErrorResults: ledger.filter(
+      (call) =>
+        call.isError === true ||
+        (!!call.result &&
+          typeof call.result === 'object' &&
+          'error' in call.result),
+    ).length,
     fixtureStreamCount: streamFixtureTools.length,
     successfulFixtureCalls,
     matchedFixtureCalls:
