@@ -3,10 +3,11 @@
 阶段 1–3 已完成真实 CommerceAgent Container 测量链路、Promptfoo 编排、独立重判及指标报告；阶段 4
 包含版本化业务用例、fixtures、少量固定脚本多轮对话，以及只作用于隔离 fixture 的退款申请/人工转接模拟。
 这些写操作不连接任何真实店铺或资金系统。`bench:spike` 保留原 5 条接线用例；`bench:run` 默认运行 50 条 dev 用例，holdout 有 18 条。
-阶段 4 的用例契约修订后已重跑：完整 dev 矩阵 50/50 测量有效，固定标准答案自检 50/50 通过，932 个离线变异均被拒绝。逐条复核的 26 个业务失败均归为模型错误；0 个用例/断言错误、0 个 fixture 错误。此项验收不代表业务通过率达标。候选身份仍是网关待核验，质量合格样本为 0，不能据此排名；Judge 与人工校准未开始。
+历史阶段 4 运行用于验证真实 Container 测量链路。后续的业务失败分析与校准不构成候选排名或模型选型证据；已验证的真实运行只确认链路和测量完整性，不包含正式模型排名或选型结论。当前阶段 6 交付目标为可由第三方运行的 benchmark，不计划进行正式多模型真实运行。
 被测对象始终是独立 CommerceAgent Container 的真实端到端运行，不存在 SDK 直连备援。
 历史链路验证见 [验证记录](BENCHMARK-VALIDATION.md)；阶段修复和验收状态见
 [验收修订记录](BENCHMARK-REVISION.md)。
+第三方配置与报告解读见[运行交接手册](BENCHMARK-HANDOFF.md)。
 
 ## 运行
 
@@ -263,7 +264,7 @@ benchmark 用例测试只使用合成资料和本机 HTTP，不调用真实模�
 
 fixture MCP 的 `search_policy.market/topic` 和 `list_products.category` 在 `tools/list` 的 JSON Schema 中公开枚举值与中文含义，枚举从对应 fixture 数据生成；即使某个明确支持的市场当前没有政策记录，也会列为可查询市场。固定参考调用计划会验证参数符合该运行时 schema，且枚举值可从当轮/先前用户消息、中文说明或先前工具结果推出，再实际回放 fixture 检查可取得的数据。参考答案只通过断言不足以证明用例可解。
 
-每条用例有一份固定的 `benchmarks/references/{dev,holdout}/*.json` 标准答案和调用计划，包含明确的取值、证据及原始 case/fixture hash。测试在本地真实 fixture 上执行计划后检查全部断言，并对字段、金额、单位、证据、参数、次数、禁止结论和最终状态做变异。`npm run bench:selftest -- --all` 只做离线自检，不调用模型，也不消耗 holdout 的真实运行次数；真实 `bench:run` 在调用模型前自动自检所选用例并保存 `case-selftest.json`。
+每条用例有一份固定的 `benchmarks/references/{dev,holdout}/*.json` 标准答案和调用计划，包含明确的取值、证据及原始 case/fixture hash。测试在本地真实 fixture 上执行计划后检查全部断言，并对字段、金额、单位、证据、参数、次数、禁止结论和最终状态做变异。`npm run bench:selftest` 使用本地假模型服务执行真实隔离服务/Runner、fixture MCP、采集、独立复评和报告流程，不调用真实模型，也不消耗 holdout 运行次数；`npm run bench:selftest -- --cases-only --all` 只做 oracle 与变异自检。真实 `bench:run` 在调用模型前自动自检所选用例并保存 `case-selftest.json`。
 
 `CLAUDE.md` 的“Agent 工具权限保持开放；不要虚构只读或受限工具模式”仍适用于产品工作区。用户明确授权的独立 benchmark 是实验例外：仅由宿主机 `COMMERCEAGENT_BENCHMARK_MODE=1` 开启，禁用 SDK 内建工具，并移除包括产品记忆 MCP 在内的非 fixture MCP；普通工作区没有这种产品模式。
 
@@ -336,6 +337,27 @@ npm run bench:calibrate -- benchmarks/results/<new-sample-run>
 Judge 进入排名需完整度、事实依据、决策恰当性三个关键维度分别满足至少 20 条、每维度至少 3 条人工评分 ≤3、1–5 分完全一致率 ≥0.60、二次加权 κ ≥0.6；专业语气仅供参考，不设排名门槛。任一方在任何维度有 ≥90% 评分集中于同一分值时，整轮校准标记为样本信息不足，κ 不报告。整体二分一致率和 κ 仅作诊断，不能用来替代逐维度门槛。即使达到门槛，结论也只适用于本次抽样、rubric/源码版本、请求模型与网关路径，不能外推到未来网关版本或其他任务。正式选型报告引用 Judge 结论时必须附此限制。报告同时绑定 Judge 报告和人工标注 hash。注入鲁棒性探针必须先通过，Judge 才会开始整批评分；Promptfoo 的普通断言不通过不等于 Provider 故障，探针应正常得到低分并拒绝注入。阶段 6 在校准信息充分且关键维度通过前，只按确定性断言排名，Judge 分数仅作参考。
 
 ### 阶段 6：Profile 变体开发集对比
+
+正式运行的使用方选型契约模板位于 `benchmarks/selection-policy.yaml`。模板初始状态为 `template`，正式模型调用会被运行器拒绝。使用方须在正式运行前填写选择对象、主指标、硬约束、平局规则和多重比较方法；若使用 `single_primary`，还要写明唯一主要比较。填写确认人和日期后，先提交该文件，再执行真实运行。筛选和确认运行也须遵守这份已提交契约。
+
+离线完整链路自检使用本地 Anthropic Messages 假服务，不请求任何真实模型：
+
+```bash
+docker build -f container/Dockerfile -t commerceagent-bench-selftest:local container
+make bench-selftest
+npm run bench:selftest -- --cases-only --all
+```
+
+`make bench-selftest` 运行完整假模型链路，要求先从当前源码构建 Runner 镜像。`bench:selftest` 覆盖脚本化正常回复、工具调用、代码围栏、超时、拒答和注入回复，并检查 API/Session 启动、fixture MCP 调用、用量采集、独立重判、报告生成与泄漏拦截。`--cases-only --all` 只运行 oracle 和变异测试，不需要 Docker。CI 同样从当前提交构建 Runner 镜像后执行全链路假模型自检；不需要候选 Key。
+
+按历史合成工作流估算预算与时延：
+
+```bash
+npm run bench:estimate -- --reference-run <run-id> --mode screening --case-count 50 --candidate-count 1
+npm run bench:estimate -- --reference-run <run-id> --mode confirmation --case-count 50 --candidate-count 1
+```
+
+估算按参考 run 的 token 和冷启动延迟线性外推；如果参考样本缺用量、价格指纹不匹配或币种混杂，费用返回 `unknown`，不按零处理。
 
 Profile 变体文件位于 `benchmarks/profiles/*.yaml`，声明相对于基线 Profile 的追加提示和 Runtime Policy 覆盖；每次 attempt 保存实际使用的 Profile、变体 ID 和来源 hash。变体 ID 作为测试变量传给 Provider。开发集的每个 run 固定一个变体，便于对同一候选、相同 dev case 做配对比较：
 

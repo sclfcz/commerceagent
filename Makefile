@@ -2,7 +2,7 @@
        typecheck typecheck-backend typecheck-web typecheck-agent-runner \
        format format-check install install-host-tools clean reset-init update-sdk ensure-latest-sdk sync-types \
        backup restore help _ensure-docker-image docker-pull logs status stop \
-       _check-sync _ensure-builtin-skills _build-web-if-stale _build-ar-if-stale _build-backend-if-stale
+       bench-selftest _check-sync _ensure-builtin-skills _build-web-if-stale _build-ar-if-stale _build-backend-if-stale
 
 # ─── Runtime ────────────────────────────────────────────────
 # 本项目只用原生 Node 工具链运行（npm / npx / tsx / node），不使用 bun。
@@ -181,6 +181,9 @@ docker-pull: ## 拉取 GitHub Actions 发布的 Agent 镜像
 	@echo "🐳 拉取 Docker 镜像 $(CONTAINER_IMAGE)..."
 	@docker pull "$(CONTAINER_IMAGE)"
 	@echo "✅ Docker 镜像已就绪：$(CONTAINER_IMAGE)"
+
+bench-selftest: ## 运行离线 benchmark 全链路自检（需已准备当前源码 Runner 镜像）
+	BENCH_CONTAINER_IMAGE=$${BENCH_CONTAINER_IMAGE:-commerceagent-bench-selftest:local} $(PKG) run bench:selftest
 
 # ─── Shared Types ────────────────────────────────────────────
 

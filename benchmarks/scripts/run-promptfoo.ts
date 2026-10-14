@@ -25,6 +25,7 @@ import { aggregatePromptfooCosts, modelFingerprint } from '../lib/pricing.js';
 import { selfTestReferences } from '../lib/reference-answers.js';
 import { hash } from '../lib/contracts.js';
 import { loadProfileVariant } from '../lib/profile-variants.js';
+import { loadCommittedSelectionPolicy } from '../lib/selection-policy.js';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
@@ -50,6 +51,20 @@ export function validateProfileRunMatrix(
 
 export async function main() {
   const split: CaseSplit = parseBenchmarkSplit(process.argv.slice(2));
+  const selftestRun = process.argv.includes('--selftest');
+  const selftestCaseIndex = process.argv.indexOf('--case-id');
+  const selftestCaseId =
+    selftestCaseIndex >= 0 ? process.argv[selftestCaseIndex + 1] : undefined;
+  if (
+    (selftestRun &&
+      (split !== 'dev' ||
+        !selftestCaseId ||
+        process.env.BENCH_SELFTEST_MODE !== '1' ||
+        process.argv.includes('--smoke') ||
+        process.argv.includes('--case-limit'))) ||
+    (!selftestRun && selftestCaseIndex >= 0)
+  )
+    throw new Error('selftest_run_arguments_invalid');
   const profileVariantIndex = process.argv.indexOf('--profile-variant');
   const profileVariantsIndex = process.argv.indexOf('--profile-variants');
   if (profileVariantIndex >= 0 && profileVariantsIndex >= 0)
@@ -79,8 +94,12 @@ export async function main() {
   );
   if (profileVariantsIndex >= 0 && !jointHoldout)
     throw new Error('profile_variants_requires_joint_holdout');
-  const runId = `promptfoo-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-  const runDirectory = path.join(benchmarkDirectory, 'results', runId);
+  const runId = `${selftestRun ? 'offline-selftest' : 'promptfoo'}-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const resultRoot =
+    selftestRun && process.env.BENCH_SELFTEST_RESULTS_DIR
+      ? path.resolve(process.env.BENCH_SELFTEST_RESULTS_DIR)
+      : path.join(benchmarkDirectory, 'results');
+  const runDirectory = path.join(resultRoot, runId);
   fs.mkdirSync(runDirectory, { recursive: true, mode: 0o700 });
   const candidateIndex = process.argv.indexOf('--candidate');
   const selectedAlias =
@@ -136,6 +155,18 @@ export async function main() {
   }
 
   const candidates = parseCandidates(checks.candidates);
+  if (
+    selftestRun &&
+    (candidates.length !== 1 ||
+      candidates[0].alias !== 'candidate-selftest' ||
+      candidates[0].model !== 'synthetic-selftest-model' ||
+      candidates[0].apiKeyEnv !== 'BENCH_SELFTEST_API_KEY' ||
+      new URL(candidates[0].baseUrl).hostname !== 'host.docker.internal')
+  )
+    throw new Error('selftest_candidate_not_synthetic');
+  const selectionPolicy = selftestRun
+    ? null
+    : loadCommittedSelectionPolicy(benchmarkDirectory, repository);
   const primaryCandidateAlias =
     requestedPrimaryCandidate ?? selectedAlias ?? null;
   const primaryCandidate = candidates.find(
@@ -203,11 +234,18 @@ export async function main() {
       caseLimit > allCases.length)
   )
     throw new Error('invalid_case_limit');
-  const cases = smoke
-    ? allCases.slice(0, candidates.length > 1 ? 2 : 1)
-    : caseLimit === null
-      ? allCases
-      : allCases.slice(0, caseLimit);
+  const selectedSelftestCase = selftestRun
+    ? allCases.find((test) => test.id === selftestCaseId)
+    : undefined;
+  if (selftestRun && !selectedSelftestCase)
+    throw new Error('selftest_case_not_found');
+  const cases = selftestRun
+    ? [selectedSelftestCase!]
+    : smoke
+      ? allCases.slice(0, candidates.length > 1 ? 2 : 1)
+      : caseLimit === null
+        ? allCases
+        : allCases.slice(0, caseLimit);
   const repetitionsIndex = process.argv.indexOf('--repetitions');
   const requestedRepetitions =
     repetitionsIndex >= 0 ? Number(process.argv[repetitionsIndex + 1]) : 3;
@@ -247,7 +285,7 @@ export async function main() {
     finalRun: process.argv.includes('--final-run'),
     repetitions,
     cumulativeHoldoutRuns,
-    stage: smoke ? 'smoke' : 'benchmark',
+    stage: selftestRun ? 'offline-selftest' : smoke ? 'smoke' : 'benchmark',
     scope: 'synthetic-commerce-workflows',
     profileVariant: jointHoldout ? null : profileVariant.id,
     profileVariants: profileVariants.map(({ id }) => id),
@@ -268,6 +306,17 @@ export async function main() {
         : null,
       modelPairwiseCorrection: 'holm_step_down',
     },
+    ...(selectionPolicy
+      ? {
+          selectionPolicy: {
+            hash: selectionPolicy.hash,
+            commit: selectionPolicy.commit,
+            policy: selectionPolicy.policy,
+          },
+        }
+      : selftestRun
+        ? { selftest: true }
+        : {}),
   });
   const promptfooDirectory = path.join(runDirectory, 'promptfoo');
   configurePromptfooStorage(promptfooDirectory);
@@ -343,7 +392,7 @@ export async function main() {
       ...independent,
       caseSelfTest,
       schemaVersion: 1,
-      stage: smoke ? 'smoke' : 'benchmark',
+      stage: selftestRun ? 'offline-selftest' : smoke ? 'smoke' : 'benchmark',
       split,
       profileVariant: jointHoldout ? null : profileVariant.id,
       profileVariants: profileVariants.map(({ id }) => id),

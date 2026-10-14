@@ -267,6 +267,11 @@ export function compareProfiles(args = process.argv.slice(2)) {
       primaryCandidate ||
     rightMetadata.selectionProtocol?.primaryCandidateAlias !==
       primaryCandidate ||
+    !leftMetadata.selectionPolicy?.hash ||
+    leftMetadata.selectionPolicy?.hash !==
+      rightMetadata.selectionPolicy?.hash ||
+    leftMetadata.selectionPolicy?.commit !==
+      rightMetadata.selectionPolicy?.commit ||
     leftMetadata.selectionProtocol?.primaryCandidateFingerprint !==
       rightMetadata.selectionProtocol?.primaryCandidateFingerprint
   )
@@ -447,7 +452,9 @@ function compareHoldout(args: string[]) {
   if (
     metadata.selectionProtocol?.primaryCandidateAlias !== primaryCandidate ||
     metadata.selectionProtocol?.primaryCandidateFingerprint !==
-      modelFingerprint(manifestCandidate.model, manifestCandidate.baseUrl)
+      modelFingerprint(manifestCandidate.model, manifestCandidate.baseUrl) ||
+    !metadata.selectionPolicy?.hash ||
+    !metadata.selectionPolicy?.commit
   )
     throw new Error('holdout_primary_candidate_manifest_mismatch');
   const comparison = compareJointHoldoutData(

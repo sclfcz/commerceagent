@@ -1,5 +1,7 @@
 # Benchmark spike 验证记录
 
+> **用途限定：以下真实运行仅用于验证测量链路和排查用例，不包含模型排名或选型结论。阶段 6 当前交付可复现 benchmark，不进行正式多模型真实运行。**
+
 这是修订门槛前的历史接入记录（schemaVersion 2）；新增的新环境证据和端点策略
 须以[验收修订记录](BENCHMARK-REVISION.md)为准，历史 summary.json 未被重写。
 

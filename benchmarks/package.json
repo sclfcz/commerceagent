@@ -9,8 +9,10 @@
   "scripts": {
     "run": "tsx scripts/run-promptfoo.ts",
     "report": "tsx scripts/report.ts",
+    "estimate": "tsx scripts/estimate.ts",
     "compare-profiles": "tsx scripts/compare-profiles.ts",
-    "selftest": "tsx scripts/selftest-cases.ts",
+    "selftest": "tsx scripts/selftest.ts",
+    "selftest:cases": "tsx scripts/selftest-cases.ts",
     "review": "tsx scripts/review-failures.ts",
     "regrade": "tsx scripts/regrade-business.ts",
     "judge": "tsx scripts/judge.ts",

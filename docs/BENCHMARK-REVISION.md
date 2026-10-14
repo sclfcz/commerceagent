@@ -414,3 +414,14 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 
 - 用户决定不增加第三个参赛模型。修订正式矩阵规则：两个身份已核验且质量合格的候选即可做模型比较；完整 dev 模型矩阵为 2 × 50 × 3 = 300 次尝试。若身份门槛后只剩一个合格候选，仍可比较 Profile，但报告不得给模型排名或两两模型差异。
 - OpenCode Go 的第三候选不进入本阶段模型矩阵；保留已有候选定义与价格配置，不启动 Mimo 协议转换或真实模型调用。提交前运行仍需本机可用凭据和身份合格的两个候选；holdout 未运行。
+
+### 阶段 6 交付范围改为可复现 benchmark（2026-10-15）
+
+- 用户取消正式多模型真实运行，阶段 6 目标改为第三方可复现运行工具。历史真实结果的允许用途已在 `BENCHMARK.md` 与 `BENCHMARK-VALIDATION.md` 明确限制为测量链路验证；不得用于模型排名或选型结论。
+- 新增 Anthropic Messages 本地假服务，脚本覆盖正常文本、工具调用、代码围栏、超时、拒答及注入安全回复。`bench:selftest` 通过当前源码构建的隔离 Runner 镜像执行 Promptfoo Provider → CommerceAgent API/Session → Runner → fixture MCP 的完整合成调用，再运行用量/工具采集、独立重判、私有/公开报告生成和泄漏探针。selftest 候选被显式限定为本地 fake 配置，合成凭据与结果写入临时目录；不调用真实模型，不碰 holdout ledger。
+- `bench:estimate` 根据指定的历史 run usage 和延迟计算筛选、确认、正式或 holdout 的 serial attempts、预计成本、elapsed p50/p95 线性代理值。任何来源用量/费率不完整、币种混杂或身份指纹不匹配时成本为 `unknown`。
+- 新增 `selection-policy.yaml` 选型规则模板；真实 `bench:run` 要求使用方填写并确认、且先提交后才放行。模板涵盖选择对象、主指标、硬约束、平局规则及 Holm/预先指定主要比较方式。
+- `BENCHMARK-HANDOFF.md` 记录接口协议要求、候选与 Key 配置、价格绑定、运行顺序、Judge 人工校准、报告阅读及已验证边界。CI 安装 benchmark 子项目、构建当前源码 Runner 镜像，并独立执行 `npm run bench:selftest`。
+- 验证：Fake Messages 服务 6 种响应脚本、预算计算和选型门槛测试 8 项通过；68 条 reference/oracle 自检通过、932 个变异被拒绝；当前源码 Docker 镜像完整 E2E selftest 通过（1 次 attempt、2 次 fixture MCP 调用、测量有效、parity/reassessment/report/leak check 通过）。无真实模型调用、无 holdout 运行、无选型结论。
+- 后续最终代码路径把 `bench:selftest` 改为驱动真实 Promptfoo Provider 与运行器，而非手工拼接 Promptfoo 结果；CI/本地 `make bench-selftest` 必须从当前 checkout 构建镜像，避免旧 latest 镜像的 entrypoint 漂移。完整 selftest 最终复跑通过，synthetic candidate 保持 `gateway_pending`，因此业务通过只验证链路，不计入模型质量。
+- 最终验收：全量 `make test` 为 354 个测试文件、3162 项通过；benchmark typecheck、项目 typecheck、`make build`、`docs:check`、`format:check`、`git diff --check` 均通过。预算 CLI 已用历史 50-attempt run 验证输出 150 次筛选 attempts、CNY 14.13 估算和冷启动时间代理值。离线 full selftest 报告 1 次业务 attempt 测量有效、2 次 fixture MCP 成功调用、独立重评/报告/泄漏探针通过、真实模型调用 0、holdout 0。
