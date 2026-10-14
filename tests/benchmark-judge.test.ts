@@ -20,6 +20,7 @@ import {
 import {
   analyzeHumanLabels,
   buildHumanLabelTemplate,
+  renderCalibrationSummary,
 } from '../benchmarks/scripts/calibrate.js';
 import { buildJudgePayloadPreview } from '../benchmarks/scripts/judge.js';
 
@@ -321,6 +322,40 @@ describe('benchmark blind judge', () => {
     ]);
     expect(analyzed.metrics.overall.kappa).toBeNull();
     expect(analyzed.metrics.overall.n).toBe(1);
+    const assisted = analyzeHumanLabels(
+      {
+        ...report,
+        judgeProvenance: {
+          requestedModel: 'secretjudge',
+          apiBaseUrl: 'https://private.example/v1',
+        },
+      },
+      [
+        {
+          sampleId: 'review-123',
+          humanScores: dims,
+          annotationProvenance: {
+            method: 'ai_assisted_human',
+            humanReviewedAll: true,
+            confirmationSource: 'user_confirmed_each_item_in_chat',
+          },
+        },
+      ],
+    );
+    expect(assisted.annotationProvenance).toMatchObject({
+      method: 'ai_assisted_human',
+      displayLabel: 'AI 辅助人工标注',
+      aiAssistedSamples: 1,
+      humanReviewedSamples: 1,
+    });
+    expect(assisted.annotationProvenance.independenceLimitation).toContain(
+      '不等于完全独立',
+    );
+    const publicReport = renderCalibrationSummary(assisted);
+    expect(publicReport).toContain('AI 辅助人工标注');
+    expect(publicReport).toContain('二次加权 κ');
+    expect(publicReport).not.toContain('secretjudge');
+    expect(publicReport).not.toContain('private.example');
     expect(analyzed.metrics.byDimension.grounding.ordinal.exactAgreement).toBe(
       1,
     );
