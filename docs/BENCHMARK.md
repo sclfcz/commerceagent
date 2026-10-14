@@ -366,4 +366,4 @@ npm run bench:compare-profiles -- <evidence-audit-run> <baseline-run> --primary-
 
 留出集只在 dev 确认完成后运行一次，并在同一 `--final-run` 里配对运行 `baseline` 与胜出变体；命令会要求完整 holdout、所有候选、1 次重复、包含 baseline 的恰好两个 Profile。一次启动会消耗唯一 holdout 额度，后续用 `bench:compare-profiles --holdout <run-id> --winner <profile-id> --primary-candidate <anchor-candidate>` 离线生成一次性确认报告。主要 anchor 对比是唯一确认性 Profile 检验，其他候选结果只作描述，不得据此换选胜者。通用 `bench:report` 会拒绝把联合 Profile 的重复 case 错误合并成单个候选指标。
 
-阶段 6 正式矩阵至少需要三个已核验候选及完整匹配的区域价格。价格条目必须来自相同服务平台、区域和计费端点的官方模型卡，并绑定 `sha256(model + "|" + origin)` 指纹；聚合套餐或网关没有可核对的官方按 token 价格时，成本保持 `unknown`。第三个候选完成本机配置和指纹/区域价格核验后，才能启动真实矩阵。真实调用不进 CI。
+阶段 6 模型对比至少需要两个身份已核验且质量合格的候选，并有完整匹配的区域价格；不要求第三个候选。两个候选跑完整 dev 矩阵（50 case × 3 次）共 300 次尝试。若只有一个候选满足身份门槛，仍可比较 Profile 变体，但不得给出模型排名或两两模型差异。价格条目必须来自相同服务平台、区域和计费端点的官方模型卡，并绑定 `sha256(model + "|" + origin)` 指纹；聚合套餐或网关没有可核对的官方按 token 价格时，成本保持 `unknown`。真实调用不进 CI。
