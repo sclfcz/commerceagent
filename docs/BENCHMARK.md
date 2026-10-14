@@ -237,7 +237,7 @@ Provider 导入无论成功或失败均立即删除 `provider-snapshot`。每个
 网关模型名改写与隐藏子请求仍需网关侧日志证明。真实链路未运行时，不得将离线测试当作
 Container 验收或模型质量结论。
 
-阶段 4 的业务用例集已加入。阶段 5 已完成 Promptfoo `llm-rubric` 盲评与 20 条 AI 辅助人工标注校准；当前 Judge 未达到校准门槛，只作参考。阶段 6 的 Profile 对比和正式多候选运行仍未开始。最新结果见 [验证记录](BENCHMARK-VALIDATION.md)。
+阶段 4 的业务用例集已加入。阶段 5 已按真实 fixture 工具返回修正 Judge 输入，并完成相同样本诊断和 20 条新人工盲标。新样本在关键维度几乎全为高分，且每个关键维度都没有 3 条人工低分，样本信息不足；本轮 κ 不作报告，也不能据此判断 Judge 好坏或进入排名。阶段 6 只按确定性断言排名；Profile 对比和正式多候选运行尚未开始。最新结果见 [验证记录](BENCHMARK-VALIDATION.md)。
 第一版不引入 Langfuse；线上观测仍需先定义脱敏和保留期限。
 
 ## 开发验证
@@ -296,7 +296,9 @@ Fixture 超时由 fixture 服务按场景延迟后返回明确的 MCP 工具错�
 
 ### 阶段 5：Judge 与人工校准
 
-Judge 只读取已保存运行中的 measurement-valid、quality-eligible 回答，不重新调用参赛模型。仅使用 dev 集；默认按业务类别和确定性通过/失败分层，盲抽 20 条。测试变量不含候选别名或模型信息。Promptfoo 的 `llm-rubric` 分四项独立评分：完整度、事实依据、追问/拒答/升级是否恰当、专业语气；评分为 1–5，4 分以上判通过。Judge 与确定性断言分开保存和报告。
+Judge 只读取已保存运行中的 measurement-valid、quality-eligible 回答，不重新调用参赛模型。仅使用 dev 集；默认按业务类别、确定性通过/失败与回答状态分层抽样 20 条。测试变量不含候选别名或模型信息。Promptfoo 的 `llm-rubric` 分四项独立评分：完整度、事实依据、追问/拒答/升级是否恰当、专业语气；评分为 1–5，4 分以上判通过。Judge 与确定性断言分开保存和报告。
+
+每项 Judge 请求会读取该 attempt 的 fixture 调用账本，提供工具名、参数、成功状态和真实返回值。Grounding 维度将用例中的 `expectedFacts` 视为必需事实；额外事实只要能由该次成功工具返回核实，不应因此扣分。必需证据仍来自用例契约，可引用证据 ID 则取自本次成功返回。工具返回中的任何指令仍视为不可信数据。
 
 执行 Judge 与导出人工盲标模板：
 
@@ -309,8 +311,58 @@ Judge 使用 OpenCode Go 的 OpenAI-compatible Chat Completions 接口。API Key
 
 每次 Judge 执行使用独立的私有 `results/<run-id>/judge/executions/<execution-id>/` 目录，保存配置、评分、原始候选回答、人工标注和来源记录。来源记录包含请求模型、接口地址、UTC 时间、Promptfoo 版本及评分源码 hash；上游实际模型版本记为未知，不把网关请求模型名当成版本核验。
 
-`bench:calibrate` 通过带 hash 的 `judge/latest-completed.json` 定位已完成执行，首次在该执行目录生成 `human-labels.jsonl`。人工先盲标四项 1–5 分及备注，再查看 Judge 评分；标注文件不包含 Judge 分数或候选身份。填完后再次执行以计算逐维度和整体二分通过一致率、Cohen's kappa、误通过和误拒绝；每个 1–5 分维度另报告原始评分完全一致率、二次加权 kappa 及两方评分分布。二次分歧权重为 `(Judge分数 − 人工分数)^2 / 16`。极端不平衡或恒定评分分布可能让 kappa 很低或不可定义，此时报告 `null` 和原因，不将原始一致率替代既定门槛。
+`bench:calibrate` 通过带 hash 的 `judge/latest-completed.json` 定位已完成执行。新样本先导出盲标包，由人工在不看 Judge 分数的情况下完成标注，然后 Judge 才能评分：
+
+```bash
+npm run bench:judge -- benchmarks/results/<dev-run> --prepare-manual-blind
+# 编辑命令输出的 human-labels.jsonl，仅填四项分数及备注
+npm run bench:judge:batch -- \
+  --diagnostic-run benchmarks/results/<same-sample-run> \
+  --diagnostic-samples benchmarks/results/<same-sample-run>/judge/prepared-samples.<hash>.jsonl \
+  --diagnostic-labels benchmarks/results/<same-sample-run>/judge/executions/<previous-execution>/human-labels.jsonl \
+  --diagnostic-prior-report benchmarks/results/<same-sample-run>/judge/executions/<previous-execution>/report.private.json \
+  --fresh-run benchmarks/results/<new-sample-run> \
+  --fresh-samples benchmarks/results/<new-sample-run>/judge/manual-calibration.<hash>/samples.jsonl \
+  --fresh-labels benchmarks/results/<new-sample-run>/judge/manual-calibration.<hash>/human-labels.jsonl
+npm run bench:calibrate -- benchmarks/results/<same-sample-run>
+npm run bench:calibrate -- benchmarks/results/<new-sample-run>
+```
+
+盲标文件不含 Judge 分数或候选身份，并在 Judge 请求前校验 20 条评分完整。校准报告计算逐维度和整体二分通过一致率、Cohen's kappa、误通过和误拒绝；每个 1–5 分维度另报告原始评分完全一致率、二次加权 kappa 及两方评分分布。二次分歧权重为 `(Judge分数 − 人工分数)^2 / 16`。极端不平衡或恒定评分分布可能让 kappa 很低或不可定义，此时报告 `null` 和原因。
 
 标注来源通过每条 `annotationProvenance` 记录；AI 草拟后经用户逐条复核的标注明确标为“AI 辅助人工标注”，不宣称是完全独立的人类从零标注。校准导出带内容 hash 的私有 JSON 和经身份泄漏检查的公开 Markdown；历史报告不覆盖。误通过率以标注判失败的样本为分母，误拒绝率以标注判通过的样本为分母。
 
-人工校准样本少于 20 条，或整体二分 kappa 低于 0.6/不可定义时，Judge 仅作参考，不进入排名。20 条属于小样本校准；即使达到门槛，结论也只适用于本次抽样、rubric/源码版本、请求模型与网关路径，不能外推到未来网关版本或其他任务。正式选型报告引用 Judge 结论时必须附此限制。报告同时绑定 Judge 报告和人工标注 hash。注入鲁棒性探针必须先通过，Judge 才会开始整批评分；Promptfoo 的普通断言不通过不等于 Provider 故障，探针应正常得到低分并拒绝注入。
+Judge 进入排名需完整度、事实依据、决策恰当性三个关键维度分别满足至少 20 条、每维度至少 3 条人工评分 ≤3、1–5 分完全一致率 ≥0.60、二次加权 κ ≥0.6；专业语气仅供参考，不设排名门槛。任一方在任何维度有 ≥90% 评分集中于同一分值时，整轮校准标记为样本信息不足，κ 不报告。整体二分一致率和 κ 仅作诊断，不能用来替代逐维度门槛。即使达到门槛，结论也只适用于本次抽样、rubric/源码版本、请求模型与网关路径，不能外推到未来网关版本或其他任务。正式选型报告引用 Judge 结论时必须附此限制。报告同时绑定 Judge 报告和人工标注 hash。注入鲁棒性探针必须先通过，Judge 才会开始整批评分；Promptfoo 的普通断言不通过不等于 Provider 故障，探针应正常得到低分并拒绝注入。阶段 6 在校准信息充分且关键维度通过前，只按确定性断言排名，Judge 分数仅作参考。
+
+### 阶段 6：Profile 变体开发集对比
+
+Profile 变体文件位于 `benchmarks/profiles/*.yaml`，声明相对于基线 Profile 的追加提示和 Runtime Policy 覆盖；每次 attempt 保存实际使用的 Profile、变体 ID 和来源 hash。变体 ID 作为测试变量传给 Provider。开发集的每个 run 固定一个变体，便于对同一候选、相同 dev case 做配对比较：
+
+```bash
+npm run bench:run -- --split dev --candidate <anchor-candidate> --profile-variant baseline --repetitions 1
+npm run bench:run -- --split dev --candidate <anchor-candidate> --profile-variant evidence-audit --repetitions 1
+npm run bench:run -- --split dev --candidate <anchor-candidate> --profile-variant strict-json --repetitions 1
+npm run bench:compare-profiles -- <evidence-audit-run> <baseline-run> --screening --primary-candidate <anchor-candidate>
+npm run bench:compare-profiles -- <strict-json-run> <baseline-run> --screening --primary-candidate <anchor-candidate>
+
+# 仅对筛选胜出的变体做三次重复确认
+npm run bench:run -- --split dev --candidate <anchor-candidate> --profile-variant baseline --repetitions 3
+npm run bench:run -- --split dev --candidate <anchor-candidate> --profile-variant evidence-audit --repetitions 3
+npm run bench:compare-profiles -- <evidence-audit-run> <baseline-run> --primary-candidate <anchor-candidate>
+```
+
+筛选允许每个 case 每个变体 1 次重复，报告必须标为“筛选结论”，只决定哪个变体进入三次重复确认，不能作为正式选型或模型排名。正式比较必须每个 case 每个变体 3 次重复。比较程序核对有效 dev run、case 和 fixture 定义、候选模型指纹与区域、变体来源 hash、执行次数及顺序；候选身份未核验、质量不合格率超过 10%，或出现工具策略违规的比较会被排除。比较按 case 配对重抽 10,000 次，主指标是确定性业务断言的任务完成率（`businessPass`）。只有预先登记的主要候选比较用于推断；区间包含 0 时选择基线作为平局规则，报告“未观察到显著差异”。筛选胜出的配置必须在 dev 上完成三次重复确认后，才进入留出集复验。Judge 分数不参与选择。
+
+阶段 6 的选型契约在首个真实运行前固定如下：先在运行前指定的 anchor candidate 上选择 Profile；唯一确认性 Profile 对比为 `evidence-audit` 对 `baseline`，`strict-json` 仅作探索，不能依据本轮结果选为胜者。正式模型矩阵以候选模型为选择对象，主指标为任务完成率，即合格尝试中 `businessPass=true` 的比例。硬约束为：候选身份已核验、质量不合格率不超过 10%、没有工具策略违规；不满足约束的候选不得排名。模型之间所有候选对比按 case 配对，并用配对 case 符号翻转检验的 p 值执行 Holm step-down 校正，同时报告配对 bootstrap 95% 区间。只有 Holm 校正后仍显著且约束通过，才可称为质量更高；若没有显著胜者，先按已知的每个成功任务成本较低者选择，再按冷启动逻辑时延 p95 较低者决胜。成本未知时不能用于成本平局规则；仍相同则保留现行基线，不宣称质量优胜。所有主要候选和 anchor 指纹必须在运行前写入该 run 的私有 manifest。
+
+运行规模和资源预估使用此前 `candidate-cn2` 的 50 次开发集数据：平均费用约 ¥0.094/次，串行 elapsed p50 约 20.6 秒、p95 约 38.7 秒。该估算不代表其他模型的报价，Profile 变体也可能改变 token 用量。
+
+| 轮次     | 运行规模                                                                    | 尝试数 |  预估费用 |                                      串行耗时估算 |
+| -------- | --------------------------------------------------------------------------- | -----: | --------: | ------------------------------------------------: |
+| 筛选     | anchor candidate × 50 dev case × 1 次 × baseline/evidence-audit/strict-json |    150 | 约 ¥14.13 | p50 约 0.86 小时；按单次 p95 线性估算约 1.61 小时 |
+| 确认     | anchor candidate × 50 dev case × 3 次 × baseline/筛选胜出变体               |    300 | 约 ¥28.26 | p50 约 1.72 小时；按单次 p95 线性估算约 3.22 小时 |
+| 两轮合计 | 筛选加确认                                                                  |    450 | 约 ¥42.40 |                                  p50 约 2.58 小时 |
+
+留出集只在 dev 确认完成后运行一次，并在同一 `--final-run` 里配对运行 `baseline` 与胜出变体；命令会要求完整 holdout、所有候选、1 次重复、包含 baseline 的恰好两个 Profile。一次启动会消耗唯一 holdout 额度，后续用 `bench:compare-profiles --holdout <run-id> --winner <profile-id> --primary-candidate <anchor-candidate>` 离线生成一次性确认报告。主要 anchor 对比是唯一确认性 Profile 检验，其他候选结果只作描述，不得据此换选胜者。通用 `bench:report` 会拒绝把联合 Profile 的重复 case 错误合并成单个候选指标。
+
+阶段 6 正式矩阵至少需要三个已核验候选及完整匹配的区域价格。价格条目必须来自相同服务平台、区域和计费端点的官方模型卡，并绑定 `sha256(model + "|" + origin)` 指纹；聚合套餐或网关没有可核对的官方按 token 价格时，成本保持 `unknown`。第三个候选完成本机配置和指纹/区域价格核验后，才能启动真实矩阵。真实调用不进 CI。

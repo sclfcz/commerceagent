@@ -68,12 +68,48 @@ export function bootstrapPairedDifference(
       total += differences[Math.floor(random() * differences.length)];
     return total / differences.length;
   });
+  let permutationState = (seed ^ 0x9e3779b9) >>> 0;
+  const permutationRandom = () => {
+    permutationState =
+      (Math.imul(permutationState, 1664525) + 1013904223) >>> 0;
+    return permutationState / 0x1_0000_0000;
+  };
+  const observedMagnitude = Math.abs(difference);
+  let atLeastAsExtreme = 0;
+  for (let iteration = 0; iteration < iterations; iteration++) {
+    let permutedTotal = 0;
+    for (const value of differences)
+      permutedTotal += permutationRandom() < 0.5 ? -value : value;
+    if (Math.abs(permutedTotal / differences.length) >= observedMagnitude)
+      atLeastAsExtreme++;
+  }
   return {
     pairedCases: caseIds.length,
     difference,
     lower95: quantile(samples, 0.025),
     upper95: quantile(samples, 0.975),
+    permutationPValue: (atLeastAsExtreme + 1) / (iterations + 1),
   };
+}
+
+function applyHolmCorrection(estimates: Record<string, any>) {
+  const ordered = Object.entries(estimates)
+    .filter(([, estimate]) => Number.isFinite(estimate.permutationPValue))
+    .sort(
+      ([, left], [, right]) => left.permutationPValue - right.permutationPValue,
+    );
+  let previous = 0;
+  ordered.forEach(([key, estimate], index) => {
+    const adjusted = Math.min(
+      1,
+      Math.max(previous, (ordered.length - index) * estimate.permutationPValue),
+    );
+    estimate.holmAdjustedPValue = adjusted;
+    estimate.significantAfterHolm = adjusted < 0.05;
+    previous = adjusted;
+    estimates[key] = estimate;
+  });
+  return estimates;
 }
 
 export function summarizeMetrics(
@@ -233,6 +269,7 @@ export function summarizeMetrics(
       pairwise[`${left}__vs__${right}`] = estimate;
     }
   }
+  applyHolmCorrection(pairwise);
   return {
     candidates,
     pairwise,
@@ -240,5 +277,7 @@ export function summarizeMetrics(
       (alias) => !candidates[alias].rankEligible,
     ),
     comparisonOmissions,
+    pairwiseCorrection:
+      'Holm step-down on paired case sign-flip permutation p-values',
   };
 }

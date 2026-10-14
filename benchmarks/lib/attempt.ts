@@ -83,6 +83,11 @@ export async function attempt(
   candidates: Candidate[],
   context: AttemptContext,
   repetition: number,
+  profileSelection?: {
+    id: string;
+    profile: Record<string, any>;
+    definitionHash: string;
+  },
 ) {
   const { repository, pinnedImage, timeoutMs, freshStates } = context;
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -104,9 +109,12 @@ export async function attempt(
       variant: fixtureVariant.variant,
       config: fixtureVariant.config,
     });
-  const profile = parse(
-    fs.readFileSync(path.join(bench, 'profile.yaml'), 'utf8'),
-  );
+  const profile =
+    profileSelection?.profile ??
+    (parse(fs.readFileSync(path.join(bench, 'profile.yaml'), 'utf8')) as Record<
+      string,
+      any
+    >);
   const fixture = await startFixtureServer({
     data: fixtureData,
     scenario: isBusinessCase ? 'normal' : test.scenario,
@@ -337,6 +345,8 @@ export async function attempt(
     const result = {
       candidate: candidate.alias,
       caseId: test.id,
+      profileVariant: profileSelection?.id ?? 'default',
+      profileDefinitionHash: profileSelection?.definitionHash ?? null,
       repetition,
       output: observation.output,
       ...assessment,

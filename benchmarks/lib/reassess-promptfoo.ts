@@ -40,6 +40,7 @@ import {
   verifyContext,
   type ContextEvidence,
 } from './context.js';
+import { loadProfileVariant } from './profile-variants.js';
 import { verifyInterruptionEvidence } from './interruption-evidence.js';
 import {
   validateAssessmentParity,
@@ -113,7 +114,7 @@ function readLedger(file: string): ToolCall[] {
 
 function deriveExpectedContext(
   databaseFile: string,
-  profileFile: string,
+  profileDefinition: Record<string, any>,
   actual: ContextEvidence | null,
   fresh: Record<string, any>,
   trace: Record<string, any>,
@@ -124,9 +125,6 @@ function deriveExpectedContext(
     !actual.mcp.manifestHash
   )
     return null;
-  const profileDefinition = parse(
-    fs.readFileSync(profileFile, 'utf8'),
-  ) as Record<string, any>;
   const db = new Database(databaseFile, {
     readonly: true,
     fileMustExist: true,
@@ -223,11 +221,14 @@ export function reassessPromptfoo(runDirectory: string) {
   ) as Array<SpikeCase | BusinessCase>;
   const summaryFile = path.join(runDirectory, 'summary.json');
   const metadataFile = path.join(runDirectory, 'run-metadata.json');
-  const runMetadata = fs.existsSync(summaryFile)
-    ? JSON.parse(fs.readFileSync(summaryFile, 'utf8'))
-    : fs.existsSync(metadataFile)
+  const runMetadata = {
+    ...(fs.existsSync(metadataFile)
       ? JSON.parse(fs.readFileSync(metadataFile, 'utf8'))
-      : {};
+      : {}),
+    ...(fs.existsSync(summaryFile)
+      ? JSON.parse(fs.readFileSync(summaryFile, 'utf8'))
+      : {}),
+  };
   const copiedSplits = [
     ...new Set(
       copiedCases
@@ -252,9 +253,67 @@ export function reassessPromptfoo(runDirectory: string) {
       copiedCases.every(
         (test) => 'split' in test && test.split === savedSummary.split,
       ));
-  const profileFile = fileURLToPath(
+  const defaultProfileFile = fileURLToPath(
     new URL('../profile.yaml', import.meta.url),
   );
+  const usedProfileFile = path.join(runDirectory, 'profile.used.yaml');
+  const profileVariantIds: string[] = savedSummary.profileVariants ?? [
+    savedSummary.profileVariant ?? 'default',
+  ];
+  const profileVariantId =
+    profileVariantIds.length === 1 ? profileVariantIds[0] : 'joint';
+  const profileFile = fs.existsSync(usedProfileFile)
+    ? usedProfileFile
+    : defaultProfileFile;
+  let profileVariantMatch = true;
+  const profileVariantSourceHashes: Record<string, string> = {};
+  const profileDefinitions = new Map<string, Record<string, any>>();
+  for (const variantId of profileVariantIds) {
+    if (variantId === 'default') continue;
+    try {
+      const sourceVariant = loadProfileVariant(
+        variantId,
+        fileURLToPath(new URL('../', import.meta.url)),
+      );
+      const variantProfileFile = path.join(
+        runDirectory,
+        `profile.${variantId}.used.yaml`,
+      );
+      const resolvedProfileFile = fs.existsSync(variantProfileFile)
+        ? variantProfileFile
+        : profileFile;
+      const profileDefinition = parse(
+        fs.readFileSync(resolvedProfileFile, 'utf8'),
+      ) as Record<string, any>;
+      profileDefinitions.set(variantId, profileDefinition);
+      const variantMetadata = JSON.parse(
+        fs.readFileSync(
+          fs.existsSync(
+            path.join(runDirectory, `profile.${variantId}.variant.json`),
+          )
+            ? path.join(runDirectory, `profile.${variantId}.variant.json`)
+            : path.join(runDirectory, 'profile.variant.json'),
+          'utf8',
+        ),
+      );
+      profileVariantSourceHashes[variantId] = sourceVariant.definitionHash;
+      const expectedProfileHash =
+        savedSummary.profileHashes?.[variantId] ?? savedSummary.profileHash;
+      const expectedDefinitionHash =
+        savedSummary.profileDefinitionHashes?.[variantId] ??
+        savedSummary.profileDefinitionHash;
+      profileVariantMatch =
+        hash(profileDefinition) === sourceVariant.profileHash &&
+        variantMetadata.id === sourceVariant.id &&
+        variantMetadata.profileHash === sourceVariant.profileHash &&
+        variantMetadata.definitionHash === sourceVariant.definitionHash &&
+        expectedProfileHash === sourceVariant.profileHash &&
+        expectedDefinitionHash === sourceVariant.definitionHash &&
+        profileVariantMatch;
+    } catch {
+      profileVariantMatch = false;
+    }
+  }
   const caseFile = fileURLToPath(
     new URL('../cases/spike.yaml', import.meta.url),
   );
@@ -321,6 +380,11 @@ export function reassessPromptfoo(runDirectory: string) {
   }
 
   const freshStates = new FreshStateTracker();
+  if (!profileDefinitions.has('default'))
+    profileDefinitions.set(
+      'default',
+      parse(fs.readFileSync(profileFile, 'utf8')) as Record<string, any>,
+    );
   const reassessed: Array<Record<string, any>> = [];
   let evidenceComplete = true;
   let fixtureDefinitionsMatch = true;
@@ -344,8 +408,11 @@ export function reassessPromptfoo(runDirectory: string) {
     const candidate = candidates.find(
       (entry) => entry.alias === row.candidateAlias,
     );
+    const rowProfileVariant = row.profileVariant ?? profileVariantId;
+    const profileDefinition = profileDefinitions.get(rowProfileVariant);
     const test = sourceCaseById.get(row.caseId);
-    if (!candidate || !test) throw new Error('assessment_identity_missing');
+    if (!candidate || !test || !profileDefinition)
+      throw new Error('assessment_identity_missing');
     const fixtureSnapshotFile = path.join(
       attemptDirectory,
       'fixture-snapshot.json',
@@ -418,6 +485,9 @@ export function reassessPromptfoo(runDirectory: string) {
       reassessed.push({
         candidate: row.candidateAlias,
         caseId: row.caseId,
+        profileVariant:
+          row.profileVariant ??
+          (profileVariantId === 'default' ? undefined : profileVariantId),
         repetition: row.repetition,
         executionIndex: index,
         measurementValid: false,
@@ -465,7 +535,7 @@ export function reassessPromptfoo(runDirectory: string) {
     const freshEvidence = JSON.parse(fs.readFileSync(freshStateFile, 'utf8'));
     const expectedContext = deriveExpectedContext(
       databaseFile,
-      profileFile,
+      profileDefinition,
       contextEvidence.actual,
       freshEvidence,
       trace,
@@ -557,6 +627,9 @@ export function reassessPromptfoo(runDirectory: string) {
     reassessed.push({
       candidate: candidate.alias,
       caseId: test.id,
+      profileVariant:
+        row.profileVariant ??
+        (profileVariantId === 'default' ? undefined : profileVariantId),
       repetition: row.repetition,
       executionIndex: index,
       ...assessment,
@@ -629,6 +702,7 @@ export function reassessPromptfoo(runDirectory: string) {
       'utf8',
     ),
     fs.readFileSync(new URL('../scripts/report.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('./profile-variants.ts', import.meta.url), 'utf8'),
   ]);
   const report = {
     schemaVersion: 1,
@@ -643,6 +717,9 @@ export function reassessPromptfoo(runDirectory: string) {
       fixtureStateRecomputedFromLedger: true,
     },
     runId: path.basename(runDirectory),
+    profileVariant: profileVariantId === 'joint' ? null : profileVariantId,
+    profileVariants: profileVariantIds,
+    profileVariantMatch,
     sourceHashes: {
       executionSequence: sha256(executionFile),
       order: sha256(orderFile),
@@ -662,7 +739,16 @@ export function reassessPromptfoo(runDirectory: string) {
           sha256(file),
         ]),
       ),
-      profileDefinition: sha256(profileFile),
+      profileDefinition:
+        profileVariantIds.length > 1
+          ? Object.fromEntries(
+              profileVariantIds.map((id) => [
+                id,
+                sha256(path.join(runDirectory, `profile.${id}.used.yaml`)),
+              ]),
+            )
+          : sha256(profileFile),
+      profileVariantDefinition: profileVariantSourceHashes,
     },
     reassessmentRevision: revisionHash,
     evidenceComplete,
@@ -699,6 +785,7 @@ export function reassessPromptfoo(runDirectory: string) {
       !evidenceComplete ||
       !casesMatchSource ||
       !splitValid ||
+      !profileVariantMatch ||
       !fixtureDefinitionsMatch ||
       !fixtureStatesReconciled ||
       !order.valid ||

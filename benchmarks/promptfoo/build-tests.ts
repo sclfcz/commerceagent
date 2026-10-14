@@ -13,12 +13,14 @@ export interface BenchmarkTestRow {
     caseId: string;
     repetition: string;
     candidateAlias: string;
+    profileVariant: string;
     expectedExecutionIndex: string;
   };
   metadata: {
     caseId: string;
     repetition: number;
     candidateAlias: string;
+    profileVariant: string;
     expectedExecutionIndex: number;
   };
   assert: Array<{
@@ -87,10 +89,22 @@ export function buildTests(
   cases: Array<SpikeCase | BusinessCase>,
   candidates: Candidate[],
   repetitions = 3,
+  profileVariant: string | string[] = 'baseline',
 ): BenchmarkTestRow[] {
   if (!Number.isSafeInteger(repetitions) || repetitions < 1)
     throw new Error('invalid_repetitions');
   if (!cases.length || !candidates.length) throw new Error('empty_matrix');
+  const profileVariants = Array.isArray(profileVariant)
+    ? profileVariant
+    : [profileVariant];
+  if (
+    !profileVariants.length ||
+    new Set(profileVariants).size !== profileVariants.length ||
+    profileVariants.some(
+      (variant) => !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(variant),
+    )
+  )
+    throw new Error('invalid_profile_variant');
   const rows: BenchmarkTestRow[] = [];
   for (let repetition = 0; repetition < repetitions; repetition++) {
     for (let caseIndex = 0; caseIndex < cases.length; caseIndex++) {
@@ -100,23 +114,27 @@ export function buildTests(
         caseIndex,
         repetition,
       )) {
-        const expectedExecutionIndex = rows.length + 1;
-        rows.push({
-          vars: {
-            prompt: renderCasePrompt(test),
-            caseId: test.id,
-            repetition: String(repetition + 1),
-            candidateAlias: candidate.alias,
-            expectedExecutionIndex: String(expectedExecutionIndex),
-          },
-          metadata: {
-            caseId: test.id,
-            repetition: repetition + 1,
-            candidateAlias: candidate.alias,
-            expectedExecutionIndex,
-          },
-          assert: benchmarkAssertions(test),
-        });
+        for (const variant of profileVariants) {
+          const expectedExecutionIndex = rows.length + 1;
+          rows.push({
+            vars: {
+              prompt: renderCasePrompt(test),
+              caseId: test.id,
+              repetition: String(repetition + 1),
+              candidateAlias: candidate.alias,
+              profileVariant: variant,
+              expectedExecutionIndex: String(expectedExecutionIndex),
+            },
+            metadata: {
+              caseId: test.id,
+              repetition: repetition + 1,
+              candidateAlias: candidate.alias,
+              profileVariant: variant,
+              expectedExecutionIndex,
+            },
+            assert: benchmarkAssertions(test),
+          });
+        }
       }
     }
   }
@@ -127,6 +145,7 @@ export interface ExecutionIdentity {
   caseId: string;
   repetition: number;
   candidateAlias: string;
+  profileVariant?: string;
   executionIndex: number;
 }
 
@@ -144,6 +163,7 @@ export function validateExecutionOrder(
       left.caseId !== right.caseId ||
       left.repetition !== right.repetition ||
       left.candidateAlias !== right.candidateAlias ||
+      left.profileVariant !== right.profileVariant ||
       left.executionIndex !== right.executionIndex
     )
       return { valid: false, mismatchIndex: index + 1 };
@@ -161,6 +181,7 @@ export function validateAssessmentParity(
 } {
   const fields = [
     'candidate',
+    'profileVariant',
     'caseId',
     'repetition',
     'measurementValid',

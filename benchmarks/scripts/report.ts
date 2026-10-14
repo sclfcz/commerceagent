@@ -19,6 +19,12 @@ export function createBenchmarkReport(runDirectory: string) {
   const summary = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'summary.json'), 'utf8'),
   );
+  if (
+    summary.split === 'holdout' &&
+    Array.isArray(summary.profileVariants) &&
+    summary.profileVariants.length === 2
+  )
+    throw new Error('joint_holdout_requires_profile_comparison');
   const independent = reassessPromptfoo(runDirectory);
   const promptfooResults = JSON.parse(
     fs.readFileSync(path.join(runDirectory, 'promptfoo/results.json'), 'utf8'),
@@ -105,6 +111,8 @@ export function createBenchmarkReport(runDirectory: string) {
     runId: path.basename(runDirectory),
     metrics,
     costs: costByCandidate,
+    profileVariant:
+      summary.profileVariant ?? independent.profileVariant ?? null,
     split: summary.split ?? null,
     holdoutCumulativeRuns: cumulativeHoldoutRuns,
     privateCandidates: candidates,
@@ -123,6 +131,8 @@ export function createBenchmarkReport(runDirectory: string) {
     ),
     stage: summary.stage,
     split: summary.split ?? null,
+    profileVariant:
+      summary.profileVariant ?? independent.profileVariant ?? null,
     finalRun: summary.finalRun ?? false,
     repetitions: summary.repetitions ?? 3,
     cumulativeHoldoutRuns,

@@ -19,6 +19,7 @@ import {
 import type { BusinessCase } from '../lib/cases.js';
 import { calculateCost, loadPrices } from '../lib/pricing.js';
 import { officialVendor } from '../lib/identity.js';
+import { loadProfileVariant } from '../lib/profile-variants.js';
 import type {
   ApiProvider,
   CallApiContextParams,
@@ -35,6 +36,10 @@ interface CandidateRunState {
   context: ReturnType<typeof createAttemptContext>;
   prices: ReturnType<typeof loadPrices>;
   runDirectory: string;
+  profileVariants: Map<
+    string,
+    { id: string; profile: Record<string, any>; definitionHash: string }
+  >;
   actualExecutionIndex: number;
 }
 
@@ -103,6 +108,33 @@ async function getState(): Promise<CandidateRunState> {
       const cases = JSON.parse(
         fs.readFileSync(path.join(runDirectory, 'cases.used.json'), 'utf8'),
       ) as Array<SpikeCase | BusinessCase>;
+      const runMetadataPath = path.join(runDirectory, 'run-metadata.json');
+      const runMetadata = fs.existsSync(runMetadataPath)
+        ? JSON.parse(fs.readFileSync(runMetadataPath, 'utf8'))
+        : {};
+      const ids: string[] = runMetadata.profileVariants ?? [
+        runMetadata.profileVariant ?? 'baseline',
+      ];
+      const profileVariants = new Map();
+      for (const id of ids) {
+        const source = loadProfileVariant(id, benchmarkDirectory);
+        const profileFile = path.join(runDirectory, `profile.${id}.used.yaml`);
+        const profile = parse(
+          fs.readFileSync(
+            fs.existsSync(profileFile)
+              ? profileFile
+              : path.join(runDirectory, 'profile.used.yaml'),
+            'utf8',
+          ),
+        ) as Record<string, any>;
+        if (hash(profile) !== source.profileHash)
+          throw new Error('profile_definition_mismatch');
+        profileVariants.set(id, {
+          id,
+          profile,
+          definitionHash: source.definitionHash,
+        });
+      }
       const pinnedImage = process.env.BENCH_PINNED_IMAGE || '';
       const expectedRuntimeSourceHash =
         process.env.BENCH_RUNTIME_SOURCE_HASH || '';
@@ -123,6 +155,7 @@ async function getState(): Promise<CandidateRunState> {
         }),
         prices: loadPrices(path.join(benchmarkDirectory, 'pricing.yaml')),
         runDirectory,
+        profileVariants,
         actualExecutionIndex: 0,
       };
     });
@@ -143,6 +176,11 @@ export default class CommerceAgentProvider implements ApiProvider {
     _prompt: string,
     context?: CallApiContextParams,
   ): Promise<ProviderResponse> {
+    const requestedProfileVariant = String(
+      context?.vars?.profileVariant ??
+        process.env.BENCH_PROFILE_VARIANT ??
+        'baseline',
+    );
     let run: CandidateRunState;
     try {
       run = await getState();
@@ -156,6 +194,7 @@ export default class CommerceAgentProvider implements ApiProvider {
           measurementValid: false,
           qualityEligible: false,
           pass: false,
+          profileVariant: requestedProfileVariant,
           measurementFailure: 'collection_incomplete',
           businessFailure: null,
           failure: 'environment',
@@ -169,6 +208,8 @@ export default class CommerceAgentProvider implements ApiProvider {
     const candidateAlias = String(vars.candidateAlias || '');
     const caseId = String(vars.caseId || '');
     const repetition = Number(vars.repetition);
+    const profileVariant = String(vars.profileVariant || 'baseline');
+    const selectedProfile = run.profileVariants.get(profileVariant);
     const expectedExecutionIndex = Number(vars.expectedExecutionIndex);
     const actualExecutionIndex = ++run.actualExecutionIndex;
     const candidate = run.candidates.find(
@@ -182,6 +223,7 @@ export default class CommerceAgentProvider implements ApiProvider {
     if (
       !candidate ||
       !test ||
+      !selectedProfile ||
       !Number.isSafeInteger(repetition) ||
       repetition < 1
     ) {
@@ -189,6 +231,7 @@ export default class CommerceAgentProvider implements ApiProvider {
       result = {
         candidate: candidateAlias,
         caseId,
+        profileVariant,
         measurementValid: false,
         qualityEligible: false,
         pass: false,
@@ -199,6 +242,7 @@ export default class CommerceAgentProvider implements ApiProvider {
       result = {
         candidate: candidateAlias,
         caseId,
+        profileVariant,
         measurementValid: false,
         qualityEligible: false,
         pass: false,
@@ -217,6 +261,7 @@ export default class CommerceAgentProvider implements ApiProvider {
           run.candidates,
           run.context,
           repetition,
+          selectedProfile,
         );
       } catch (error) {
         failure =
@@ -237,6 +282,7 @@ export default class CommerceAgentProvider implements ApiProvider {
         result = {
           candidate: candidate.alias,
           caseId,
+          profileVariant,
           repetition,
           output: typeof trace?.output === 'string' ? trace.output : '',
           measurementValid: false,
@@ -292,6 +338,7 @@ export default class CommerceAgentProvider implements ApiProvider {
       caseId,
       repetition,
       candidateAlias,
+      profileVariant,
       executionIndex: actualExecutionIndex,
     };
     fs.appendFileSync(

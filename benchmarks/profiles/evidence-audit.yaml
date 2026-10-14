@@ -1,0 +1,6 @@
+id: evidence-audit
+description: 测试回答前的来源核对和数字复算指令能否减少无依据事实。
+prompt_append:
+  agents_prompt: |
+    本 Profile 变体强化证据审计：回答前逐一核对每个数字、日期、币种、比率和适用条件是否来自本轮工具返回；计算值必须按返回的原始数值复算。证据缺失、字段不全或查询未成功时，不得补猜或推断因果，应按主 Profile 的澄清、空结果或不可用规则处理。
+runtime_policy_overrides: {}

@@ -241,6 +241,43 @@ describe('Promptfoo benchmark adapter', () => {
     expect(a.difference).toBe(0.25);
     expect(a.lower95).toBeLessThanOrEqual(a.difference);
     expect(a.upper95).toBeGreaterThanOrEqual(a.difference);
+    expect(a.permutationPValue).toBeGreaterThan(0);
+    expect(a.permutationPValue).toBeLessThanOrEqual(1);
+  });
+
+  test('applies Holm correction across eligible paired candidate comparisons', () => {
+    const rows = ['candidate-a', 'candidate-b', 'candidate-c'].flatMap(
+      (candidate, candidateIndex) =>
+        Array.from({ length: 12 }, (_, index) => {
+          const pass =
+            candidateIndex === 0
+              ? index < 10
+              : candidateIndex === 1
+                ? index < 6
+                : index < 3;
+          return {
+            candidate,
+            caseId: `case-${index}`,
+            repetition: 1,
+            measurementValid: true,
+            qualityEligible: true,
+            pass,
+            businessPass: pass,
+          };
+        }),
+    );
+    const report = summarizeMetrics(rows, { bootstrapIterations: 1000 });
+    expect(Object.keys(report.pairwise)).toHaveLength(3);
+    expect(report.pairwiseCorrection).toContain('Holm step-down');
+    for (const result of Object.values(report.pairwise) as Array<
+      Record<string, any>
+    >) {
+      expect(result.permutationPValue).toBeGreaterThan(0);
+      expect(result.holmAdjustedPValue).toBeGreaterThanOrEqual(
+        result.permutationPValue,
+      );
+      expect(typeof result.significantAfterHolm).toBe('boolean');
+    }
   });
 
   test('public report leak checker rejects model names and endpoint hosts', () => {
@@ -641,6 +678,9 @@ describe('Promptfoo benchmark adapter', () => {
   test('builds case batches with rotated candidate order and explicit execution indices', () => {
     const rows = buildTests(cases, candidates, 2);
     expect(
+      rows.every((row) => row.metadata.profileVariant === 'baseline'),
+    ).toBe(true);
+    expect(
       rows.map(
         ({ metadata }) =>
           `${metadata.repetition}:${metadata.caseId}:${metadata.candidateAlias}:${metadata.expectedExecutionIndex}`,
@@ -655,6 +695,17 @@ describe('Promptfoo benchmark adapter', () => {
       '2:second:candidate-a:7',
       '2:second:candidate-b:8',
     ]);
+  });
+
+  test('records a selected profile variant on every test row', () => {
+    const rows = buildTests(cases, candidates, 1, 'strict-json');
+    expect(rows.length).toBe(cases.length * candidates.length);
+    expect(rows.every((row) => row.vars.profileVariant === 'strict-json')).toBe(
+      true,
+    );
+    expect(
+      rows.every((row) => row.metadata.profileVariant === 'strict-json'),
+    ).toBe(true);
   });
 
   test('invalidates a run when observed execution order differs', () => {

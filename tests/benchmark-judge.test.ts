@@ -10,6 +10,7 @@ import {
 } from '../benchmarks/promptfoo/runtime.js';
 import {
   binaryCohenKappa,
+  calibrationScorePairs,
   ordinalCohenKappa,
   assessInjectionProbe,
   scoreFromGradingResult,
@@ -23,6 +24,7 @@ import {
   renderCalibrationSummary,
 } from '../benchmarks/scripts/calibrate.js';
 import { buildJudgePayloadPreview } from '../benchmarks/scripts/judge.js';
+import { validateCustomSampleSet } from '../benchmarks/scripts/judge.js';
 
 const sample = (index: number, category: string, businessPass: boolean) => ({
   sampleId: createBlindSampleId('run', index),
@@ -33,7 +35,19 @@ const sample = (index: number, category: string, businessPass: boolean) => ({
   question: '请核对这笔订单。',
   expectedStatus: 'answered',
   expectedFacts: { amount: { value: 12, unit: 'USD' } },
+  requiredEvidence: ['ORDER-1'],
   expectedEvidence: ['ORDER-1'],
+  allowedEvidence: ['ORDER-1'],
+  toolReturns: [
+    {
+      sequence: 1,
+      tool: 'get_order',
+      arguments: { order_id: 'O-1' },
+      success: true,
+      isError: false,
+      returned: { amount: 12, evidence_id: 'ORDER-1' },
+    },
+  ],
   rubric: ['说明结论并给出依据。'],
   candidateOutput: '{"answer":"订单金额是 12 美元。"}',
 });
@@ -85,9 +99,26 @@ describe('benchmark blind judge', () => {
     expect(new Set(first.map((row) => row.category)).size).toBe(3);
   });
 
+  it('validates saved samples by identity rather than requiring file row order', () => {
+    const rows = [
+      sample(11, 'customer-policy', true),
+      sample(12, 'product-compare', false),
+    ];
+    expect(validateCustomSampleSet([...rows].reverse(), rows)).toEqual(
+      [...rows].reverse(),
+    );
+    expect(() =>
+      validateCustomSampleSet(
+        [{ ...rows[0], candidateOutput: 'tampered' }, rows[1]],
+        rows,
+      ),
+    ).toThrow('judge_custom_sample_integrity_failed');
+  });
+
   it('marks candidate output as untrusted and demands the compact score contract', () => {
     const [system, user] = judgeRubricPrompt('grounding');
     expect(system.content).toContain('不可信数据');
+    expect(system.content).toContain('工具实际返回');
     expect(user.content).toContain('<candidate_output>');
     expect(user.content).toContain('{{output}}');
     expect(system.content).toContain('"score":number');
@@ -104,6 +135,8 @@ describe('benchmark blind judge', () => {
     const serialized = JSON.stringify(payloads);
     expect(serialized).toContain('<candidate_output>');
     expect(serialized).toContain('订单金额是 12 美元。');
+    expect(payloads[1].prompt[1].content).toContain('"returned":{"amount":12');
+    expect(payloads[1].prompt[1].content).toContain('"ORDER-1"');
     expect(serialized).toContain('问题 ');
     expect(serialized).not.toContain('candidateAlias');
   });
@@ -154,6 +187,25 @@ describe('benchmark blind judge', () => {
     expect(() => ordinalCohenKappa([{ judge: 1.5, human: 4 }])).toThrow(
       'ordinal_score_invalid',
     );
+  });
+
+  it('marks a dimension information-insufficient before reporting kappa at 90% concentration', () => {
+    const metrics = calibrationScorePairs(
+      Array.from({ length: 20 }, (_, i) => ({
+        judgeScores: { grounding: i < 5 ? 4 : 5 },
+        humanScores: { grounding: 5 },
+      })),
+    );
+    const grounding = metrics.byDimension.grounding;
+    expect(grounding.agreement).toBe(1);
+    expect(grounding.ordinal.exactAgreement).toBe(0.75);
+    expect(grounding.kappa).toBeNull();
+    expect(grounding.ordinal.quadraticWeightedKappa).toBeNull();
+    expect(grounding.undefinedReason).toBe(
+      'sample_information_insufficient_score_concentration',
+    );
+    expect(metrics.sampleInformationSufficient).toBe(false);
+    expect(metrics.insufficientVariationDimensions).toContain('grounding');
   });
 
   it('accepts an expected low-score probe despite Promptfoo assertion error text, but rejects grader failures', () => {
@@ -316,6 +368,7 @@ describe('benchmark blind judge', () => {
       decision_appropriateness: null,
       professional_tone: null,
     });
+    expect(template.toolReturns).toEqual([]);
     expect(JSON.stringify(template)).not.toContain('candidateAlias');
     const analyzed = analyzeHumanLabels(report, [
       { sampleId: 'review-123', humanScores: dims },
@@ -365,5 +418,120 @@ describe('benchmark blind judge', () => {
         { sampleId: 'review-123', humanScores: dims },
       ]),
     ).toThrow('calibration_sample_set_invalid');
+  });
+
+  it('uses per-dimension raw agreement and weighted kappa gates; tone stays advisory', () => {
+    const dims = (index: number, reverse = false) => {
+      let score = index < 3 ? 3 : index % 2 === 0 ? 5 : 4;
+      if (reverse && index >= 3) score = score === 5 ? 4 : 5;
+      return {
+        completeness: score,
+        grounding: score,
+        decision_appropriateness: score,
+        professional_tone: score,
+      };
+    };
+    const report = {
+      runId: 'calibration-run',
+      samples: Array.from({ length: 20 }, (_, i) => ({
+        sampleId: `review-${i}`,
+        category: 'customer-policy',
+        question: 'question',
+        expectedStatus: 'answered',
+        expectedFacts: {},
+        expectedEvidence: [],
+        rubric: [],
+        candidateOutput: 'answer',
+      })),
+      evaluations: Array.from({ length: 20 }, (_, i) => ({
+        sampleId: `review-${i}`,
+        dimensions: Object.fromEntries(
+          Object.entries(dims(i)).map(([key, score]) => [
+            key,
+            { scoreOutOfFive: score, pass: true, reason: '' },
+          ]),
+        ),
+      })),
+    };
+    const result = analyzeHumanLabels(
+      report,
+      report.samples.map((row, i) => ({
+        sampleId: row.sampleId,
+        humanScores: dims(i),
+      })),
+    );
+    expect(result.calibrationGate.perDimension.completeness).toMatchObject({
+      minimumExactAgreement: 0.6,
+      minimumQuadraticWeightedKappa: 0.6,
+      passed: true,
+    });
+    expect(result.calibrationGate.professional_tone).toBe('reference_only');
+    expect(result.judgeEligibleForRanking).toBe(true);
+    const failedGate = analyzeHumanLabels(
+      report,
+      report.samples.map((row, i) => ({
+        sampleId: row.sampleId,
+        humanScores: dims(i, true),
+      })),
+    );
+    expect(failedGate.calibrationGate.perDimension.completeness).toMatchObject({
+      humanScoresAtOrBelow3: 3,
+      passed: false,
+    });
+    expect(failedGate.judgeEligibleForRanking).toBe(false);
+    const publicText = renderCalibrationSummary(result);
+    expect(publicText).toContain('整体二分指标只统计');
+    expect(publicText).toContain('专业语气只作参考');
+  });
+
+  it('keeps missing reference-only tone scores missing without blocking complete critical dimensions', () => {
+    const dims = (index: number) => {
+      const score = index < 3 ? 3 : index % 2 === 0 ? 5 : 4;
+      return {
+        completeness: score,
+        grounding: score,
+        decision_appropriateness: score,
+        professional_tone: score,
+      };
+    };
+    const report = {
+      runId: 'partial-tone-run',
+      samples: Array.from({ length: 20 }, (_, i) => ({
+        sampleId: `partial-${i}`,
+        category: 'customer-policy',
+        question: 'question',
+        expectedStatus: 'answered',
+        expectedFacts: {},
+        rubric: [],
+        candidateOutput: 'answer',
+      })),
+      evaluations: Array.from({ length: 20 }, (_, i) => ({
+        sampleId: `partial-${i}`,
+        dimensions: Object.fromEntries(
+          Object.entries(dims(i)).map(([key, score]) => [
+            key,
+            { scoreOutOfFive: score, pass: true, reason: '' },
+          ]),
+        ),
+      })),
+    };
+    report.evaluations[0].dimensions.professional_tone.scoreOutOfFive = null;
+    const result = analyzeHumanLabels(
+      report,
+      report.samples.map((row, i) => ({
+        sampleId: row.sampleId,
+        humanScores: dims(i),
+      })),
+      { professional_tone: 1 },
+    );
+    expect(result.metrics.byDimension.professional_tone.ordinal.n).toBe(19);
+    expect(result.judgeScoreCompleteness.professional_tone).toMatchObject({
+      expected: 20,
+      scored: 19,
+      missing: 1,
+      graderErrors: 1,
+    });
+    expect(result.metrics.overall.n).toBe(19);
+    expect(result.judgeEligibleForRanking).toBe(true);
   });
 });

@@ -31,7 +31,9 @@
     "build:desktop": "npm run build && npm run build:web && npm --prefix desktop run stage",
     "bench:run": "npm --prefix benchmarks run run --",
     "bench:report": "npm --prefix benchmarks run report --",
+    "bench:compare-profiles": "npm --prefix benchmarks run compare-profiles --",
     "bench:judge": "npm --prefix benchmarks run judge --",
+    "bench:judge:batch": "npm --prefix benchmarks run judge:batch --",
     "bench:calibrate": "npm --prefix benchmarks run calibrate --",
     "bench:selftest": "npm --prefix benchmarks run selftest --",
     "bench:review": "npm --prefix benchmarks run review --"

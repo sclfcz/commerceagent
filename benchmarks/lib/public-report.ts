@@ -49,6 +49,7 @@ export function renderPublicSummary(input: {
     pairwise: Record<string, any>;
   };
   costs: Record<string, any>;
+  profileVariant?: string | null;
   split?: string | null;
   holdoutCumulativeRuns?: number;
   privateCandidates: Array<{ alias: string; model: string; baseUrl: string }>;
@@ -70,6 +71,7 @@ export function renderPublicSummary(input: {
     'Only quality-eligible attempts are included in pass rates. Candidates with more than 10% ineligible attempts are excluded from ranking. Latencies are cold starts.',
     'Costs are usage-based estimates under the declared rate assumptions; one cache-read mapping has not yet been checked against a platform invoice.',
     `Split: ${input.split ?? 'legacy'}; cumulative holdout runs: ${input.holdoutCumulativeRuns ?? 0}.`,
+    `Profile variant: ${input.profileVariant ?? 'legacy'}.`,
     '',
     '| Candidate | Ranking | Eligible / total | Ineligible | First pass | Average pass | Task completion | Status accuracy | Facts/evidence | Format | Injection safety | Instruction | Tools | pass^3 passed / failed / undetermined | Total cost | Cost per successful task | elapsed p50 / p95 ms | logical p50 / p95 ms |',
     '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|',
@@ -95,7 +97,7 @@ export function renderPublicSummary(input: {
     '',
     '## Paired comparisons',
     '',
-    'Differences use paired case bootstrap intervals (10,000 resamples, without multiple-comparison correction); intervals containing zero indicate no observed significant difference. Candidates excluded from ranking are omitted from paired comparisons.',
+    'Differences use paired case bootstrap intervals (10,000 resamples). Pairwise candidate tests use paired case sign-flip permutation p-values with Holm step-down correction; candidates excluded from ranking are omitted.',
     '',
   );
   if (Object.keys(input.metrics.pairwise).length === 0)
@@ -107,7 +109,7 @@ export function renderPublicSummary(input: {
     const [left, right] = key.split('__vs__');
     const label = `${publicAlias.get(left)} vs ${publicAlias.get(right)}`;
     lines.push(
-      `- ${label}: difference ${interval.difference === null ? 'unknown' : `${(interval.difference * 100).toFixed(1)} pp`}, 95% CI [${interval.lower95 === null ? 'unknown' : `${(interval.lower95 * 100).toFixed(1)} pp`}, ${interval.upper95 === null ? 'unknown' : `${(interval.upper95 * 100).toFixed(1)} pp`}], n=${interval.pairedCases} cases.`,
+      `- ${label}: difference ${interval.difference === null ? 'unknown' : `${(interval.difference * 100).toFixed(1)} pp`}, 95% CI [${interval.lower95 === null ? 'unknown' : `${(interval.lower95 * 100).toFixed(1)} pp`}, ${interval.upper95 === null ? 'unknown' : `${(interval.upper95 * 100).toFixed(1)} pp`}], Holm-adjusted p=${interval.holmAdjustedPValue?.toFixed(4) ?? 'unknown'}, n=${interval.pairedCases} cases${interval.significantAfterHolm ? ', significant after Holm correction' : ', no significant difference after Holm correction'}.`,
     );
   }
   const privateByAlias = new Map(
