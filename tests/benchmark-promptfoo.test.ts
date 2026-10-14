@@ -868,6 +868,42 @@ describe('Promptfoo benchmark adapter', () => {
     ).toBeNull();
   });
 
+  test('binds the selected OpenCode Go Messages model price to its global origin fingerprint', () => {
+    const pricing = parse(
+      fs.readFileSync(path.resolve('benchmarks/pricing.yaml'), 'utf8'),
+    ) as { candidates: Record<string, Record<string, any>> };
+    const identity = {
+      model: 'claude-haiku-5-5',
+      baseUrl: 'https://opencode.ai/inference/go',
+      billingRegion: 'global',
+    };
+    const price = pricing.candidates['candidate-go'];
+    expect(price.model_fingerprint).toBe(
+      modelFingerprint(identity.model, identity.baseUrl),
+    );
+    expect(price).toMatchObject({
+      currency: 'USD',
+      billing_region: 'global',
+      input: 0.1,
+      output: 0.5,
+      cache_read: 0.01,
+      cache_write: 0.125,
+    });
+    expect(
+      calculateCost(
+        {
+          inputTokens: 1_000_000,
+          outputTokens: 1_000_000,
+          cacheReadInputTokens: 1_000_000,
+          cacheCreationInputTokens: 1_000_000,
+          reasoningTokens: 0,
+        },
+        price,
+        identity,
+      ),
+    ).toBeCloseTo(0.735);
+  });
+
   test('keeps aggregate candidate cost unknown if any attempt is unpriced', () => {
     const results = [
       { response: { metadata: { candidate: 'candidate-a', cost: 0.25 } } },
@@ -901,6 +937,23 @@ describe('Promptfoo benchmark adapter', () => {
         known: true,
       },
     });
+  });
+
+  test('uses candidate-specific currency when aggregating mixed price tables', () => {
+    const results = [
+      { response: { metadata: { candidate: 'candidate-go', cost: 0.2 } } },
+    ];
+    expect(
+      aggregatePromptfooCosts(
+        {
+          currency: 'CNY',
+          candidates: {
+            'candidate-go': { currency: 'USD' },
+          },
+        },
+        results,
+      )['candidate-go'].currency,
+    ).toBe('USD');
   });
 
   test('reassesses classifications from trace, fixture ledger, usage database and context evidence', () => {

@@ -217,8 +217,9 @@ fixture 调用与 stream 对应、全新状态基线、账本用量一致、SDK 
 request-id 仅是可选诊断相关 ID，不参与身份门槛，也不能证明实际模型路由。
 这些是显式的信任契约，不是对隐藏模型路由的密码学证明。HTTPS 地址严格匹配 origin 与
 路径，域名后缀相似、非 HTTPS、不同路径或端口均不能自动视为官方。
-OpenCode Go 属于聚合网关；其 [官方接入表](https://opencode.ai/docs/go/) 区分 Messages 和
-Chat Completions 模型，本驱动器只选 Messages 模型，不为 smoke 临时做协议转换。
+OpenCode Go 属于聚合网关；其 [官方接入表与价目](https://dev.opencode.ai/v2/docs/console/go/)
+区分 Messages 和 Chat Completions 模型，本驱动器只选 Messages 模型，不为 smoke 临时做协议转换。
+`candidate-go` 固定使用按既有 50 次开发集 token 分布加权后估算成本最低的兼容模型；价格绑定 Go 官方美元费率、全球区域与 endpoint origin 指纹。报告按 token 计 Go 公布的用量费率，不把月订阅费摊入单次任务成本；订阅额度上限单独说明。
 
 ## 私有结果与后续工作
 

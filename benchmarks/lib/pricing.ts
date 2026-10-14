@@ -126,7 +126,8 @@ export function aggregatePromptfooCosts(
         alias,
         {
           attempts: rows.length,
-          currency: pricing.currency ?? null,
+          currency:
+            pricing.candidates?.[alias]?.currency ?? pricing.currency ?? null,
           effectiveDate: pricing.effective_date ?? null,
           source: pricing.candidates?.[alias]?.source ?? null,
           totalCost: known

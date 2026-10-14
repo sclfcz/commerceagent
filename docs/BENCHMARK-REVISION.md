@@ -401,3 +401,11 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 - Holm 实现使用 10,000 次 case 级配对符号翻转 p 值，并在所有合格候选 pair 上执行 step-down 调整；公开报告同时给配对 bootstrap 95% 区间和 Holm 调整值。Profile 对比的筛选/确认推断只针对登记的 anchor candidate。
 - 尚未运行任何阶段 6 真实模型调用。第三候选、其本机凭据和与精确服务端点/区域匹配的官方价格卡还需配置核验；网关或订阅套餐没有官方 token 价时成本保持 unknown。holdout 也未启动。
 - 验证：Profile/Promptfoo 专项测试 28 项通过，benchmark typecheck 通过，`format:changed`、`docs:check`、`git diff --check` 通过。全量项目提交门槛尚待最终提交前执行。
+
+### 阶段 6 OpenCode Go 候选与价格绑定（2026-10-14）
+
+- 按 Go 官方目录中实际可用的 Anthropic Messages endpoint 模型筛选候选；排除只有 OpenAI-compatible Chat Completions endpoint 的限时免费模型，以维持现有 Claude Agent SDK 执行路径。
+- 将 `candidate-go` 固定为兼容 Messages API 且按既有 50 次开发集实际 token 分布计算后成本最低的选项。该样本上估算 50 次用量约 USD 0.0454；按官方价目中次低的兼容选项估算约 USD 0.0632。该数值是历史流量的费率重算，不是新的模型调用。
+- 新增 Go 官方 USD 单价、全球区域、origin 模型指纹及缓存/推理计价假设；Go 用量限制与订阅费不混入按 token 的单任务成本。聚合 Promptfoo 成本也改为优先读取候选级币种，避免将 USD 显示为根级 CNY。
+- 仍未做任何真实模型调用。Go API key、第三候选实际路由和请求成功情况仍需本机配置后验证；网关身份仍待网关侧证据核验，不能参与官方模型排名。
+- 来源：OpenCode Go 官方 endpoint、费率与用量上限说明，`https://dev.opencode.ai/v2/docs/console/go/`，核对日期 2026-10-14。

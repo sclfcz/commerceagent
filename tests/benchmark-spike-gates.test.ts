@@ -386,7 +386,7 @@ describe('official identity policy and matrix', () => {
       identityStatus: 'verified',
     });
   });
-  test('rotates two candidates and selects a different Go model', () => {
+  test('selects the lowest-cost observed Go Messages model and rejects a duplicate', () => {
     const a: Candidate = {
       alias: 'candidate-a',
       model: 'minimax-synthetic',
@@ -398,8 +398,17 @@ describe('official identity policy and matrix', () => {
     expect(rotateCandidates([a, b], 0, 0)).toEqual([a, b]);
     expect(rotateCandidates([a, b], 1, 0)).toEqual([b, a]);
     expect(rotateCandidates([a, b], 0, 1)).toEqual([b, a]);
-    expect(openCodeGoCandidate([a]).model).not.toMatch(/minimax/i);
+    const go = openCodeGoCandidate([a]);
+    expect(go).toMatchObject({
+      model: 'claude-haiku-5-5',
+      baseUrl: 'https://opencode.ai/inference/go',
+      gateway: true,
+      billingRegion: 'global',
+    });
     expect(openCodeGoCandidate([b]).gateway).toBe(true);
+    expect(() => openCodeGoCandidate([{ ...a, model: go.model }])).toThrow(
+      'opencode_go_model_already_in_candidate_matrix',
+    );
   });
 });
 
