@@ -7,6 +7,7 @@
 - Node.js 与 npm 版本符合根目录项目要求；完成根项目、`web/`、`container/agent-runner/` 和 `benchmarks/` 的 `npm ci`。
 - Docker daemon 正常，预先从当前 checkout 构建 Agent Runner 镜像；评测会把实际镜像固定为不可变 image ID 并写入 run manifest。
 - Linux 主机上 fixture 服务自动读取 Docker `bridge` 网络的 gateway，并只绑定该网桥地址；不监听 `0.0.0.0`。benchmark 模式会给 Runner 容器添加 `host.docker.internal:host-gateway` 映射，让它访问该地址。macOS/Windows 使用 Docker Desktop 的回环路径。Linux 上如设置 `BENCH_FIXTURE_BIND_HOST`，值必须是实际 bridge gateway。
+- `COMMERCEAGENT_BENCHMARK_MODE=1` 只能由 benchmark 启动的隔离评测服务设置，不能配置在生产服务环境中；生产环境设置会关闭产品自带工具，并给 Runner 容器添加 host-gateway 映射。
 - 每个候选须提供 Anthropic Messages 兼容 endpoint、精确 model ID、密钥环境变量名、计费区域和网关声明。Provider/SDK 上报的模型名只证明请求中声明的模型，不能证明网关实际路由。
 
 ```bash
