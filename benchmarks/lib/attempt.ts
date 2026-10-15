@@ -9,7 +9,6 @@ import {
 import { buildAgentProfilePrompt } from '../../src/agent-profile-prompts.js';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isIP } from 'node:net';
@@ -42,6 +41,17 @@ const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const bench = path.join(repositoryRoot, 'benchmarks');
 const execFileAsync = promisify(execFile);
 
+function isPrivateIpv4(address: string): boolean {
+  const octets = address.split('.').map(Number);
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part)))
+    return false;
+  return (
+    octets[0] === 10 ||
+    (octets[0] === 172 && octets[1]! >= 16 && octets[1]! <= 31) ||
+    (octets[0] === 192 && octets[1] === 168)
+  );
+}
+
 /**
  * Linux Docker's host-gateway resolves to the host-side bridge address. Bind
  * only that address so bridge containers can reach the fixture without
@@ -64,10 +74,6 @@ export async function fixtureBindHost(
     );
     return result.stdout.trim();
   },
-  isLocalAddress: (address: string) => boolean = (address: string) =>
-    Object.values(os.networkInterfaces())
-      .flatMap((entries) => entries ?? [])
-      .some((entry) => isIP(entry.address) === 4 && entry.address === address),
 ): Promise<string> {
   const configured = environment.BENCH_FIXTURE_BIND_HOST?.trim();
   if (configured && platform !== 'linux') return configured;
@@ -78,13 +84,8 @@ export async function fixtureBindHost(
   } catch {
     throw new Error('fixture_docker_bridge_gateway_unavailable');
   }
-  if (
-    isIP(gateway) !== 4 ||
-    gateway.startsWith('127.') ||
-    gateway.startsWith('169.254.') ||
-    !isLocalAddress(gateway)
-  )
-    throw new Error('fixture_docker_bridge_gateway_not_local');
+  if (isIP(gateway) !== 4 || !isPrivateIpv4(gateway))
+    throw new Error('fixture_docker_bridge_gateway_invalid');
   if (configured && configured !== gateway)
     throw new Error('fixture_bind_host_must_be_docker_bridge_gateway');
   return gateway;

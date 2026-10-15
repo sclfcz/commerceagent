@@ -1,6 +1,5 @@
 import http from 'node:http';
 import fs from 'node:fs';
-import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { isIP, type AddressInfo } from 'node:net';
 import type { FixtureState } from '../lib/cases.js';
@@ -206,13 +205,15 @@ export async function startFixtureServer(options: {
   const host = options.host ?? '127.0.0.1';
   const loopback =
     host === '::1' || (isIP(host) === 4 && host.startsWith('127.'));
-  const hostInterface =
-    options.allowHostGateway === true &&
-    isIP(host) === 4 &&
-    Object.values(os.networkInterfaces())
-      .flatMap((entries) => entries ?? [])
-      .some((entry) => isIP(entry.address) === 4 && entry.address === host);
-  if (!loopback && !hostInterface)
+  const octets = isIP(host) === 4 ? host.split('.').map(Number) : [];
+  const privateIpv4Gateway =
+    (octets[0] === 10 ||
+      (octets[0] === 172 && octets[1]! >= 16 && octets[1]! <= 31) ||
+      (octets[0] === 192 && octets[1] === 168)) &&
+    octets.length === 4;
+  const allowedBridgeGateway =
+    options.allowHostGateway === true && privateIpv4Gateway;
+  if (!loopback && !allowedBridgeGateway)
     throw new Error('fixture_non_loopback_bind_forbidden');
   fs.writeFileSync(options.ledgerFile, '', { flag: 'wx', mode: 0o600 });
   const token = randomBytes(32).toString('hex');
