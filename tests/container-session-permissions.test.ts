@@ -38,6 +38,7 @@ const {
   detectContainerHostIdentity,
   resolveContainerProxyConfig,
   resolveContainerHostIdentity,
+  shouldAddHostGateway,
 } = await import('../src/container-runner.js');
 const { readContainerProxyConfig } = await import('../src/config.js');
 
@@ -60,6 +61,14 @@ describe('benchmark MCP startup override', () => {
     expect(applyBenchmarkAlwaysLoadedMcpServer(servers, undefined)).toBe(
       servers,
     );
+  });
+
+  test('adds Docker host-gateway only for benchmark fixture access or proxy routing', () => {
+    expect(shouldAddHostGateway(false, {})).toBe(false);
+    expect(
+      shouldAddHostGateway(false, { COMMERCEAGENT_BENCHMARK_MODE: '1' }),
+    ).toBe(true);
+    expect(shouldAddHostGateway(true, {})).toBe(true);
   });
 });
 

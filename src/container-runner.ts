@@ -2092,6 +2092,15 @@ export function buildContainerArgs(
   return args;
 }
 
+export function shouldAddHostGateway(
+  proxyRequestedGateway: boolean,
+  environment: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    proxyRequestedGateway || environment.COMMERCEAGENT_BENCHMARK_MODE === '1'
+  );
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -2189,7 +2198,9 @@ export async function runContainerAgent(
       containerName,
       TIMEZONE,
       detectContainerHostIdentity(),
-      { addHostGateway: containerProxy.addHostGateway },
+      {
+        addHostGateway: shouldAddHostGateway(containerProxy.addHostGateway),
+      },
     );
 
     logger.debug(
