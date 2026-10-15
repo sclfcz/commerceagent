@@ -122,7 +122,7 @@ describe('runtime backup and restore safety', () => {
     ).toHaveLength(0);
   });
 
-  test('refuses to create an unrestorable archive from hard-linked runtime files', async () => {
+  test('stages hard-linked files safely across platform-specific cp behavior', async () => {
     // A regular file with nlink > 1 is stored by tar as a link-type ('h')
     // entry pointing at its first-seen sibling instead of a full copy.
     // restore-backup.mjs's validateArchiveEntries rejects link-type entries
@@ -141,16 +141,53 @@ describe('runtime backup and restore safety', () => {
     fs.writeFileSync(original, '{}');
     fs.linkSync(original, path.join(sourceData, 'config', 'settings-2.json'));
 
+    // Check the exact copy operation used by Makefile's staging step. GNU cp
+    // can preserve hard links, while macOS cp expands them into safe copies.
+    const stageProbe = path.join(tmp, 'hardlink-stage-probe');
+    fs.mkdirSync(stageProbe);
+    await execFileAsync('cp', [
+      '-a',
+      `${path.join(sourceData, 'config')}/.`,
+      stageProbe,
+    ]);
+    const stagedOriginal = fs.statSync(path.join(stageProbe, 'settings.json'));
+    const stagedSecond = fs.statSync(path.join(stageProbe, 'settings-2.json'));
+    const stagingPreservesHardLink =
+      stagedOriginal.dev === stagedSecond.dev &&
+      stagedOriginal.ino === stagedSecond.ino &&
+      stagedOriginal.nlink > 1;
+    fs.rmSync(stageProbe, { recursive: true, force: true });
+
+    // The staging-tree validator itself must always refuse a hard link.
     await expect(
-      execFileAsync(
-        'make',
-        ['backup', `RUNTIME_DATA_DIR=${sourceData}`, `BACKUP_DIR=${backupDir}`],
-        { cwd: root },
-      ),
-    ).rejects.toThrow();
-    expect(
-      fs.existsSync(backupDir) ? fs.readdirSync(backupDir) : [],
-    ).toHaveLength(0);
+      execFileAsync('node', ['scripts/prepare-backup-tree.mjs', sourceData], {
+        cwd: root,
+      }),
+    ).rejects.toThrow(/Unsafe runtime hard-linked file/);
+
+    const backup = execFileAsync(
+      'make',
+      ['backup', `RUNTIME_DATA_DIR=${sourceData}`, `BACKUP_DIR=${backupDir}`],
+      { cwd: root },
+    );
+    if (stagingPreservesHardLink) {
+      await expect(backup).rejects.toThrow();
+      expect(
+        fs.existsSync(backupDir) ? fs.readdirSync(backupDir) : [],
+      ).toHaveLength(0);
+    } else {
+      await expect(backup).resolves.toBeDefined();
+      const archiveName = fs
+        .readdirSync(backupDir)
+        .find((name) => name.endsWith('.tar.gz'))!;
+      const { stdout } = await execFileAsync('tar', [
+        '-tvzf',
+        path.join(backupDir, archiveName),
+      ]);
+      expect(
+        stdout.split('\n').some((line) => line.trimStart().startsWith('h')),
+      ).toBe(false);
+    }
   });
 
   test('rejects symbolic links and other special archive entries before extraction', async () => {

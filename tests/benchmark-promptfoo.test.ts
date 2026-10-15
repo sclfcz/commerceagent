@@ -1,0 +1,1344 @@
+import { describe, expect, test } from 'vitest';
+import type { Candidate, SpikeCase } from '../benchmarks/lib/contracts.js';
+import {
+  buildTests,
+  validateAssessmentParity,
+  validateExecutionOrder,
+} from '../benchmarks/promptfoo/build-tests.js';
+import { providerResponse } from '../benchmarks/promptfoo/provider.js';
+import {
+  aggregatePromptfooCosts,
+  calculateCost,
+  modelFingerprint,
+} from '../benchmarks/lib/pricing.js';
+import { importOpenCodeGoKey } from '../benchmarks/lib/opencode-go.js';
+import { importCandidateCredentials } from '../benchmarks/lib/local-credentials.js';
+import { configurePromptfooStorage } from '../benchmarks/promptfoo/runtime.js';
+import { parse } from 'yaml';
+import { countClassifications } from '../benchmarks/lib/assessment.js';
+import { persistAttemptResult } from '../benchmarks/lib/attempt.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import Database from 'better-sqlite3';
+import { reassessPromptfoo } from '../benchmarks/lib/reassess-promptfoo.js';
+import {
+  bootstrapPairedDifference,
+  summarizeMetrics,
+} from '../benchmarks/lib/metrics.js';
+import { profilePromptHashes } from '../benchmarks/lib/context.js';
+import { buildAgentProfilePrompt } from '../src/agent-profile-prompts.js';
+import { hash } from '../benchmarks/lib/contracts.js';
+import {
+  renderPublicSummary,
+  validatePublicSummary,
+} from '../benchmarks/lib/public-report.js';
+import {
+  createBenchmarkReport,
+  resolveRunDirectory,
+} from '../benchmarks/scripts/report.js';
+import {
+  loadAllBusinessCases,
+  parseFixtureVariant,
+} from '../benchmarks/lib/cases.js';
+
+const candidates = [
+  { alias: 'candidate-a' },
+  { alias: 'candidate-b' },
+] as Candidate[];
+
+const cases = [
+  { id: 'first', prompt: 'first', maxCalls: 1 },
+  { id: 'second', prompt: 'second', maxCalls: 1 },
+] as SpikeCase[];
+
+describe('Promptfoo benchmark adapter', () => {
+  test('resolves benchmark run IDs and repository-relative result paths', () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'benchmark-report-path-'),
+    );
+    try {
+      const benchmarkRoot = path.join(root, 'benchmarks');
+      const runDirectory = path.join(
+        benchmarkRoot,
+        'results',
+        'promptfoo-test-run',
+      );
+      fs.mkdirSync(runDirectory, { recursive: true });
+      expect(
+        resolveRunDirectory('promptfoo-test-run', root, benchmarkRoot),
+      ).toBe(runDirectory);
+      expect(
+        resolveRunDirectory(
+          'benchmarks/results/promptfoo-test-run',
+          root,
+          benchmarkRoot,
+        ),
+      ).toBe(runDirectory);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test('metrics exclude ineligible attempts and mark incomplete pass^3 as undetermined', () => {
+    const rows = [
+      ...[1, 2, 3].map((repetition) => ({
+        candidate: 'candidate-a',
+        caseId: 'case-1',
+        repetition,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: true,
+        businessPass: true,
+        elapsedMs: repetition * 10,
+      })),
+      ...[1, 2, 3].map((repetition) => ({
+        candidate: 'candidate-a',
+        caseId: 'case-2',
+        repetition,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: repetition !== 2,
+        businessPass: repetition !== 2,
+      })),
+      ...[1, 2].map((repetition) => ({
+        candidate: 'candidate-b',
+        caseId: 'case-1',
+        repetition,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: true,
+        businessPass: true,
+        elapsedMs: repetition * 10,
+      })),
+      {
+        candidate: 'candidate-b',
+        caseId: 'case-1',
+        repetition: 3,
+        measurementValid: false,
+        qualityEligible: false,
+        pass: false,
+        businessPass: false,
+        elapsedMs: 10_000,
+      },
+    ];
+    const report = summarizeMetrics(rows, {
+      caseIds: ['case-1', 'case-2', 'case-3'],
+      candidateAliases: ['candidate-c'],
+    });
+    expect(report.candidates['candidate-a']).toMatchObject({
+      eligibleAttempts: 6,
+      firstPassRate: 1,
+      averagePassRate: 5 / 6,
+      rankEligible: true,
+      pass3: { passed: 1, failed: 1, undetermined: 1 },
+    });
+    expect(report.candidates['candidate-b']).toMatchObject({
+      eligibleAttempts: 2,
+      ineligibleAttempts: 1,
+      ineligibleRate: 1 / 3,
+      rankEligible: false,
+      pass3: { passed: 0, failed: 0, undetermined: 3 },
+      latency: { elapsedMs: { p50: 10, p95: 20, coldStart: true } },
+    });
+    expect(report.candidates['candidate-c']).toMatchObject({
+      attempts: 0,
+      eligibleAttempts: 0,
+      rankEligible: false,
+      pass3: { passed: 0, failed: 0, undetermined: 3 },
+    });
+    expect(report.pairwise).toEqual({});
+  });
+
+  test('task completion follows businessPass and status accuracy is separate', () => {
+    const report = summarizeMetrics([
+      {
+        candidate: 'candidate-a',
+        caseId: 'case-1',
+        repetition: 1,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: false,
+        businessPass: false,
+        businessChecks: { status: true },
+      },
+    ]);
+    expect(report.candidates['candidate-a'].dimensionPassRates).toMatchObject({
+      completion: 0,
+      status_accuracy: 1,
+    });
+  });
+
+  test('keeps format failures separate from semantic dimensions and omits null checks', () => {
+    const report = summarizeMetrics([
+      {
+        candidate: 'candidate-a',
+        caseId: 'case-1',
+        repetition: 1,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: false,
+        businessPass: false,
+        businessChecks: {
+          format: false,
+          status: true,
+          facts: true,
+          evidence: true,
+          forbiddenConclusions: true,
+          injection: true,
+          instructions: true,
+          requiredTools: true,
+        },
+      },
+      {
+        candidate: 'candidate-a',
+        caseId: 'case-2',
+        repetition: 1,
+        measurementValid: true,
+        qualityEligible: true,
+        pass: false,
+        businessPass: false,
+        businessChecks: {
+          format: false,
+          status: null,
+          facts: null,
+          evidence: null,
+          forbiddenConclusions: null,
+          injection: null,
+          instructions: null,
+          requiredTools: true,
+        },
+      },
+    ]);
+    expect(report.candidates['candidate-a'].dimensionPassRates).toMatchObject({
+      format: 0,
+      injection_safety: 1,
+      instruction: 1,
+      status_accuracy: 1,
+    });
+    expect(
+      report.candidates['candidate-a'].dimensionPassRates.facts_evidence,
+    ).toBe(1);
+  });
+
+  test('paired bootstrap resamples shared case IDs and is deterministic', () => {
+    const make = (candidate: string, passes: boolean[]) =>
+      passes.map((pass, index) => ({
+        candidate,
+        caseId: `case-${index}`,
+        repetition: 1,
+        measurementValid: true,
+        qualityEligible: true,
+        pass,
+        businessPass: pass,
+      }));
+    const left = make('candidate-a', [true, true, false, false]);
+    const right = make('candidate-b', [true, false, false, false]);
+    const a = bootstrapPairedDifference(left, right, 10_000, 7);
+    expect(a).toEqual(bootstrapPairedDifference(left, right, 10_000, 7));
+    expect(a.pairedCases).toBe(4);
+    expect(a.difference).toBe(0.25);
+    expect(a.lower95).toBeLessThanOrEqual(a.difference);
+    expect(a.upper95).toBeGreaterThanOrEqual(a.difference);
+    expect(a.permutationPValue).toBeGreaterThan(0);
+    expect(a.permutationPValue).toBeLessThanOrEqual(1);
+  });
+
+  test('applies Holm correction across eligible paired candidate comparisons', () => {
+    const rows = ['candidate-a', 'candidate-b', 'candidate-c'].flatMap(
+      (candidate, candidateIndex) =>
+        Array.from({ length: 12 }, (_, index) => {
+          const pass =
+            candidateIndex === 0
+              ? index < 10
+              : candidateIndex === 1
+                ? index < 6
+                : index < 3;
+          return {
+            candidate,
+            caseId: `case-${index}`,
+            repetition: 1,
+            measurementValid: true,
+            qualityEligible: true,
+            pass,
+            businessPass: pass,
+          };
+        }),
+    );
+    const report = summarizeMetrics(rows, { bootstrapIterations: 1000 });
+    expect(Object.keys(report.pairwise)).toHaveLength(3);
+    expect(report.pairwiseCorrection).toContain('Holm step-down');
+    for (const result of Object.values(report.pairwise) as Array<
+      Record<string, any>
+    >) {
+      expect(result.permutationPValue).toBeGreaterThan(0);
+      expect(result.holmAdjustedPValue).toBeGreaterThanOrEqual(
+        result.permutationPValue,
+      );
+      expect(typeof result.significantAfterHolm).toBe('boolean');
+    }
+  });
+
+  test('public report leak checker rejects model names and endpoint hosts', () => {
+    const candidates = [
+      {
+        alias: 'candidate-a',
+        model: 'private-model-xyz',
+        baseUrl: 'https://private.example.test/anthropic',
+      },
+    ];
+    const summary = renderPublicSummary({
+      runId: 'test-run',
+      metrics: {
+        candidates: {
+          'candidate-a': {
+            attempts: 3,
+            eligibleAttempts: 3,
+            ineligibleRate: 0,
+            firstPassRate: 1,
+            averagePassRate: 1,
+            pass3: { passed: 1, failed: 0, undetermined: 0 },
+            dimensionPassRates: {
+              completion: 1,
+              status_accuracy: 1,
+              facts_evidence: 1,
+              format: 1,
+              injection_safety: 1,
+              instruction: 1,
+              tools: 1,
+            },
+            latency: {
+              elapsedMs: { p50: 2, p95: 3 },
+              logicalRunMs: { p50: 1, p95: 2 },
+            },
+          },
+        },
+        pairwise: {},
+      },
+      costs: {
+        'candidate-a': { totalCost: null, costPerSuccessfulTask: null },
+      },
+      privateCandidates: candidates,
+    });
+    expect(summary.markdown).toMatch(/\| candidate-[a-f0-9]{10} \|/);
+    expect(validatePublicSummary(summary.markdown, candidates).valid).toBe(
+      true,
+    );
+    expect(validatePublicSummary('candidate-a1', candidates).valid).toBe(true);
+    expect(
+      validatePublicSummary(summary.markdown + ' private-model-xyz', candidates)
+        .valid,
+    ).toBe(false);
+    expect(
+      validatePublicSummary(
+        summary.markdown + ' private.example.test',
+        candidates,
+      ).valid,
+    ).toBe(false);
+    expect(
+      validatePublicSummary(summary.markdown + ' candidate-a', candidates)
+        .valid,
+    ).toBe(false);
+    expect(
+      validatePublicSummary(summary.markdown + ' Qwen vendor label', candidates)
+        .valid,
+    ).toBe(false);
+  });
+
+  test('adds metadata-backed javascript assertions grouped by benchmark dimension', () => {
+    const row = buildTests(cases.slice(0, 1), candidates.slice(0, 1), 1)[0];
+    expect(row.assert.map((assertion) => assertion.metric)).toEqual([
+      'identity',
+      'measurement',
+      'completion',
+      'status_accuracy',
+      'facts_evidence',
+      'format',
+      'instruction',
+      'tools',
+    ]);
+    expect(
+      row.assert.every((assertion) => assertion.type === 'javascript'),
+    ).toBe(true);
+    expect(row.assert[1].value).toContain('context.metadata.measurementValid');
+    expect(row.assert[2].value).toContain('context.metadata.businessPass');
+  });
+
+  test('persists repetition before comparing Promptfoo result metadata', () => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'commerceagent-attempt-result-test-'),
+    );
+    const result = {
+      candidate: 'candidate-a',
+      caseId: 'first',
+      measurementValid: true,
+      qualityEligible: true,
+      pass: true,
+      measurementFailure: null,
+      businessFailure: null,
+      failure: null,
+      businessPass: true,
+      gatewayVerificationRequired: false,
+      identityBasis: 'official_endpoint_sdk',
+      gates: { modelIdentity: true },
+    };
+    try {
+      const persisted = persistAttemptResult(directory, result, 2);
+      const fromDisk = JSON.parse(
+        fs.readFileSync(path.join(directory, 'result.json'), 'utf8'),
+      );
+      expect(fromDisk.repetition).toBe(2);
+      expect(
+        validateAssessmentParity(
+          [fromDisk],
+          [{ response: { metadata: persisted } }],
+        ),
+      ).toEqual({ valid: true, mismatchIndex: null });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('reports measurement and business classifications independently', () => {
+    const attempts = [
+      {
+        failure: 'business_assertion',
+        measurementFailure: null,
+        businessFailure: 'business_assertion',
+      },
+      {
+        failure: 'audit_mismatch',
+        measurementFailure: 'audit_mismatch',
+        businessFailure: 'business_assertion',
+      },
+      {
+        failure: 'tool_policy_violation',
+        measurementFailure: null,
+        businessFailure: 'tool_policy_violation',
+      },
+    ];
+    expect(countClassifications(attempts, 'measurementFailure')).toEqual({
+      audit_mismatch: 1,
+    });
+    expect(countClassifications(attempts, 'businessFailure')).toEqual({
+      business_assertion: 2,
+      tool_policy_violation: 1,
+    });
+  });
+
+  test('disables cache, telemetry and sharing and puts its state in the run directory', () => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'commerceagent-promptfoo-storage-test-'),
+    );
+    const keys = [
+      'PROMPTFOO_CONFIG_DIR',
+      'PROMPTFOO_CACHE_PATH',
+      'PROMPTFOO_CACHE_ENABLED',
+      'PROMPTFOO_DISABLE_TELEMETRY',
+      'PROMPTFOO_DISABLE_UPDATE',
+      'PROMPTFOO_DISABLE_SHARING',
+    ];
+    const previous = Object.fromEntries(
+      keys.map((key) => [key, process.env[key]]),
+    );
+    try {
+      const paths = configurePromptfooStorage(
+        path.join(directory, 'promptfoo'),
+      );
+      expect(paths.configDirectory).toBe(
+        path.join(directory, 'promptfoo/config'),
+      );
+      expect(paths.cacheDirectory).toBe(
+        path.join(directory, 'promptfoo/cache'),
+      );
+      expect(process.env.PROMPTFOO_CONFIG_DIR).toBe(paths.configDirectory);
+      expect(process.env.PROMPTFOO_CACHE_PATH).toBe(paths.cacheDirectory);
+      expect(process.env.PROMPTFOO_CACHE_ENABLED).toBe('false');
+      expect(process.env.PROMPTFOO_DISABLE_TELEMETRY).toBe('1');
+      expect(process.env.PROMPTFOO_DISABLE_SHARING).toBe('1');
+      const config = parse(
+        fs.readFileSync(
+          path.join(process.cwd(), 'benchmarks/promptfoo/promptfooconfig.yaml'),
+          'utf8',
+        ),
+      );
+      expect(config).toMatchObject({
+        sharing: false,
+        noShare: true,
+        writeLatestResults: false,
+        evaluateOptions: {
+          cache: false,
+          maxConcurrency: 1,
+        },
+      });
+      for (const pathName of [paths.configDirectory, paths.cacheDirectory]) {
+        expect(fs.statSync(pathName).mode & 0o077).toBe(0);
+      }
+    } finally {
+      for (const key of keys) {
+        if (previous[key] === undefined) delete process.env[key];
+        else process.env[key] = previous[key];
+      }
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('imports and immediately removes a private OpenCode Go key file', () => {
+    const repository = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'commerceagent-local-key-test-'),
+    );
+    const directory = path.join(repository, 'benchmarks');
+    const file = path.join(directory, 'opencode-go.local.json');
+    const previous = process.env.BENCH_OPENCODE_GO_API_KEY;
+    fs.mkdirSync(directory, { mode: 0o700 });
+    fs.writeFileSync(file, JSON.stringify({ apiKey: 'test-only-key' }), {
+      mode: 0o600,
+    });
+    try {
+      delete process.env.BENCH_OPENCODE_GO_API_KEY;
+      expect(importOpenCodeGoKey(repository)).toBe(true);
+      expect(fs.existsSync(file)).toBe(false);
+      expect(process.env.BENCH_OPENCODE_GO_API_KEY).toBe('test-only-key');
+    } finally {
+      if (previous === undefined) delete process.env.BENCH_OPENCODE_GO_API_KEY;
+      else process.env.BENCH_OPENCODE_GO_API_KEY = previous;
+      fs.rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
+  test('imports candidate-specific credentials only for recognized aliases', () => {
+    const repository = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'commerceagent-qwen-key-test-'),
+    );
+    const directory = path.join(repository, 'benchmarks');
+    const file = path.join(directory, 'qwen.local.json');
+    const previous = process.env.BENCH_QWEN_API_KEY;
+    fs.mkdirSync(directory, { mode: 0o700 });
+    fs.writeFileSync(file, JSON.stringify({ apiKey: 'test-only-key' }), {
+      mode: 0o600,
+    });
+    try {
+      delete process.env.BENCH_QWEN_API_KEY;
+      importCandidateCredentials(repository, [
+        { apiKeyEnv: 'BENCH_QWEN_API_KEY' },
+      ]);
+      expect(process.env.BENCH_QWEN_API_KEY).toBe('test-only-key');
+      expect(fs.existsSync(file)).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.BENCH_QWEN_API_KEY;
+      else process.env.BENCH_QWEN_API_KEY = previous;
+      fs.rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
+  test('runs an in-memory provider without network calls and returns its metadata', async () => {
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'commerceagent-promptfoo-test-'),
+    );
+    const envKeys = [
+      'PROMPTFOO_CONFIG_DIR',
+      'PROMPTFOO_CACHE_PATH',
+      'PROMPTFOO_CACHE_ENABLED',
+      'PROMPTFOO_DISABLE_TELEMETRY',
+      'PROMPTFOO_DISABLE_SHARING',
+      'PROMPTFOO_DISABLE_UPDATE',
+      'IS_TESTING',
+      'BENCH_RUN_DIRECTORY',
+    ];
+    const previous = Object.fromEntries(
+      envKeys.map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, {
+      PROMPTFOO_CONFIG_DIR: directory,
+      PROMPTFOO_CACHE_PATH: path.join(directory, 'cache'),
+      PROMPTFOO_CACHE_ENABLED: 'false',
+      PROMPTFOO_DISABLE_TELEMETRY: '1',
+      PROMPTFOO_DISABLE_SHARING: '1',
+      PROMPTFOO_DISABLE_UPDATE: '1',
+      IS_TESTING: 'true',
+    });
+    try {
+      const benchmarkRequire = createRequire(
+        path.join(process.cwd(), 'benchmarks/package.json'),
+      );
+      const promptfooEntry = benchmarkRequire.resolve('promptfoo');
+      expect(promptfooEntry).toContain(
+        path.join('benchmarks', 'node_modules', 'promptfoo'),
+      );
+      const { evaluate, loadApiProvider } = await import(promptfooEntry);
+      const benchmarkTest = buildTests(
+        cases.slice(0, 1),
+        candidates.slice(0, 1),
+        1,
+      )[0];
+      const evaluation = await evaluate(
+        {
+          prompts: ['{{prompt}}'],
+          providers: [
+            {
+              id: () => 'synthetic-provider',
+              callApi: async () => ({
+                output: 'synthetic response',
+                metadata: {
+                  gatewayVerificationRequired: false,
+                  gates: { contextVerified: true, modelIdentity: true },
+                  measurementValid: true,
+                  businessPass: false,
+                  business: {
+                    status: true,
+                    facts: true,
+                    evidence: true,
+                    format: true,
+                    injection: true,
+                    instructions: true,
+                    requiredTools: true,
+                    onlyAllowedTools: true,
+                    successfulTools: true,
+                    callLimit: true,
+                  },
+                },
+              }),
+            },
+          ],
+          tests: [benchmarkTest],
+          sharing: false,
+          writeLatestResults: false,
+        },
+        {
+          maxConcurrency: 1,
+          cache: false,
+          showProgressBar: false,
+          silent: true,
+        },
+      );
+      expect(evaluation.results).toHaveLength(1);
+      const evaluationResult = evaluation.results[0].toEvaluateResult();
+      expect(evaluationResult).toMatchObject({
+        success: false,
+        response: {
+          output: 'synthetic response',
+          metadata: {
+            gates: { contextVerified: true },
+            measurementValid: true,
+            businessPass: false,
+            business: {
+              status: true,
+              facts: true,
+              evidence: true,
+              format: true,
+              injection: true,
+              instructions: true,
+              requiredTools: true,
+              onlyAllowedTools: true,
+              successfulTools: true,
+              callLimit: true,
+            },
+          },
+        },
+      });
+      expect(evaluationResult.namedScores).toMatchObject({
+        identity: 1,
+        measurement: 1,
+        completion: 0,
+        status_accuracy: 1,
+        facts_evidence: 1,
+        format: 1,
+        instruction: 1,
+        tools: 1,
+      });
+      const previousRunDirectory = process.env.BENCH_RUN_DIRECTORY;
+      delete process.env.BENCH_RUN_DIRECTORY;
+      const loaded = await loadApiProvider(
+        `file://${path.join(process.cwd(), 'benchmarks/promptfoo/provider.ts')}`,
+        { options: { id: 'commerceagent-test' } },
+      );
+      const measurementFailure = await loaded.callApi('private prompt', {
+        vars: { expectedExecutionIndex: '1' },
+      });
+      expect(measurementFailure.output).toBe('');
+      expect(measurementFailure).not.toHaveProperty('error');
+      expect(measurementFailure.metadata).toMatchObject({
+        measurementValid: false,
+        measurementFailure: 'collection_incomplete',
+        actualExecutionIndex: 1,
+        expectedExecutionIndex: 1,
+      });
+      if (previousRunDirectory !== undefined)
+        process.env.BENCH_RUN_DIRECTORY = previousRunDirectory;
+    } finally {
+      for (const key of envKeys) {
+        if (previous[key] === undefined) delete process.env[key];
+        else process.env[key] = previous[key];
+      }
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('builds case batches with rotated candidate order and explicit execution indices', () => {
+    const rows = buildTests(cases, candidates, 2);
+    expect(
+      rows.every((row) => row.metadata.profileVariant === 'baseline'),
+    ).toBe(true);
+    expect(
+      rows.map(
+        ({ metadata }) =>
+          `${metadata.repetition}:${metadata.caseId}:${metadata.candidateAlias}:${metadata.expectedExecutionIndex}`,
+      ),
+    ).toEqual([
+      '1:first:candidate-a:1',
+      '1:first:candidate-b:2',
+      '1:second:candidate-b:3',
+      '1:second:candidate-a:4',
+      '2:first:candidate-b:5',
+      '2:first:candidate-a:6',
+      '2:second:candidate-a:7',
+      '2:second:candidate-b:8',
+    ]);
+  });
+
+  test('records a selected profile variant on every test row', () => {
+    const rows = buildTests(cases, candidates, 1, 'strict-json');
+    expect(rows.length).toBe(cases.length * candidates.length);
+    expect(rows.every((row) => row.vars.profileVariant === 'strict-json')).toBe(
+      true,
+    );
+    expect(
+      rows.every((row) => row.metadata.profileVariant === 'strict-json'),
+    ).toBe(true);
+  });
+
+  test('invalidates a run when observed execution order differs', () => {
+    const expected = [
+      {
+        caseId: 'first',
+        repetition: 1,
+        candidateAlias: 'candidate-a',
+        executionIndex: 1,
+      },
+      {
+        caseId: 'first',
+        repetition: 1,
+        candidateAlias: 'candidate-b',
+        executionIndex: 2,
+      },
+    ];
+    expect(validateExecutionOrder(expected, expected)).toEqual({
+      valid: true,
+      mismatchIndex: null,
+    });
+    expect(
+      validateExecutionOrder(expected, [expected[1], expected[0]]),
+    ).toEqual({ valid: false, mismatchIndex: 1 });
+    expect(validateExecutionOrder(expected, [expected[0]])).toEqual({
+      valid: false,
+      mismatchIndex: 2,
+    });
+  });
+
+  test('checks that Promptfoo retained attempt gates and failure classifications unchanged', () => {
+    const attempt = {
+      candidate: 'candidate-a',
+      caseId: 'first',
+      repetition: 1,
+      measurementValid: false,
+      qualityEligible: false,
+      pass: false,
+      measurementFailure: 'audit_mismatch',
+      businessFailure: 'business_assertion',
+      failure: 'audit_mismatch',
+      businessPass: false,
+      gatewayVerificationRequired: false,
+      identityBasis: 'official_endpoint_sdk',
+      gates: { independentFixture: false },
+    };
+    const promptfooResult = {
+      response: {
+        metadata: {
+          ...attempt,
+          actualExecutionIndex: 1,
+          expectedExecutionIndex: 1,
+        },
+      },
+    };
+    expect(validateAssessmentParity([attempt], [promptfooResult])).toEqual({
+      valid: true,
+      mismatchIndex: null,
+    });
+    promptfooResult.response.metadata.measurementFailure =
+      'collection_incomplete';
+    expect(validateAssessmentParity([attempt], [promptfooResult])).toEqual({
+      valid: false,
+      mismatchIndex: 1,
+      mismatchFields: ['measurementFailure'],
+    });
+  });
+
+  test('returns output, ledger usage and metadata without converting measurement failures to provider errors', () => {
+    const response = providerResponse(
+      {
+        output: 'private raw answer',
+        measurementValid: false,
+        measurementFailure: 'context_mismatch',
+        businessPass: false,
+        gates: { freshState: false },
+        usage: {
+          inputTokens: 10,
+          outputTokens: 4,
+          cacheReadInputTokens: 2,
+          cacheCreationInputTokens: 1,
+          reasoningTokens: 0,
+        },
+        elapsedMs: 12,
+        logicalRunMs: 9,
+        fixtureLedgerSummary: [],
+      },
+      3,
+      2,
+      null,
+    );
+    expect(response.output).toBe('');
+    expect(response).not.toHaveProperty('error');
+    expect(response.tokenUsage).toEqual({
+      prompt: 13,
+      completion: 4,
+      cached: 2,
+      total: 17,
+      completionDetails: {
+        reasoning: 0,
+        cacheReadInputTokens: 2,
+        cacheCreationInputTokens: 1,
+      },
+    });
+    expect(response.cost).toBeUndefined();
+    expect(response.metadata).toMatchObject({
+      measurementFailure: 'context_mismatch',
+      actualExecutionIndex: 3,
+      expectedExecutionIndex: 2,
+      orderValid: false,
+      cost: null,
+      costStatus: 'unknown',
+      elapsedMs: 12,
+      logicalRunMs: 9,
+      gates: { freshState: false },
+    });
+  });
+
+  test('refuses unknown rates and alias prices bound to a different model or region', () => {
+    const usage = {
+      inputTokens: 1_000_000,
+      outputTokens: 100,
+      cacheReadInputTokens: 20,
+      cacheCreationInputTokens: 30,
+      reasoningTokens: 10,
+    };
+    const identity = {
+      model: 'model-a',
+      baseUrl: 'https://provider.example.test/anthropic',
+      billingRegion: 'cn-mainland',
+    };
+    const price = {
+      effective_date: '2026-10-12',
+      currency: 'CNY',
+      model_fingerprint: modelFingerprint(identity.model, identity.baseUrl)!,
+      billing_region: 'cn-mainland',
+      input: 1,
+      output: 2,
+      cache_read: 0.2,
+      cache_write: 1.2,
+      reasoning: 3,
+      source: 'synthetic test rate',
+    };
+    expect(calculateCost(usage, undefined, identity)).toBeNull();
+    expect(
+      calculateCost(usage, { ...price, cache_write: undefined }, identity),
+    ).toBeNull();
+    expect(calculateCost(usage, price, identity)).toBeCloseTo(1.00025);
+    expect(
+      calculateCost(usage, price, { ...identity, model: 'model-b' }),
+    ).toBeNull();
+    expect(
+      calculateCost(usage, price, { ...identity, billingRegion: 'us-west' }),
+    ).toBeNull();
+    expect(
+      calculateCost(usage, price, {
+        ...identity,
+        baseUrl: 'https://other-provider.example.test/anthropic',
+      }),
+    ).toBeNull();
+  });
+
+  test('binds the selected OpenCode Go Messages model price to its global origin fingerprint', () => {
+    const pricing = parse(
+      fs.readFileSync(path.resolve('benchmarks/pricing.yaml'), 'utf8'),
+    ) as { candidates: Record<string, Record<string, any>> };
+    const identity = {
+      model: 'claude-haiku-5-5',
+      baseUrl: 'https://opencode.ai/inference/go',
+      billingRegion: 'global',
+    };
+    const price = pricing.candidates['candidate-go'];
+    expect(price.model_fingerprint).toBe(
+      modelFingerprint(identity.model, identity.baseUrl),
+    );
+    expect(price).toMatchObject({
+      currency: 'USD',
+      billing_region: 'global',
+      input: 0.1,
+      output: 0.5,
+      cache_read: 0.01,
+      cache_write: 0.125,
+    });
+    expect(
+      calculateCost(
+        {
+          inputTokens: 1_000_000,
+          outputTokens: 1_000_000,
+          cacheReadInputTokens: 1_000_000,
+          cacheCreationInputTokens: 1_000_000,
+          reasoningTokens: 0,
+        },
+        price,
+        identity,
+      ),
+    ).toBeCloseTo(0.735);
+  });
+
+  test('keeps aggregate candidate cost unknown if any attempt is unpriced', () => {
+    const results = [
+      { response: { metadata: { candidate: 'candidate-a', cost: 0.25 } } },
+      { response: { metadata: { candidate: 'candidate-a', cost: null } } },
+      { response: { metadata: { candidate: 'candidate-b', cost: 0.5 } } },
+    ];
+    expect(
+      aggregatePromptfooCosts(
+        {
+          effective_date: '2026-10-12',
+          currency: 'USD',
+          candidates: {},
+        },
+        results,
+      ),
+    ).toEqual({
+      'candidate-a': {
+        attempts: 2,
+        currency: 'USD',
+        effectiveDate: '2026-10-12',
+        source: null,
+        totalCost: null,
+        known: false,
+      },
+      'candidate-b': {
+        attempts: 1,
+        currency: 'USD',
+        effectiveDate: '2026-10-12',
+        source: null,
+        totalCost: 0.5,
+        known: true,
+      },
+    });
+  });
+
+  test('uses candidate-specific currency when aggregating mixed price tables', () => {
+    const results = [
+      { response: { metadata: { candidate: 'candidate-go', cost: 0.2 } } },
+    ];
+    expect(
+      aggregatePromptfooCosts(
+        {
+          currency: 'CNY',
+          candidates: {
+            'candidate-go': { currency: 'USD' },
+          },
+        },
+        results,
+      )['candidate-go'].currency,
+    ).toBe('USD');
+  });
+
+  test('reassesses classifications from trace, fixture ledger, usage database and context evidence', () => {
+    const runDirectory = path.join(
+      os.tmpdir(),
+      `commerceagent-independent-reassess-${Date.now()}`,
+    );
+    fs.mkdirSync(path.join(runDirectory, 'promptfoo'), { recursive: true });
+    const attemptDirectory = path.join(runDirectory, 'promptfoo-0001');
+    const dataDirectory = path.join(attemptDirectory, 'service/data-eval');
+    fs.mkdirSync(path.join(dataDirectory, 'db'), { recursive: true });
+    const writeJson = (file: string, value: unknown) =>
+      fs.writeFileSync(file, JSON.stringify(value) + '\n');
+    const caseRow = loadAllBusinessCases().find((test) => test.id === 'pc-07')!;
+    const caseFixture = parseFixtureVariant(caseRow.fixture_variant);
+    const candidate = {
+      alias: 'candidate-a',
+      model: 'claude-3-5-sonnet',
+      baseUrl: 'https://api.anthropic.com',
+      apiKeyEnv: 'BENCH_TEST_KEY',
+      gateway: true,
+      gatewayDeclared: false,
+    };
+    const call = {
+      sequence: 1,
+      name: 'list_products',
+      arguments: { category: 'charger' },
+      result: { products: [], has_more: false, next_page_token: null },
+      success: true,
+    };
+    const output = JSON.stringify({
+      status: 'not_found',
+      facts: {},
+      evidence: [],
+      answer: '没有找到符合条件的充电器资料。',
+    });
+    const trace = {
+      output,
+      failure: null,
+      reason: 'completed',
+      turnId: 'turn-1',
+      tools: [
+        {
+          name: 'mcp__commerce_fixture__list_products',
+          resultObserved: true,
+          failed: false,
+          unavailable: false,
+        },
+      ],
+    };
+    const profileDefinition = parse(
+      fs.readFileSync(
+        path.join(process.cwd(), 'benchmarks/profile.yaml'),
+        'utf8',
+      ),
+    ) as Record<string, any>;
+    const dbProfile = {
+      id: 'profile-1',
+      name: profileDefinition.name,
+      version: 1,
+      identity_hash: 'identity-hash',
+      identity_prompt: profileDefinition.identity_prompt,
+      soul_prompt: profileDefinition.soul_prompt,
+      agents_prompt: profileDefinition.agents_prompt,
+      tools_prompt: profileDefinition.tools_prompt,
+      prompt_mode: profileDefinition.prompt_mode,
+      runtime_policy: JSON.stringify({
+        reasoning: profileDefinition.runtime_policy.reasoning,
+        context: {
+          ...profileDefinition.runtime_policy.context,
+          auto_compact_window: 0,
+          auto_compact_percentage: 0,
+        },
+        skills: profileDefinition.runtime_policy.skills,
+        mcp: profileDefinition.runtime_policy.mcp,
+      }),
+    };
+    const promptHashes = profilePromptHashes(
+      {
+        id: dbProfile.id,
+        name: dbProfile.name,
+        version: dbProfile.version,
+        identityHash: dbProfile.identity_hash,
+        identityPrompt: buildAgentProfilePrompt(profileDefinition),
+      },
+      false,
+    );
+    const contextActual = {
+      executionMode: 'container',
+      turnId: 'turn-1',
+      agentId: 'session-1',
+      agentProfile: {
+        id: 'profile-1',
+        version: 1,
+        identityHash: 'identity-hash',
+        runtimePolicyHash: hash(JSON.parse(dbProfile.runtime_policy)),
+      },
+      skills: { manifestHash: 'skills-hash', selectedSkillIds: [] },
+      mcp: { manifestHash: 'mcp-hash', serverIds: ['commerce_fixture'] },
+      prompt: {
+        blocks: [
+          {
+            id: 'agent-profile',
+            hash: promptHashes.renderedProfileHash,
+            owner: 'agent_profile',
+          },
+          { id: 'platform', hash: 'platform-hash', owner: 'platform' },
+        ],
+      },
+      warnings: [],
+    };
+    const freshState = {
+      serviceDirectoryCreated: true,
+      dataDirectoryCreated: true,
+      initialDataEntries: 0,
+      initialDatabase: {
+        users: [],
+        workspaces: [],
+        sessions: [],
+        sdkSessions: [],
+        messages: 0,
+        usageEvents: 0,
+      },
+      dataDirectory,
+      userId: 'user-1',
+      groupFolder: 'group-1',
+      sessionId: 'session-1',
+      workspaceJid: 'workspace-1',
+      userAbsentBeforeSetup: true,
+      sessionAbsentBeforeCreate: true,
+      sessionOwned: true,
+      sessionEmpty: true,
+      workspaceBaselineHash: 'baseline-hash',
+    };
+    const db = new Database(path.join(dataDirectory, 'db/messages.db'));
+    db.exec(`
+      CREATE TABLE agent_profiles (
+        id TEXT, owner_user_id TEXT, name TEXT, identity_prompt TEXT,
+        soul_prompt TEXT, agents_prompt TEXT, tools_prompt TEXT, prompt_mode TEXT,
+        runtime_policy TEXT, identity_hash TEXT, version INTEGER
+      );
+      CREATE TABLE usage_events (
+        user_id TEXT, group_folder TEXT, agent_id TEXT, event_id TEXT,
+        created_at INTEGER, input_tokens INTEGER, output_tokens INTEGER,
+        cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+        reasoning_output_tokens INTEGER, duration_ms INTEGER
+      );
+      CREATE TABLE usage_records (
+        user_id TEXT, group_folder TEXT, agent_id TEXT, event_id TEXT,
+        created_at INTEGER, model TEXT, input_tokens INTEGER, output_tokens INTEGER,
+        cache_read_input_tokens INTEGER, cache_creation_input_tokens INTEGER,
+        reasoning_output_tokens INTEGER
+      );
+    `);
+    db.prepare(
+      'INSERT INTO agent_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(
+      dbProfile.id,
+      'user-1',
+      dbProfile.name,
+      dbProfile.identity_prompt,
+      dbProfile.soul_prompt,
+      dbProfile.agents_prompt,
+      dbProfile.tools_prompt,
+      dbProfile.prompt_mode,
+      dbProfile.runtime_policy,
+      dbProfile.identity_hash,
+      dbProfile.version,
+    );
+    const usageRow = [
+      'user-1',
+      'group-1',
+      'session-1',
+      'event-1',
+      1,
+      10,
+      3,
+      0,
+      0,
+      0,
+    ];
+    db.prepare(
+      'INSERT INTO usage_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(...usageRow, 5);
+    db.prepare(
+      'INSERT INTO usage_records VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(...usageRow.slice(0, 5), candidate.model, ...usageRow.slice(5));
+    db.close();
+
+    try {
+      writeJson(path.join(runDirectory, 'candidates.json'), [candidate]);
+      writeJson(path.join(runDirectory, 'cases.used.json'), [caseRow]);
+      writeJson(path.join(runDirectory, 'run-metadata.json'), {
+        stage: 'smoke',
+        split: 'dev',
+        repetitions: 1,
+        scope: 'synthetic-query-analysis',
+      });
+      writeJson(path.join(runDirectory, 'execution-sequence.jsonl'), {
+        caseId: 'pc-07',
+        repetition: 1,
+        candidateAlias: 'candidate-a',
+        executionIndex: 1,
+        expectedExecutionIndex: 1,
+      });
+      writeJson(path.join(runDirectory, 'execution-order.json'), {
+        valid: true,
+        expectedAttempts: 1,
+        actualAttempts: 1,
+        expected: [
+          {
+            caseId: 'pc-07',
+            repetition: 1,
+            candidateAlias: 'candidate-a',
+            executionIndex: 1,
+          },
+        ],
+        actual: [
+          {
+            caseId: 'pc-07',
+            repetition: 1,
+            candidateAlias: 'candidate-a',
+            executionIndex: 1,
+          },
+        ],
+      });
+      fs.mkdirSync(attemptDirectory, { recursive: true });
+      const runnerLogs = path.join(dataDirectory, 'groups/group-1/logs');
+      fs.mkdirSync(runnerLogs, { recursive: true });
+      fs.writeFileSync(
+        path.join(runnerLogs, 'runner.log'),
+        '[BENCHMARK_MCP_INIT] ' +
+          JSON.stringify({
+            mcpServers: [{ name: 'commerce_fixture', status: 'connected' }],
+            fixtureTools: [
+              'mcp__commerce_fixture__list_products',
+              'mcp__commerce_fixture__get_order',
+              'mcp__commerce_fixture__search_policy',
+              'mcp__commerce_fixture__get_ad_report',
+            ],
+          }) +
+          '\n',
+      );
+      writeJson(path.join(attemptDirectory, 'trace.json'), trace);
+      const originalResultFile = path.join(attemptDirectory, 'result.json');
+      const originalResultText =
+        JSON.stringify({ source: 'original-result' }) + '\n';
+      fs.writeFileSync(originalResultFile, originalResultText, { mode: 0o600 });
+      fs.writeFileSync(
+        path.join(attemptDirectory, 'fixture.jsonl'),
+        JSON.stringify(call) + '\n',
+      );
+      writeJson(
+        path.join(attemptDirectory, 'fixture-snapshot.json'),
+        caseFixture,
+      );
+      writeJson(path.join(attemptDirectory, 'fixture-state.json'), {
+        refund_requests: [],
+        handoffs: [],
+      });
+      writeJson(path.join(attemptDirectory, 'context-evidence.json'), {
+        actual: contextActual,
+        expected: { renderedProfileHash: 'tampered-runtime-expectation' },
+      });
+      writeJson(path.join(attemptDirectory, 'fresh-state.json'), freshState);
+      writeJson(path.join(runDirectory, 'promptfoo/results.json'), [
+        {
+          success: true,
+          response: {
+            metadata: {
+              candidate: 'candidate-a',
+              caseId: 'pc-07',
+              repetition: 1,
+              actualExecutionIndex: 1,
+              expectedExecutionIndex: 1,
+              measurementValid: true,
+              qualityEligible: true,
+              pass: true,
+              measurementFailure: null,
+              businessFailure: null,
+              failure: null,
+              businessPass: true,
+              gatewayVerificationRequired: false,
+              identityBasis: 'official_endpoint_sdk',
+              gates: {
+                modelIdentity: true,
+                independentFixture: true,
+                fixtureStateReconciled: true,
+                freshState: true,
+                terminalClassified: true,
+                usageReconciled: true,
+                contextVerified: true,
+                mcpRuntimeReady: true,
+                toolUnavailable: false,
+                fixtureBypass: false,
+              },
+            },
+          },
+        },
+      ]);
+      const report = reassessPromptfoo(runDirectory);
+      expect(report).toMatchObject({
+        evidenceComplete: true,
+        executionOrderValid: true,
+        providerParityValid: true,
+        providerParityMismatchFields: [],
+        split: 'dev',
+        finalRun: false,
+        splitValid: true,
+        fixtureDefinitionsMatch: true,
+        fixtureStatesReconciled: true,
+        reassessmentMethod: {
+          contextExpectedSnapshotUsed: false,
+          gatewayMarkerRecomputedFromCandidateEndpointAndDeclaration: true,
+          fixtureStateRecomputedFromLedger: true,
+        },
+        measurementValidAttempts: 1,
+        businessPassedAttempts: 1,
+        invalidRun: false,
+      });
+      expect(report.results[0].sourceHashes).toHaveProperty('trace.json');
+      expect(report.results[0].gatewayVerificationRequired).toBe(false);
+      expect(report.results[0].qualityEligible).toBe(true);
+      expect(report.results[0].gates).toMatchObject({
+        modelIdentity: true,
+        independentFixture: true,
+        freshState: true,
+        contextVerified: true,
+      });
+      expect(fs.readFileSync(originalResultFile, 'utf8')).toBe(
+        originalResultText,
+      );
+      expect(fs.existsSync(path.join(runDirectory, 'reassessed.json'))).toBe(
+        true,
+      );
+      writeJson(path.join(runDirectory, 'summary.json'), {
+        stage: 'smoke',
+        split: 'dev',
+        finalRun: false,
+        repetitions: 1,
+        scope: 'synthetic-commerce-workflows',
+      });
+      const stage3Report = createBenchmarkReport(runDirectory);
+      expect(stage3Report.metrics.candidates['candidate-a']).toMatchObject({
+        eligibleAttempts: 1,
+        firstPassRate: 1,
+        averagePassRate: 1,
+        pass3: { passed: 0, failed: 0, undetermined: 1 },
+      });
+      expect(stage3Report.costByCandidate['candidate-a']).toMatchObject({
+        totalCost: null,
+        costPerSuccessfulTask: null,
+        known: false,
+      });
+      expect(stage3Report.publicReport.leakageCheckPassed).toBe(true);
+      const publicMarkdown = fs.readFileSync(
+        path.join(runDirectory, 'report.public.md'),
+        'utf8',
+      );
+      expect(publicMarkdown).not.toContain(candidate.model);
+      expect(publicMarkdown).not.toContain('api.anthropic.com');
+
+      const promptfooResults = JSON.parse(
+        fs.readFileSync(
+          path.join(runDirectory, 'promptfoo/results.json'),
+          'utf8',
+        ),
+      );
+      promptfooResults[0].response.metadata.businessPass = false;
+      writeJson(
+        path.join(runDirectory, 'promptfoo/results.json'),
+        promptfooResults,
+      );
+      expect(reassessPromptfoo(runDirectory).providerParityValid).toBe(false);
+      const traceFile = path.join(attemptDirectory, 'trace.json');
+      const failedTrace = JSON.parse(fs.readFileSync(traceFile, 'utf8'));
+      failedTrace.failure = 'upstream_error';
+      writeJson(traceFile, failedTrace);
+      fs.rmSync(path.join(attemptDirectory, 'fixture.jsonl'));
+      expect(reassessPromptfoo(runDirectory).results[0]).toMatchObject({
+        measurementFailure: 'upstream_error',
+        businessPass: null,
+      });
+    } finally {
+      fs.rmSync(runDirectory, { recursive: true, force: true });
+    }
+  });
+});

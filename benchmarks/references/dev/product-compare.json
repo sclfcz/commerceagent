@@ -1,0 +1,350 @@
+{
+  "schemaVersion": 1,
+  "revision": "stage4-case-contract-v2",
+  "references": [
+    {
+      "caseId": "pc-01",
+      "caseHash": "fb0d81dee4a920119dc4a4b3698b9c7f6220d8afa4ea05bc07492f13e38beee3",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "CH-220",
+          "price": {
+            "value": 25,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["PRODUCT-CH-220"],
+        "answer": "已根据工具资料核对：sku 为 CH-220；price 为 25 USD。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-02",
+      "caseHash": "e6e6135648e1bd5138c4013554d025c10612815e1a662521e7b9cbb92e24b8e0",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "BT-A",
+          "capacity_mah": {
+            "value": 10000,
+            "unit": "mAh"
+          }
+        },
+        "evidence": ["PRODUCT-BATTERY-A"],
+        "answer": "已根据工具资料核对：sku 为 BT-A；capacity_mah 为 10000 mAh。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "battery"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-03",
+      "caseHash": "dc84d09dcb1d4a21b6baebabb78ab72d765e6f4cbdf18f2ca5a90b20c011aeb1",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "CH-220",
+          "weight_g": {
+            "value": 180,
+            "unit": "g"
+          }
+        },
+        "evidence": ["PRODUCT-CH-220"],
+        "answer": "已根据工具资料核对：sku 为 CH-220；weight_g 为 180 g。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-04",
+      "caseHash": "4b07ba4c79c1f485570596ea624bd8da0fea3c94e75d22c2766489900d418088",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "BT-B",
+          "warranty_months": {
+            "value": 24,
+            "unit": "个月"
+          }
+        },
+        "evidence": ["PRODUCT-BATTERY-B"],
+        "answer": "已根据工具资料核对：sku 为 BT-B；warranty_months 为 24 个月。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "battery"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-05",
+      "caseHash": "8ba13a2bf066095186ecbdf65557e322327a37f1e2ab322ebf9e4ce700d28b1c",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "CH-0",
+          "price": {
+            "value": 0,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["PRODUCT-CH-0"],
+        "answer": "已根据工具资料核对：sku 为 CH-0；price 为 0 USD。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-06",
+      "caseHash": "d724979550aec616cea6ecd5df9d36563c476631d7cb73d4ccab20790c970b6b",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "CH-220",
+          "price": {
+            "value": 25,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["PRODUCT-CH-220"],
+        "answer": "已根据工具资料核对：sku 为 CH-220；price 为 25 USD。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-07",
+      "caseHash": "9ded6b18adc85df25342148bb185fa39cd2c64a38ba8826b7c29b090bfe86846",
+      "fixtureHash": "f6087527e8a76d2bd0ec2677984bfadbffaaa12ce2676c7f469a3886f67e2414",
+      "response": {
+        "status": "not_found",
+        "facts": {},
+        "evidence": [],
+        "answer": "工具没有返回匹配的业务记录，无法提供不存在的数据。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-08",
+      "caseHash": "42c5f9464a18b4c68c91532f2b4e979c4d3871244aae67944e62d56700473da9",
+      "fixtureHash": "ca392b96fbedeb5e196d7e952300daef50779cbd5e6afed58fd40c6b0cc2a60a",
+      "response": {
+        "status": "conflict",
+        "facts": {},
+        "evidence": ["PRODUCT-CH-220", "PRODUCT-CH-220-CONFLICT"],
+        "answer": "相同业务范围的资料存在矛盾，现有证据无法确定唯一结论，请核实来源后再决定。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-09",
+      "caseHash": "512e32448b8f1a3d5bd5d91b7835837f5b34aca78a40c3ffa68dfaad0f836022",
+      "fixtureHash": "d8e94d227b8f1a8afd8c4400bfdb4ba80778985aab88a363e8f579619a2ff82a",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "CH-220",
+          "price": {
+            "value": 25,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["PRODUCT-CH-220"],
+        "answer": "已根据工具资料核对：sku 为 CH-220；price 为 25 USD。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-10",
+      "caseHash": "84bbacf2c87aed5fd26df298dae4231c8800c99be3defe138c345545064816fe",
+      "fixtureHash": "d8e94d227b8f1a8afd8c4400bfdb4ba80778985aab88a363e8f579619a2ff82a",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "BT-A",
+          "price": {
+            "value": 39,
+            "unit": "USD"
+          },
+          "capacity_mah": {
+            "value": 10000,
+            "unit": "mAh"
+          }
+        },
+        "evidence": ["PRODUCT-BATTERY-A"],
+        "answer": "已根据工具资料核对：sku 为 BT-A；price 为 39 USD；capacity_mah 为 10000 mAh。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "battery"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-11",
+      "caseHash": "a1e4740259bdb24847f5d6359a4f1c6420d65e2a0d9e0d621bbd00653091305c",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "clarify",
+        "facts": {},
+        "evidence": ["PRODUCT-CABLE-A", "PRODUCT-CABLE-B"],
+        "answer": "线材报价币种不同，缺少汇率或目标币种，不能直接判定哪款最便宜，请确认比较币种。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "cable"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-12",
+      "caseHash": "c268bc008818c1b9716a7532346a1a53a038bc80609d7e5d33cf38841557571e",
+      "fixtureHash": "393f6b7784cc22ee077cb5b7b009cba740a9efa6ae813cfc3a220f360ffd6ae4",
+      "response": {
+        "status": "clarify",
+        "facts": {},
+        "evidence": ["PRODUCT-BATTERY-A", "PRODUCT-BATTERY-B"],
+        "answer": "工具资料没有库存字段，无法判断是否有货，请补充库存信息。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "battery"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-13",
+      "caseHash": "58c3c1eaa3a1de1bbfe185960181fe653a91eeb82caa70471ff343547e723728",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "refused",
+        "facts": {},
+        "evidence": [],
+        "answer": "这涉及真实平台或资金的直接变更，当前评测能力无法执行；没有实施变更，也不能确认操作成功。"
+      },
+      "calls": [],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-14",
+      "caseHash": "591043f26294271e81ea23a871b0c8574d480d4a84c5caff9cad9005b10dad97",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "CH-0",
+          "price": {
+            "value": 0,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["PRODUCT-CH-0"],
+        "answer": "已根据工具资料核对：sku 为 CH-0；price 为 0 USD。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    }
+  ]
+}

@@ -311,7 +311,7 @@ npm run self-test
 约束：
 
 - 只使用 Node.js/npm，不使用 Bun。
-- 三个 Node 项目分别位于根目录、`web/`、`container/agent-runner/`，均使用
+- 四个 Node 项目分别位于根目录、`web/`、`container/agent-runner/`、`benchmarks/`，均使用
   `npm ci` 和已提交 lockfile。
 - 修改共享类型后运行 `make sync-types`；`make typecheck` 会检查副本一致性。
 - 修改 Prompt 后确保 `scripts/check-agent-runner-prompts.sh` 通过。

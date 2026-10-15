@@ -32,13 +32,45 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const {
+  applyBenchmarkAlwaysLoadedMcpServer,
   applyContainerProxyEnvLines,
   buildContainerArgs,
   detectContainerHostIdentity,
   resolveContainerProxyConfig,
   resolveContainerHostIdentity,
+  shouldAddHostGateway,
 } = await import('../src/container-runner.js');
 const { readContainerProxyConfig } = await import('../src/config.js');
+
+describe('benchmark MCP startup override', () => {
+  test('forces eager initialization only for the configured eval server', () => {
+    const servers = {
+      commerce_fixture: { command: 'node', args: ['fixture-bridge.mjs'] },
+      other: { command: 'node', args: ['other.mjs'] },
+    };
+    const resolved = applyBenchmarkAlwaysLoadedMcpServer(
+      servers,
+      'commerce_fixture',
+    );
+    expect(resolved.commerce_fixture.alwaysLoad).toBe(true);
+    expect(resolved.other).toEqual(servers.other);
+    expect(servers.commerce_fixture).not.toHaveProperty('alwaysLoad');
+  });
+  test('keeps normal MCP definitions unchanged without the benchmark flag', () => {
+    const servers = { commerce_fixture: { command: 'node' } };
+    expect(applyBenchmarkAlwaysLoadedMcpServer(servers, undefined)).toBe(
+      servers,
+    );
+  });
+
+  test('adds Docker host-gateway only for benchmark fixture access or proxy routing', () => {
+    expect(shouldAddHostGateway(false, {})).toBe(false);
+    expect(
+      shouldAddHostGateway(false, { COMMERCEAGENT_BENCHMARK_MODE: '1' }),
+    ).toBe(true);
+    expect(shouldAddHostGateway(true, {})).toBe(true);
+  });
+});
 
 const mounts = [
   {
@@ -871,6 +903,63 @@ describe.skipIf(!integrationImageAvailable)(
         expect(fs.existsSync(path.join(outside, 'bin'))).toBe(false);
         expect(fs.existsSync(path.join(outside, 'lib'))).toBe(false);
       }
+    });
+
+    test('generated directory creation reopens a concurrently created directory without weakening no-follow', () => {
+      const generatedHelper = path.join(
+        repoRoot,
+        'container',
+        'session-generated-paths.mjs',
+      );
+      expect(
+        runImageScript(
+          `
+        mkdir -p /workspace/extra/.npm-global/bin /workspace/extra/.npm-global/lib
+        node --input-type=module <<'JS'
+import fs from 'node:fs';
+const original = fs.openSync;
+let injected = false;
+fs.openSync = (file, ...args) => {
+  if (!injected && file.toString().endsWith('/.npm-global')) {
+    injected = true;
+    throw Object.assign(new Error('simulated create race'), { code: 'ENOENT' });
+  }
+  return original(file, ...args);
+};
+process.argv[2] = '--ensure-npm-global';
+await import('/app/session-generated-paths.mjs');
+console.log('race-reopened');
+JS
+      `,
+          ['-v', `${generatedHelper}:/app/session-generated-paths.mjs:ro`],
+        ),
+      ).toBe('race-reopened');
+      expect(
+        runImageScript(
+          `
+        mkdir -p /tmp/generated-outside
+        ln -s /tmp/generated-outside /workspace/extra/.npm-global
+        node --input-type=module <<'JS'
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const original = fs.openSync;
+let injected = false;
+fs.openSync = (file, ...args) => {
+  if (!injected && file.toString().endsWith('/.npm-global')) {
+    injected = true;
+    throw Object.assign(new Error('simulated symlink race'), { code: 'ENOENT' });
+  }
+  return original(file, ...args);
+};
+process.argv[2] = '--ensure-npm-global';
+await assert.rejects(import('/app/session-generated-paths.mjs'), (error) => ['ENOTDIR', 'ELOOP'].includes(error.code));
+assert.equal(fs.existsSync('/tmp/generated-outside/bin'), false);
+console.log('race-link-rejected');
+JS
+      `,
+          ['-v', `${generatedHelper}:/app/session-generated-paths.mjs:ro`],
+        ),
+      ).toBe('race-link-rejected');
     });
 
     test('restrictive prompt bind is copied read-only without touching source', () => {

@@ -79,3 +79,8 @@ desktop/release/
 desktop/node_modules/
 desktop/dist/
 desktop/.metadata_never_index
+
+# Private benchmark artifacts, service state and candidate configuration
+/benchmarks/results/
+/benchmarks/*.local.yaml
+/benchmarks/*.local.json

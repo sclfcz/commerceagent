@@ -419,6 +419,8 @@ export interface NewMessage {
   sdk_message_uuid?: string | null;
   source_kind?: MessageSourceKind | null;
   finalization_reason?: MessageFinalizationReason | null;
+  /** Live delivery marker for a host-confirmed terminal upstream failure. */
+  provider_failure?: boolean;
   task_id?: string | null;
   delivery_mode?: FollowUpMode | null;
   delivery_status?: FollowUpStatus | null;

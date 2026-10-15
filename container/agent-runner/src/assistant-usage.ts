@@ -120,13 +120,94 @@ export interface AssistantUsageBatch {
  * Kaboo-compatible Claude usage collector.
  *
  * Claude assistant messages carry the API-call-local usage snapshot and a
- * stable Anthropic message ID. We keep the largest snapshot for a repeated ID
- * (stream/replay duplicates) and flush each ID at most once per query.
+ * stable Anthropic message ID. Native stream usage deltas override provisional
+ * assistant snapshots; without deltas we keep the largest replay snapshot. Each
+ * ID is flushed at most once per query.
  */
 export class AssistantUsageCollector {
   private readonly bestById = new Map<string, CollectedAssistantUsage>();
   private readonly flushedIds = new Set<string>();
   private readonly contentById = new Map<string, TurnContentFootprint>();
+  private readonly finalUsageIds = new Set<string>();
+  private readonly streams = new Map<
+    string,
+    { id: string; model: string; usage: Record<string, unknown> }
+  >();
+
+  private usagePatch(raw: Record<string, unknown>): Record<string, unknown> {
+    const patch: Record<string, unknown> = {};
+    for (const names of [
+      ['input_tokens', 'inputTokens'],
+      ['output_tokens', 'outputTokens'],
+      ['cache_read_input_tokens', 'cacheReadInputTokens'],
+      ['cache_creation_input_tokens', 'cacheCreationInputTokens'],
+      ['reasoning_output_tokens', 'reasoningOutputTokens', 'reasoningTokens'],
+    ]) {
+      if (names.some((name) => raw[name] !== undefined))
+        patch[names[0]] = Math.max(
+          ...names.map((name) => nonNegative(raw[name])),
+        );
+    }
+    return patch;
+  }
+
+  private ingestStreamUsage(sdkMessage: Record<string, unknown>): void {
+    const event = sdkMessage.event as Record<string, unknown> | undefined;
+    if (!event) return;
+    const key = `${sdkMessage.session_id ?? ''}\0${sdkMessage.parent_tool_use_id ?? 'main'}`;
+    if (event.type === 'message_start') {
+      const message = event.message as Record<string, unknown> | undefined;
+      const id = typeof message?.id === 'string' ? message.id : '';
+      if (!message || !id) return;
+      const stream = {
+        id,
+        model: String(message.model || 'unknown'),
+        usage: this.usagePatch(
+          (message.usage as Record<string, unknown>) || {},
+        ),
+      };
+      this.streams.set(key, stream);
+      this.ingest({ type: 'assistant', message: stream });
+    } else if (event.type === 'message_delta') {
+      const stream = this.streams.get(key);
+      if (!stream || !event.usage || this.flushedIds.has(stream.id)) return;
+      const patch = this.usagePatch(event.usage as Record<string, unknown>);
+      const cacheKeys = [
+        'cache_read_input_tokens',
+        'cache_creation_input_tokens',
+      ];
+      const inputKeys = ['input_tokens', ...cacheKeys];
+      const previousInputTotal = inputKeys.reduce(
+        (total, key) => total + nonNegative(stream.usage[key]),
+        0,
+      );
+      const nextInputTotal = inputKeys.reduce(
+        (total, key) => total + nonNegative(patch[key] ?? stream.usage[key]),
+        0,
+      );
+      if (nextInputTotal < previousInputTotal) {
+        // Some proxies send explicit zero placeholders in any input bucket.
+        // Accept any input/cache reclassification only when the total is
+        // conserved. A read-to-write cache move can shift priced buckets, so
+        // usage totals remain accurate while the cache cost split may differ.
+        // Keep the prior group if the proposed total decreases; output and
+        // reasoning deltas remain authoritative.
+        for (const key of inputKeys) delete patch[key];
+      }
+      stream.usage = { ...stream.usage, ...patch };
+      const current = parseAssistantUsage({
+        type: 'assistant',
+        message: stream,
+      });
+      if (current) {
+        // The SDK's terminal usage can reclassify provisional input as cached
+        // input. Replace its snapshot; taking maxima would overcount input and
+        // can retain a zero output snapshot from a completed content block.
+        this.bestById.set(current.id, current);
+        this.finalUsageIds.add(current.id);
+      }
+    } else if (event.type === 'message_stop') this.streams.delete(key);
+  }
 
   private collectContent(sdkMessage: Record<string, unknown>): void {
     const message = sdkMessage.message as Record<string, unknown> | undefined;
@@ -178,9 +259,18 @@ export class AssistantUsageCollector {
   }
 
   ingest(sdkMessage: Record<string, unknown>): void {
+    if (sdkMessage.type === 'stream_event') {
+      this.ingestStreamUsage(sdkMessage);
+      return;
+    }
     this.collectContent(sdkMessage);
     const current = parseAssistantUsage(sdkMessage);
-    if (!current || this.flushedIds.has(current.id)) return;
+    if (
+      !current ||
+      this.flushedIds.has(current.id) ||
+      this.finalUsageIds.has(current.id)
+    )
+      return;
     const previous = this.bestById.get(current.id);
     if (!previous || current.total > previous.total) {
       this.bestById.set(current.id, current);

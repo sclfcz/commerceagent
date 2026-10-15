@@ -8,6 +8,19 @@ export interface EffectiveMcpManifest {
   serverIds: string[];
 }
 
+export function applyBenchmarkAlwaysLoadedMcpServer(
+  servers: Record<string, Record<string, unknown>>,
+  serverName: string | undefined,
+): Record<string, Record<string, unknown>> {
+  if (!serverName) return servers;
+  const server = servers[serverName];
+  if (!server) return servers;
+  return {
+    ...servers,
+    [serverName]: { ...server, alwaysLoad: true },
+  };
+}
+
 export interface LocalPluginRef {
   type: 'local';
   path: string;

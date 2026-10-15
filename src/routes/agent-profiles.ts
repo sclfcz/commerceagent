@@ -37,6 +37,7 @@ import {
   createAgentProfile,
   getAgentProfilePromptVersion,
   getAgentProfileForUser,
+  getAgent,
   getAllRegisteredGroups,
   getOrCreateDefaultAgentProfile,
   getWorkspaceAgentProfileId,
@@ -314,7 +315,32 @@ agentProfileRoutes.post(
       workspace,
       ownerRole: user.role,
     });
-    const runContext = workspace ? getRunContextSnapshot(workspace.jid) : null;
+    const runtimeSessionId = body.runtime_session_id;
+    if (runtimeSessionId !== undefined) {
+      if (
+        !workspace ||
+        typeof runtimeSessionId !== 'string' ||
+        !runtimeSessionId.trim()
+      ) {
+        return c.json(
+          {
+            error:
+              'runtime_session_id requires a workspace and nonempty string',
+          },
+          400,
+        );
+      }
+      const session = getAgent(runtimeSessionId);
+      if (!session || session.chat_jid !== workspace.jid) {
+        return c.json({ error: 'Runtime session not found' }, 404);
+      }
+    }
+    const runContext = workspace
+      ? getRunContextSnapshot(
+          workspace.jid,
+          runtimeSessionId as string | undefined,
+        )
+      : null;
     return c.json({
       preview,
       run_context: runContext,

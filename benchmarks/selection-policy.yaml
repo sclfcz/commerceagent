@@ -1,0 +1,14 @@
+schema_version: 1
+status: template
+selection_object: 'Profile variant; then identity-verified candidate model'
+primary_metric: 'Task completion rate: businessPass among quality-eligible attempts'
+constraints:
+  - 'candidate identity is verified'
+  - 'measurement ineligible rate is at most 10%'
+  - 'no tool policy violations'
+tie_break_rule: 'Lower known cost per successful task, then lower cold logical latency p95; otherwise retain the incumbent baseline without claiming superiority'
+multiple_comparisons:
+  method: holm
+  primary_comparison: ''
+confirmed_by: ''
+confirmed_at: ''

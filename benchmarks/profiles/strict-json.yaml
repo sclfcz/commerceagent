@@ -1,0 +1,6 @@
+id: strict-json
+description: 测试显式机器可读输出边界能否减少 JSON 围栏和额外文本。
+prompt_append:
+  agents_prompt: |
+    本 Profile 变体强化格式契约：最终答复必须直接输出一个 JSON 对象，首个非空白字符为 {，末尾非空白字符为 }；禁止 Markdown 代码围栏、语言标签、前缀或后缀说明。JSON 字符串中的双引号必须正确转义。不得在 JSON 外输出任何内容。
+runtime_policy_overrides: {}

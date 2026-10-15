@@ -26,6 +26,340 @@ function assistant(
 }
 
 describe('Kaboo-compatible assistant usage collection', () => {
+  test('SDK terminal usage replaces provisional input/cache counters and cannot be overwritten by a stale assistant', () => {
+    const collector = new AssistantUsageCollector();
+    const event = (value: unknown) =>
+      collector.ingest({
+        type: 'stream_event',
+        session_id: 's',
+        parent_tool_use_id: null,
+        event: value,
+      });
+    event({
+      type: 'message_start',
+      message: {
+        id: 'final-usage',
+        model: 'candidate',
+        usage: { input_tokens: 25121, output_tokens: 0 },
+      },
+    });
+    collector.ingest(
+      assistant('final-usage', 'candidate', {
+        input_tokens: 25121,
+        output_tokens: 0,
+      }),
+    );
+    event({
+      type: 'message_delta',
+      usage: {
+        input_tokens: 6,
+        cache_creation_input_tokens: 27101,
+        cache_read_input_tokens: 0,
+        output_tokens: 141,
+      },
+    });
+    event({ type: 'message_stop' });
+    collector.ingest(
+      assistant('final-usage', 'candidate', {
+        input_tokens: 25121,
+        output_tokens: 0,
+      }),
+    );
+    expect(collector.drain('s')).toMatchObject({
+      eventId: 'claude-code:final-usage',
+      tokens: {
+        inputTokens: 6,
+        outputTokens: 141,
+        cacheCreationInputTokens: 27101,
+        cacheReadInputTokens: 0,
+      },
+    });
+    expect(collector.drain('s')).toBeUndefined();
+  });
+
+  test('deltas without compensating cache usage preserve measured input', () => {
+    const collector = new AssistantUsageCollector();
+    const event = (value: unknown) =>
+      collector.ingest({ type: 'stream_event', event: value });
+    event({
+      type: 'message_start',
+      message: {
+        id: 'smaller',
+        model: 'candidate',
+        usage: {
+          input_tokens: 100,
+          output_tokens: 0,
+          cache_read_input_tokens: 30,
+        },
+      },
+    });
+    event({
+      type: 'message_delta',
+      usage: { inputTokens: 1, outputTokens: 2 },
+    });
+    collector.ingest(
+      assistant('smaller', 'candidate', {
+        input_tokens: 100,
+        output_tokens: 0,
+      }),
+    );
+    expect(collector.drain('s')).toMatchObject({
+      tokens: { inputTokens: 100, outputTokens: 2, cacheReadInputTokens: 30 },
+    });
+  });
+
+  test.each([
+    { input_tokens: 0, output_tokens: 9 },
+    { inputTokens: 0, outputTokens: 9 },
+    {
+      input_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      output_tokens: 9,
+    },
+  ])(
+    'does not erase measured input with a proxy zero placeholder: %j',
+    (usage) => {
+      const collector = new AssistantUsageCollector();
+      collector.ingest({
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: {
+            id: 'proxy-zero',
+            model: 'candidate',
+            usage: { input_tokens: 100, output_tokens: 0 },
+          },
+        },
+      });
+      collector.ingest({
+        type: 'stream_event',
+        event: { type: 'message_delta', usage },
+      });
+      expect(collector.drain('s')).toMatchObject({
+        tokens: { inputTokens: 100, outputTokens: 9 },
+      });
+    },
+  );
+
+  test.each([
+    { input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 20 },
+    { inputTokens: 100, cacheReadInputTokens: 0, outputTokens: 20 },
+    { cache_read_input_tokens: 0, output_tokens: 20 },
+  ])(
+    'preserves cached input when a proxy resets it without compensating input: %j',
+    (usage) => {
+      const collector = new AssistantUsageCollector();
+      collector.ingest({
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: {
+            id: 'cached-zero',
+            model: 'candidate',
+            usage: { input_tokens: 100, cache_read_input_tokens: 500 },
+          },
+        },
+      });
+      collector.ingest({
+        type: 'stream_event',
+        event: { type: 'message_delta', usage },
+      });
+      expect(collector.drain('s')).toMatchObject({
+        tokens: {
+          inputTokens: 100,
+          cacheReadInputTokens: 500,
+          outputTokens: 20,
+        },
+      });
+    },
+  );
+
+  test.each([
+    {
+      delta: { input_tokens: 100, cache_creation_input_tokens: 0 },
+      expected: {
+        inputTokens: 100,
+        cacheReadInputTokens: 500,
+        cacheCreationInputTokens: 200,
+      },
+    },
+    {
+      delta: { input_tokens: 350, cache_read_input_tokens: 0 },
+      expected: {
+        inputTokens: 100,
+        cacheReadInputTokens: 500,
+        cacheCreationInputTokens: 200,
+      },
+    },
+    {
+      delta: { input_tokens: 600, cache_read_input_tokens: 0 },
+      expected: {
+        inputTokens: 600,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 200,
+      },
+    },
+    {
+      delta: {
+        input_tokens: 600,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      expected: {
+        inputTokens: 100,
+        cacheReadInputTokens: 500,
+        cacheCreationInputTokens: 200,
+      },
+    },
+    {
+      delta: {
+        input_tokens: 800,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      expected: {
+        inputTokens: 800,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+      },
+    },
+  ])(
+    'protects both cache buckets and permits only funded reclassification: %j',
+    ({ delta, expected }) => {
+      const collector = new AssistantUsageCollector();
+      collector.ingest({
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: {
+            id: 'cache-budget',
+            model: 'candidate',
+            usage: {
+              input_tokens: 100,
+              cache_read_input_tokens: 500,
+              cache_creation_input_tokens: 200,
+            },
+          },
+        },
+      });
+      collector.ingest({
+        type: 'stream_event',
+        event: {
+          type: 'message_delta',
+          usage: { ...delta, output_tokens: 20 },
+        },
+      });
+      expect(collector.drain('s')).toMatchObject({
+        tokens: { ...expected, outputTokens: 20 },
+      });
+      expect(collector.drain('s')).toBeUndefined();
+    },
+  );
+  test('accepts conserved reclassification between cache read and cache creation buckets', () => {
+    const collector = new AssistantUsageCollector();
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_start',
+        message: {
+          id: 'cache-read-to-create',
+          model: 'candidate',
+          usage: {
+            input_tokens: 100,
+            cache_read_input_tokens: 500,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      },
+    });
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_delta',
+        usage: {
+          input_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 600,
+          output_tokens: 20,
+        },
+      },
+    });
+    expect(collector.drain('s')).toMatchObject({
+      tokens: {
+        inputTokens: 0,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 600,
+        outputTokens: 20,
+      },
+    });
+  });
+  test('a later valid cache counter still updates after a rejected zero placeholder', () => {
+    const collector = new AssistantUsageCollector();
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_start',
+        message: {
+          id: 'cache-recovery',
+          model: 'candidate',
+          usage: { input_tokens: 100, cache_read_input_tokens: 500 },
+        },
+      },
+    });
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_delta',
+        usage: { cache_read_input_tokens: 0, output_tokens: 10 },
+      },
+    });
+    collector.ingest({
+      type: 'stream_event',
+      event: {
+        type: 'message_delta',
+        usage: { cache_read_input_tokens: 600, output_tokens: 20 },
+      },
+    });
+    expect(collector.drain('s')).toMatchObject({
+      tokens: { inputTokens: 100, cacheReadInputTokens: 600, outputTokens: 20 },
+    });
+  });
+
+  test('interleaved main and subagent streams keep final usage tied to the right message IDs', () => {
+    const collector = new AssistantUsageCollector();
+    const event = (parent: string | null, value: unknown) =>
+      collector.ingest({
+        type: 'stream_event',
+        session_id: 's',
+        parent_tool_use_id: parent,
+        event: value,
+      });
+    event(null, {
+      type: 'message_start',
+      message: { id: 'main', model: 'candidate', usage: { input_tokens: 10 } },
+    });
+    event('tool-parent', {
+      type: 'message_start',
+      message: { id: 'child', model: 'candidate', usage: { input_tokens: 20 } },
+    });
+    event(null, { type: 'message_delta', usage: { output_tokens: 4 } });
+    event('tool-parent', {
+      type: 'message_delta',
+      usage: { output_tokens: 6 },
+    });
+    event('tool-parent', { type: 'message_stop' });
+    event(null, { type: 'message_stop' });
+    expect(collector.drain('s')).toMatchObject({
+      eventId: 'claude-code:main',
+      tokens: { inputTokens: 10, outputTokens: 4 },
+    });
+    expect(collector.drain('s')).toMatchObject({
+      eventId: 'claude-code:child',
+      tokens: { inputTokens: 20, outputTokens: 6 },
+    });
+    expect(collector.drain('s')).toBeUndefined();
+  });
   test('keeps the largest snapshot for one message ID and flushes it once', () => {
     const collector = new AssistantUsageCollector();
     collector.ingest(assistant('msg-1', 'claude-sonnet-4-5', {}));

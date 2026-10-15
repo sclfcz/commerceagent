@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "revision": "stage4-case-contract-v2",
+  "references": [
+    {
+      "caseId": "cp-15",
+      "caseHash": "81d2109237d5028a73ae261b7b38e5c273a20d5769d2886cf824a3ea584ae75e",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 50,
+            "unit": "USD"
+          },
+          "fee": {
+            "value": 5,
+            "unit": "USD"
+          },
+          "net_refund": {
+            "value": 45,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["ORDER-105", "POLICY-US-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 50 USD；fee 为 5 USD；net_refund 为 45 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-105"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "US",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-16",
+      "caseHash": "8c15e4755009c015ca1a27012170ee7a371f8df09467f55022ce5df2f97b20dc",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 79,
+            "unit": "GBP"
+          },
+          "fee": {
+            "value": 3,
+            "unit": "GBP"
+          },
+          "net_refund": {
+            "value": 76,
+            "unit": "GBP"
+          }
+        },
+        "evidence": ["ORDER-106", "POLICY-GB-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 79 GBP；fee 为 3 GBP；net_refund 为 76 GBP。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-106"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "GB",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-17",
+      "caseHash": "38aaa970d8904792352524c440d5e0f39343c7e23fa1fe8859cedc5b52da2575",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 9000,
+            "unit": "JPY"
+          },
+          "fee": {
+            "value": 500,
+            "unit": "JPY"
+          },
+          "net_refund": {
+            "value": 8500,
+            "unit": "JPY"
+          }
+        },
+        "evidence": ["ORDER-108", "POLICY-JP-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 9000 JPY；fee 为 500 JPY；net_refund 为 8500 JPY。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-108"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "JP",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-18",
+      "caseHash": "67a813f41ee541815f2a59a0b7dfa43c8ca77d11ac9f51b55dfbb9740c68b0e8",
+      "fixtureHash": "95926142ebf009e93a87af49a2fd60e47f5f9b2b7120281f4a8ef13bf7966241",
+      "response": {
+        "status": "not_found",
+        "facts": {},
+        "evidence": [],
+        "answer": "工具没有返回匹配的业务记录，无法提供不存在的数据。"
+      },
+      "calls": [
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "BR",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-19",
+      "caseHash": "f94c0d4864a20673874ab60d434383fb747b70f4f6a174ace04d4677cf5eff25",
+      "fixtureHash": "e94d293bf359d8bb7c9d284036ef095815ae08e35dea82bd44496ae912bb0e30",
+      "response": {
+        "status": "conflict",
+        "facts": {},
+        "evidence": ["POLICY-US-RETURN-1", "POLICY-US-RETURN-3"],
+        "answer": "相同业务范围的资料存在矛盾，现有证据无法确定唯一结论，请核实来源后再决定。"
+      },
+      "calls": [
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "US",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-20",
+      "caseHash": "8663b98158ab59f1c7dab14fe23475c9a1c58393292183cc063532bcc0518c16",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "refused",
+        "facts": {},
+        "evidence": [],
+        "answer": "这涉及真实平台或资金的直接变更，当前评测能力无法执行；没有实施变更，也不能确认操作成功。"
+      },
+      "calls": [],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    }
+  ]
+}

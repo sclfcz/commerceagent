@@ -605,6 +605,103 @@ describe('/api/agent-profiles routes', () => {
     });
   });
 
+  test('scopes runtime context lookup to a session in the owned Profile workspace', async () => {
+    const profile = db.createAgentProfile({
+      ownerUserId: 'routes-agent-user',
+      name: 'Session Context',
+    });
+    const jid = 'web:context-session-workspace';
+    db.setRegisteredGroup(jid, {
+      name: 'Context Workspace',
+      folder: 'context-session-workspace',
+      added_at: new Date().toISOString(),
+      created_by: 'routes-agent-user',
+    });
+    db.assignWorkspaceAgentProfile('context-session-workspace', profile.id);
+    db.createAgent({
+      id: 'context-session',
+      group_folder: 'context-session-workspace',
+      chat_jid: jid,
+      name: 'Context session',
+      prompt: '',
+      status: 'idle',
+      kind: 'conversation',
+      created_by: 'routes-agent-user',
+      created_at: new Date().toISOString(),
+      completed_at: null,
+      result_summary: null,
+      last_im_jid: null,
+      spawned_from_jid: null,
+    });
+    const snapshots = await import('../src/run-context-snapshot.js');
+    snapshots.recordRunContextSnapshot({
+      chatJid: jid,
+      agentId: 'context-session',
+      turnId: 'runtime-turn',
+      audit: {
+        executionMode: 'container',
+        cwd: '/workspace/group',
+        claudeConfigDir: '/home/node/.claude',
+        claudeMd: { status: 'missing' },
+        rules: { status: 'missing', fileCount: 0 },
+        skills: { sources: [], manifestHash: 'empty-skills' },
+        mcp: { manifestHash: 'fixture', serverIds: ['commerce_fixture'] },
+        commerceagentPrompt: { totalBytes: 10, files: [] },
+        warnings: [],
+      },
+    });
+    const request = (body: unknown) =>
+      routes.request(`/${profile.id}/effective-capabilities`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    const response = await request({
+      workspace_jid: jid,
+      runtime_session_id: 'context-session',
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      run_context: { agentId: 'context-session', turnId: 'runtime-turn' },
+    });
+    const main = await request({ workspace_jid: jid });
+    expect(await main.json()).toMatchObject({ run_context: null });
+    expect(
+      (await request({ runtime_session_id: 'context-session' })).status,
+    ).toBe(400);
+    expect(
+      (await request({ workspace_jid: jid, runtime_session_id: 123 })).status,
+    ).toBe(400);
+    expect(
+      (await request({ workspace_jid: jid, runtime_session_id: 'unknown' }))
+        .status,
+    ).toBe(404);
+    db.createAgent({
+      id: 'foreign-context-session',
+      group_folder: 'other',
+      chat_jid: 'web:other',
+      name: 'Foreign',
+      prompt: '',
+      status: 'idle',
+      kind: 'conversation',
+      created_by: 'other-user',
+      created_at: new Date().toISOString(),
+      completed_at: null,
+      result_summary: null,
+      last_im_jid: null,
+      spawned_from_jid: null,
+    });
+    expect(
+      (
+        await request({
+          workspace_jid: jid,
+          runtime_session_id: 'foreign-context-session',
+        })
+      ).status,
+    ).toBe(404);
+    snapshots.clearRunContextSnapshots();
+  });
+
   test('rejects host context for members on create and patch', async () => {
     const createRes = await routes.request('/', {
       method: 'POST',

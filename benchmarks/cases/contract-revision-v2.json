@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "revision": "stage4-case-contract-v2",
+  "scope": "case contract repair; no model output or call limit changed",
+  "before": {
+    "dev/ad-review.yaml": "dfca2aca5363e832f736a3a0092ecc1684a5e9d14326b8de55d4edcc13791f8a",
+    "dev/customer-policy-actions.yaml": "32c009086a8eeedaa1ab08257fcad942f98248676108b8d657810dec6ddf5b9d",
+    "dev/customer-policy.yaml": "1c06e9078567d82bac82d7d74eb81856e1b41c5b30d81567a677099e8cf9a646",
+    "dev/product-compare.yaml": "359b5ba63e84d2423be64d76abf8b04c297f490a403b383c23e8a2065418c5b1",
+    "holdout/ad-review.yaml": "37833c00da88ec82f8e6e7fa481b2f19710629124998e59d9df2135566fa1faf",
+    "holdout/customer-policy.yaml": "e2aa60bc6f074d20c0b34546ec1523e0624bbf72c1fcbd7c3478b54bc722cef3",
+    "holdout/product-compare.yaml": "4f1e57ba3e06cd63dcf9f47c8b0784326bd0e29ecf1144c2d19bff0c8b9f8134"
+  },
+  "after": {
+    "dev/ad-review.yaml": "89ee85c52c01eff9e8b4db9e0c16ccc1a9eefc00ee860ddb9e78dfb63b10cbc1",
+    "dev/customer-policy-actions.yaml": "de597b96bfff5894f7a7a02c11587a6d8c050cfdc0fd73dc7e6df191066debdc",
+    "dev/customer-policy.yaml": "053ff98e3f936cfcd40e90a8b6e1e087f262168449809be515a2078748ca9ff2",
+    "dev/product-compare.yaml": "bf776c8ea257a87c941d8aa1b3eda544c46d794334b10358427797e81a9cd7a1",
+    "holdout/ad-review.yaml": "77ea56e5d94f08768f6305a11cf4696a54f81d41afb719e55ee81d1a2bea18c6",
+    "holdout/customer-policy.yaml": "f937b0bf50040ffb8adb398e52ca08db42f53514f98df28aba863489aa79e43b",
+    "holdout/product-compare.yaml": "bb4a18410a951a4276d932275822960f9e62766b6289d5b2b4efd80182e4b010"
+  },
+  "reasons": [
+    {
+      "ids": "all",
+      "reason": "Declare mandatory fact keys and meanings in public task input; permit additional facts and retrieved evidence."
+    },
+    {
+      "ids": "all ad report queries",
+      "reason": "Explicit absolute periods; overlap fixture lookup and covering-range/campaign-wide equivalent calls."
+    },
+    {
+      "ids": "all customer-policy",
+      "reason": "Explicit business date; amount-only queries distinguish arithmetic from return eligibility."
+    },
+    {
+      "ids": ["pc-01", "pc-03", "pc-05", "pc-06", "pc-09", "pc-14", "pc-15"],
+      "reason": "Make zero-price policy, budget and optimization criteria explicit; pc-06 now excludes zero-price and expects CH-220."
+    },
+    {
+      "ids": ["pc-10", "pc-16"],
+      "reason": "Correct stock-filtered evidence to BT-A; score capacity and requested warranty."
+    },
+    {
+      "ids": ["ad-03", "ad-04"],
+      "reason": "Replace undisclosed exact phrase and negation-unsafe causality regex with explicit boolean fact checks."
+    },
+    {
+      "ids": "refuse cases",
+      "reason": "Anchor forbidden action claims to affirmative sentences, preserving legitimate negated refusal."
+    },
+    {
+      "ids": ["cp-action-04"],
+      "reason": "Declare known market so policy lookup + handoff fits the unchanged 2-call cap."
+    }
+  ],
+  "caseCount": 68,
+  "standardReferenceHashes": {
+    "dev/ad-review.json": "1e1e51a4e0e178a45e67d0384dfa42050b610115ede1078a1ea131388aeb11e2",
+    "dev/customer-policy.json": "5144d20bd571f66530bc81078d0fc87771bfb8045b5efed6fab5c372e657147a",
+    "dev/product-compare.json": "1e371ca4cc64c3c43cca4a4753a16c7cb7dd4600b39d3c00e58381854b625b69",
+    "holdout/ad-review.json": "45a451a9c59fac84dc958024d79c8e0f9fd984f8233b9d54b9012cd8bc9be951",
+    "holdout/customer-policy.json": "20e99810d32fb6b19804e852fdeec8e168aba81462b7d46c7bb2df4b5ec14aa0",
+    "holdout/product-compare.json": "aba9cf2cc5923e3597dd4b278557259b2a8623e55f235f1407fe5dc664bc6189"
+  },
+  "codeHashes": {
+    "legacyCaseAssertions": "7ef6ace9d6c546a275b9ecb74f98771e018fc41767d067d1cafff137bb4d2104",
+    "currentCaseAssertions": "ab283f6bcdd786aa6e78ae2a1c8158857bd7fb48979d8c5bac017b0c43b3dc59",
+    "currentDateRange": "7de983b692a238c6aae016034258312c69754d21128f4522b544a44e9773058d",
+    "currentFixture": "8ae095a8f88b14dba96f2f434e03a419fef205eca34f53a9e633470bce79873f",
+    "currentProfile": "81a1fe0ce9f932518f83cd3d85dff37231f31bc1c15ff49698b203a75a4d5934",
+    "currentPromptRenderer": "99fa1a6287de812e7ff9c7c059182df92dd51930cc4a13e5d209af62d1078b2c",
+    "currentFailureReview": "32bdeb91ce675634c0f16f96d2d5e813a8c0295820bf55ac4ad8b784d95b1b8b",
+    "currentReferences": "8670bad4f29d6d7a6ed4827be7a1bb2ed750ab39ccff103466dd1a8e79cedcc7"
+  },
+  "referenceCount": 68,
+  "modelCallsAddedByRevision": 0,
+  "selfTestCommand": "npm run bench:selftest -- --all",
+  "lastSelfTest": {
+    "cases": 68,
+    "referencesPassed": 68,
+    "rejectedMutations": 932,
+    "realModelCalls": 0
+  }
+}

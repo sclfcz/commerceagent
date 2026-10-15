@@ -1,0 +1,41 @@
+# Prices bind to a model-and-origin fingerprint, never to an alias alone.
+# Rates are currency units per million tokens.
+effective_date: 2026-10-13
+currency: CNY
+assumptions:
+  - candidate-cn2 cache_read is mapped to the explicit cache-hit rate on the official model card; billing records have not been reconciled against a platform invoice.
+  - candidate-go uses the OpenCode Go published token rates in USD; reasoning tokens use the published output rate. The Go usage allowance is a subscription limit, not an additional per-token charge; subscription fees are not amortized into per-task cost.
+candidates:
+  candidate-cn1:
+    effective_date: 2026-10-12
+    currency: CNY
+    billing_region: cn-mainland
+    model_fingerprint: 143fd4fe83c9b45bb2a7d066ac5c0971670d4592263ffe98b909e4f9297a5c4c
+    input: 0.8
+    output: 2.7
+    cache_read: 0.1
+    cache_write: 1.25
+    reasoning: 2.7
+    source: https://www.qianwenai.com/models (cn-mainland official API price card; reasoning billed with output; checked 2026-10-12)
+  candidate-cn2:
+    effective_date: 2026-10-13
+    currency: CNY
+    billing_region: cn-mainland
+    model_fingerprint: ffccaa62ae22d7e1849fda94314d795ee6209bfbec94ab01ac0d0b657b7ef092
+    input: 12
+    output: 36
+    cache_read: 1
+    cache_write: 15
+    reasoning: 36
+    source: https://www.qianwenai.com/models/qwen3.8-max (cn-mainland official model card; explicit cache read/write rates; checked 2026-10-13)
+  candidate-go:
+    effective_date: 2026-10-14
+    currency: USD
+    billing_region: global
+    model_fingerprint: d64ecdbc13f722ed857e4a2316999db8382106ab9aa492dccc9a84efffe8a1e5
+    input: 0.1
+    output: 0.5
+    cache_read: 0.01
+    cache_write: 0.125
+    reasoning: 0.5
+    source: https://dev.opencode.ai/v2/docs/console/go/ (official OpenCode Go Messages endpoint price table; global service; checked 2026-10-14; reasoning priced at output rate per assumption)

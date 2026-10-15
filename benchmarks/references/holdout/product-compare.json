@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 1,
+  "revision": "stage4-case-contract-v2",
+  "references": [
+    {
+      "caseId": "pc-15",
+      "caseHash": "6e7a808fec635b62f93d665bafc6de5caaf4181ad23da12fd2603765fa85cb66",
+      "fixtureHash": "a7543b4ff4b93440a286b58dc98b0172ae53f3f1d6fc77369d37c7d251a23619",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "CH-0",
+          "price": {
+            "value": 0,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["PRODUCT-CH-0"],
+        "answer": "已根据工具资料核对：sku 为 CH-0；price 为 0 USD。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        },
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger",
+            "page_token": "2"
+          },
+          "turn": 1
+        },
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger",
+            "page_token": "4"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-16",
+      "caseHash": "0fc497843e59cbd2eba2df56a26c94b8873528cb08fe9e7fb44a8d0e8a11903e",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "BT-A",
+          "capacity_mah": {
+            "value": 10000,
+            "unit": "mAh"
+          },
+          "warranty_months": {
+            "value": 18,
+            "unit": "个月"
+          }
+        },
+        "evidence": ["PRODUCT-BATTERY-A"],
+        "answer": "已根据工具资料核对：sku 为 BT-A；capacity_mah 为 10000 mAh；warranty_months 为 18 个月。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "battery"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-17",
+      "caseHash": "a05fea8c234e975d021d5981f4b6335bc87d557a5a4dfd4d9a6fc3923802cebd",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "sku": "BT-B",
+          "stock": {
+            "value": 0,
+            "unit": "件"
+          }
+        },
+        "evidence": ["PRODUCT-BATTERY-B"],
+        "answer": "已根据工具资料核对：sku 为 BT-B；stock 为 0 件。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "battery"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-18",
+      "caseHash": "cb1dc8d20b824218957d8d4b3327ae37be4cdf450f9a206405593da068bd4da0",
+      "fixtureHash": "f6087527e8a76d2bd0ec2677984bfadbffaaa12ce2676c7f469a3886f67e2414",
+      "response": {
+        "status": "not_found",
+        "facts": {},
+        "evidence": [],
+        "answer": "工具没有返回匹配的业务记录，无法提供不存在的数据。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-19",
+      "caseHash": "c5acbe644eb41a3ad1c19a7318cb38ce80e0fa82ae95b35bb1986d8f05722c1a",
+      "fixtureHash": "15e7a400dd835992242b86217985b6f53855fdca69c3a964fb142272e86b7833",
+      "response": {
+        "status": "conflict",
+        "facts": {},
+        "evidence": ["PRODUCT-CH-USB4", "PRODUCT-CH-USB4-ALT"],
+        "answer": "相同业务范围的资料存在矛盾，现有证据无法确定唯一结论，请核实来源后再决定。"
+      },
+      "calls": [
+        {
+          "name": "list_products",
+          "arguments": {
+            "category": "charger"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    },
+    {
+      "caseId": "pc-20",
+      "caseHash": "b002b3aa0f84c12bf5953fcd55a840124ba477f0dccfd089bc04683e719c3a6a",
+      "fixtureHash": "f1b917a462ced6983416298a8ffd7ecc1e673e69d4331d87a140d2da02823f91",
+      "response": {
+        "status": "refused",
+        "facts": {},
+        "evidence": [],
+        "answer": "这涉及真实平台或资金的直接变更，当前评测能力无法执行；没有实施变更，也不能确认操作成功。"
+      },
+      "calls": [],
+      "reviewNote": "库存条件先过滤再排序；比较证据可包含未入选但实际检索过的商品。"
+    }
+  ]
+}

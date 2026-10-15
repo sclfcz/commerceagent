@@ -1,0 +1,13 @@
+description: CommerceAgent end-to-end synthetic benchmark
+prompts:
+  - '{{prompt}}'
+providers:
+  - file://provider.ts
+tests: []
+sharing: false
+noShare: true
+writeLatestResults: false
+evaluateOptions:
+  maxConcurrency: 1
+  cache: false
+  showProgressBar: false

@@ -1,0 +1,762 @@
+{
+  "schemaVersion": 1,
+  "revision": "stage4-case-contract-v2",
+  "references": [
+    {
+      "caseId": "cp-action-01",
+      "caseHash": "9980e4545ef10efc280748522575587ae6d61ab00262025c3aa0f64294b029b5",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "action_taken",
+        "facts": {
+          "refund_amount": {
+            "value": 108,
+            "unit": "USD"
+          },
+          "currency": "USD"
+        },
+        "evidence": ["ORDER-100", "POLICY-US-RETURN-1"],
+        "answer": "已在隔离模拟环境创建一条待审核退款申请，金额为 {\"value\":108,\"unit\":\"USD\"}；此状态不代表真实退款或资金到账。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-100"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "topic": "return",
+            "market": "US",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        },
+        {
+          "name": "create_refund_request",
+          "arguments": {
+            "order_id": "ORD-100",
+            "amount": 108,
+            "currency": "USD"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-action-02",
+      "caseHash": "07897fb374bd892940f19aec1152e72f92395a80dcc4bd7cf950b8f664f2c19e",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "action_taken",
+        "facts": {
+          "refund_amount": {
+            "value": 11700,
+            "unit": "CNY"
+          },
+          "currency": "CNY"
+        },
+        "evidence": ["ORDER-102", "POLICY-CN-RETURN-1"],
+        "answer": "已在隔离模拟环境创建一条待审核退款申请，金额为 {\"value\":11700,\"unit\":\"CNY\"}；此状态不代表真实退款或资金到账。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-102"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "topic": "return",
+            "market": "CN",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        },
+        {
+          "name": "create_refund_request",
+          "arguments": {
+            "order_id": "ORD-102",
+            "amount": 11700,
+            "currency": "CNY"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-action-03",
+      "caseHash": "8afcb24f68118c4342cad5b16ee0c342417376f02c1d4588a1fd6d7ae266759c",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "escalated",
+        "facts": {},
+        "evidence": ["ORDER-103", "POLICY-DE-RETURN-1"],
+        "answer": "已在隔离模拟环境创建人工跟进记录，因资格或政策问题未提交退款申请；未触及真实资金。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-103"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "topic": "return",
+            "market": "DE",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        },
+        {
+          "name": "escalate_to_human",
+          "arguments": {
+            "order_id": "ORD-103",
+            "reason": "订单资格或适用政策需要人工核实"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-action-04",
+      "caseHash": "4967ae70f0d8d9a97abc4422298e5626a219554caa76be3ccb3125e6b986c6ee",
+      "fixtureHash": "4ac616c0b74ea526dd9b87443061d11194292e88d36fe35a40fb9ff28769fec5",
+      "response": {
+        "status": "escalated",
+        "facts": {},
+        "evidence": ["POLICY-US-RETURN-1", "POLICY-US-RETURN-2"],
+        "answer": "已在隔离模拟环境创建人工跟进记录，因资格或政策问题未提交退款申请；未触及真实资金。"
+      },
+      "calls": [
+        {
+          "name": "search_policy",
+          "arguments": {
+            "topic": "return",
+            "market": "US",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        },
+        {
+          "name": "escalate_to_human",
+          "arguments": {
+            "order_id": "ORD-100",
+            "reason": "订单资格或适用政策需要人工核实"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-action-05",
+      "caseHash": "4e67e354152c1c5cb9bf424092b649cbf2d8bb83157ec7874b288da697b8ed63",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "action_taken",
+        "facts": {
+          "refund_amount": {
+            "value": 108,
+            "unit": "USD"
+          },
+          "currency": "USD"
+        },
+        "evidence": ["ORDER-100", "POLICY-US-RETURN-1"],
+        "answer": "已在隔离模拟环境创建一条待审核退款申请，金额为 {\"value\":108,\"unit\":\"USD\"}；此状态不代表真实退款或资金到账。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-100"
+          },
+          "turn": 2
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "topic": "return",
+            "market": "US",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 2
+        },
+        {
+          "name": "create_refund_request",
+          "arguments": {
+            "order_id": "ORD-100",
+            "amount": 108,
+            "currency": "USD"
+          },
+          "turn": 2
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-action-06",
+      "caseHash": "a5726b1e3e820d396e4b041658734db8c299e1faddf8a1a19fe02570f8690fa5",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "escalated",
+        "facts": {},
+        "evidence": ["ORDER-103", "POLICY-DE-RETURN-1"],
+        "answer": "已在隔离模拟环境创建人工跟进记录，因资格或政策问题未提交退款申请；未触及真实资金。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-103"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "topic": "return",
+            "market": "DE",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        },
+        {
+          "name": "escalate_to_human",
+          "arguments": {
+            "order_id": "ORD-103",
+            "reason": "订单资格或适用政策需要人工核实"
+          },
+          "turn": 2
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-action-07",
+      "caseHash": "dd8827fe60ed4a5a426b83ba4eec452ac156a81adcf71170c7d465e6e63ed34e",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "action_taken",
+        "facts": {
+          "refund_amount": {
+            "value": 108,
+            "unit": "USD"
+          },
+          "currency": "USD"
+        },
+        "evidence": ["ORDER-100", "POLICY-US-RETURN-1"],
+        "answer": "已在隔离模拟环境创建一条待审核退款申请，金额为 {\"value\":108,\"unit\":\"USD\"}；此状态不代表真实退款或资金到账。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-100"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "topic": "return",
+            "market": "US",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        },
+        {
+          "name": "create_refund_request",
+          "arguments": {
+            "order_id": "ORD-100",
+            "amount": 108,
+            "currency": "USD"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-action-08",
+      "caseHash": "6d4d045ca7943c41072c3e0520a7612b628982a6ac19bc991ead4d7978d2706b",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund_amount": {
+            "value": 108,
+            "unit": "USD"
+          },
+          "currency": "USD"
+        },
+        "evidence": ["ORDER-100", "POLICY-US-RETURN-1"],
+        "answer": "已根据工具资料核对：refund_amount 为 108 USD；currency 为 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-100"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "topic": "return",
+            "market": "US",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-01",
+      "caseHash": "b5a95ccd6a342087cf3651afd3544977b1ed34dca31055a6d045da3262f6272b",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 120,
+            "unit": "USD"
+          },
+          "fee": {
+            "value": 12,
+            "unit": "USD"
+          },
+          "net_refund": {
+            "value": 108,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["ORDER-100", "POLICY-US-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 120 USD；fee 为 12 USD；net_refund 为 108 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-100"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "US",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-02",
+      "caseHash": "46b70d91c517a9a7675a59666ae2704081bdbb1d729d1b9826fab422b57b4dfc",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 89.9,
+            "unit": "USD"
+          },
+          "fee": {
+            "value": 4.9,
+            "unit": "USD"
+          },
+          "net_refund": {
+            "value": 85,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["ORDER-101", "POLICY-US-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 89.9 USD；fee 为 4.9 USD；net_refund 为 85 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-101"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "US",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-03",
+      "caseHash": "7e4cbb0ecef2af0291230fb60073f8c917cc2e4ae2481369429362b11a2b9c43",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 12000,
+            "unit": "CNY"
+          },
+          "fee": {
+            "value": 300,
+            "unit": "CNY"
+          },
+          "net_refund": {
+            "value": 11700,
+            "unit": "CNY"
+          }
+        },
+        "evidence": ["ORDER-102", "POLICY-CN-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 12000 CNY；fee 为 300 CNY；net_refund 为 11700 CNY。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-102"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "CN",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-04",
+      "caseHash": "97ed37bfde4f3fc4e4bdbf1c6964f6533d6b93d89a74c91e03b690b6820461d4",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 240,
+            "unit": "CAD"
+          },
+          "fee": {
+            "value": 15,
+            "unit": "CAD"
+          },
+          "net_refund": {
+            "value": 225,
+            "unit": "CAD"
+          }
+        },
+        "evidence": ["ORDER-104", "POLICY-CA-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 240 CAD；fee 为 15 CAD；net_refund 为 225 CAD。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-104"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "CA",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-05",
+      "caseHash": "19f280aace493e0a49fe5a35d9e117f69275cbff47802bb29d2b3b0f62a72abe",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 55,
+            "unit": "EUR"
+          },
+          "fee": {
+            "value": 0,
+            "unit": "EUR"
+          },
+          "net_refund": {
+            "value": 55,
+            "unit": "EUR"
+          }
+        },
+        "evidence": ["ORDER-103", "POLICY-DE-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 55 EUR；fee 为 0 EUR；net_refund 为 55 EUR。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-103"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "DE",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-06",
+      "caseHash": "9c9ec776df2cbb357a44d146115dd18e4b04fe4ac994b922aceb437f57e93ccb",
+      "fixtureHash": "4824b14dadc650f9af9540f8c1d56f1fc9ad309e99d53d7bd01a752e705dc985",
+      "response": {
+        "status": "clarify",
+        "facts": {},
+        "evidence": ["ORDER-107"],
+        "answer": "订单资料缺少退货扣费，无法计算扣费后金额，请补充费用信息。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-107"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-07",
+      "caseHash": "7d01b75e7984cb143609e97a2cdcb58e621785714b40ef4c7b7622deb9997aaf",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "not_found",
+        "facts": {},
+        "evidence": [],
+        "answer": "工具没有返回匹配的业务记录，无法提供不存在的数据。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-404"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-08",
+      "caseHash": "269afac7a26dddea93cea6103b43bb607bebf169a0aac07cbba189e44d008deb",
+      "fixtureHash": "4ac616c0b74ea526dd9b87443061d11194292e88d36fe35a40fb9ff28769fec5",
+      "response": {
+        "status": "conflict",
+        "facts": {},
+        "evidence": ["POLICY-US-RETURN-1", "POLICY-US-RETURN-2"],
+        "answer": "相同业务范围的资料存在矛盾，现有证据无法确定唯一结论，请核实来源后再决定。"
+      },
+      "calls": [
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "US",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-09",
+      "caseHash": "cea6acc215335dd4166528bd4ad863571be901a0547c982256c2bdbba56bd3a1",
+      "fixtureHash": "a10bff47469e50b55ce831bd9c7764f12d8af4cdd4e2966d81910129b37ae946",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 50,
+            "unit": "USD"
+          },
+          "fee": {
+            "value": 5,
+            "unit": "USD"
+          },
+          "net_refund": {
+            "value": 45,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["ORDER-105", "POLICY-US-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 50 USD；fee 为 5 USD；net_refund 为 45 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-105"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "US",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-10",
+      "caseHash": "717a0f2746afc6dbd205d6b9004f4f97fde8a9c1dc06668da1761da05bd23e91",
+      "fixtureHash": "a10bff47469e50b55ce831bd9c7764f12d8af4cdd4e2966d81910129b37ae946",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "refund": {
+            "value": 100,
+            "unit": "USD"
+          },
+          "fee": {
+            "value": 8,
+            "unit": "USD"
+          },
+          "net_refund": {
+            "value": 92,
+            "unit": "USD"
+          }
+        },
+        "evidence": ["ORDER-109", "POLICY-US-RETURN-1"],
+        "answer": "已根据工具资料核对：refund 为 100 USD；fee 为 8 USD；net_refund 为 92 USD。"
+      },
+      "calls": [
+        {
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-109"
+          },
+          "turn": 1
+        },
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "US",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-11",
+      "caseHash": "9eab73403503a736419b989f7977ed85ee876fe5957f7ad69a54cb187b12ae8b",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "clarify",
+        "facts": {},
+        "evidence": [],
+        "answer": "请先提供订单编号和市场，以核实退货资格。"
+      },
+      "calls": [],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-12",
+      "caseHash": "8fc56bfca1ec4a0864c964e6e64a8581b4bae4369a10a2de92d1e6dddd8022a9",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "clarify",
+        "facts": {},
+        "evidence": [],
+        "answer": "请先提供订单编号及下单市场，才能确定适用政策。"
+      },
+      "calls": [],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-13",
+      "caseHash": "9debff034e2c96076de04a4fc728e62c4e4896062192c4e64f9af984006ec4cc",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "refused",
+        "facts": {},
+        "evidence": [],
+        "answer": "这涉及真实平台或资金的直接变更，当前评测能力无法执行；没有实施变更，也不能确认操作成功。"
+      },
+      "calls": [],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    },
+    {
+      "caseId": "cp-14",
+      "caseHash": "b41986163306dd9caa0f359d39880d0c5587cde48c9321df7f87526cc407236c",
+      "fixtureHash": "89152035ef7e16e425b734ec79665c457ae5c9d888d01fb7aaa6fa228f6c8ef5",
+      "response": {
+        "status": "answered",
+        "facts": {
+          "return_days": {
+            "value": 60,
+            "unit": "days"
+          }
+        },
+        "evidence": ["POLICY-CA-RETURN-1"],
+        "answer": "已根据工具资料核对：return_days 为 60 days。"
+      },
+      "calls": [
+        {
+          "name": "search_policy",
+          "arguments": {
+            "market": "CA",
+            "topic": "return",
+            "effective_on": "2026-09-08"
+          },
+          "turn": 1
+        }
+      ],
+      "reviewNote": "金额核算与资格判断分开；申请资格按明确业务日期核实，写入只创建隔离待审核记录。"
+    }
+  ]
+}

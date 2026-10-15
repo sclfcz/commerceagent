@@ -41,7 +41,14 @@ function openOrCreateDirectory(parentFd, component, boundary) {
     childFd = fs.openSync(childPath, DIRECTORY_FLAGS);
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
-    fs.mkdirSync(childPath, { mode: 0o700 });
+    try {
+      fs.mkdirSync(childPath, { mode: 0o700 });
+    } catch (createError) {
+      // Sessions share the workspace extra root. Another startup may create
+      // this directory between open and mkdir; reopen with the same no-follow
+      // flags and mount-boundary validation instead of trusting EEXIST.
+      if (createError?.code !== 'EEXIST') throw createError;
+    }
     childFd = fs.openSync(childPath, DIRECTORY_FLAGS);
   }
   try {

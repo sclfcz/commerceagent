@@ -186,6 +186,13 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 `effective-capabilities` 返回 PromptPlan、Skill/MCP Manifest、上下文预算和最近一次
 脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”。
 
+请求可携带 `workspace_jid`；同时携带 `runtime_session_id` 时返回该 Runtime Session
+的快照，省略时返回主会话快照。工作区必须属于当前用户及目标 Profile，Session 必须属于
+该工作区；缺少工作区或 Session ID 类型错误返回 400，Session 不存在或属于其他工作区返回 404。
+
+Runtime Session 的实时 `new_message.message.provider_failure=true` 表示宿主确认的上游失败回复；
+该字段用于区分失败通知和正常业务答案，不改变 `run_finished` 的生命周期语义。
+
 `POST /api/agent-profiles` 只创建隔离的 AgentProfile。它不会隐式创建 Workspace、
 Session 或 Memory，也不会绑定/复制 Home Workspace。用户必须在创建 Workspace 时
 显式选择它，或通过上面的非 Home Workspace 迁移接口建立归属。内置 CommerceAgent 的

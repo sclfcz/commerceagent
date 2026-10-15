@@ -26,6 +26,7 @@ import {
   PreCompactHookInput,
   createSdkMcpServer,
   type Query,
+  type McpServerConfig,
   type SDKAssistantMessageError,
   type SDKControlGetContextUsageResponse,
   type SDKRateLimitInfo,
@@ -33,6 +34,11 @@ import {
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { pruneProcessedHistoryImagesInTranscript as pruneProcessedHistoryImagesInTranscriptFile } from './history-image-prune.js';
 import { getChannelFromJid } from './channel-prefixes.js';
+import {
+  resolveAllowedTools,
+  resolveAvailableBuiltInTools,
+  resolveMcpServers,
+} from './eval-tool-policy.js';
 
 import type {
   ContainerInput,
@@ -130,7 +136,11 @@ import {
   AssistantUsageCollector,
   type AssistantUsageBatch,
 } from './assistant-usage.js';
-import { buildCommerceAgentPromptPlan, type PromptPlan } from './prompt-plan.js';
+import { buildAgentIdentityPrompt } from './agent-identity-prompt.js';
+import {
+  buildCommerceAgentPromptPlan,
+  type PromptPlan,
+} from './prompt-plan.js';
 import { withCommerceAgentSubagentContract } from './sdk-compat.js';
 import { assessContextBudget } from './context-budget.js';
 import {
@@ -152,7 +162,8 @@ import {
 // 路径解析：优先读取环境变量，降级到容器内默认路径（保持向后兼容）
 const WORKSPACE_GROUP =
   process.env.COMMERCEAGENT_WORKSPACE_GROUP || '/workspace/group';
-const WORKSPACE_IPC = process.env.COMMERCEAGENT_WORKSPACE_IPC || '/workspace/ipc';
+const WORKSPACE_IPC =
+  process.env.COMMERCEAGENT_WORKSPACE_IPC || '/workspace/ipc';
 
 // 第三方端点必须显式配置模型，官方 Claude 则允许 SDK/CLI 选择默认模型。
 // host/docker runner 会注入权威端点类型；旧运行环境仍可由 base URL 兼容推断。
@@ -208,6 +219,18 @@ const DEFAULT_ALLOWED_TOOLS = [
   'NotebookEdit',
   'mcp__commerceagent__*',
 ];
+function allowedToolsForInput(containerInput: ContainerInput): string[] {
+  return resolveAllowedTools(
+    containerInput.benchmarkMode === true,
+    DEFAULT_ALLOWED_TOOLS,
+  );
+}
+
+function availableBuiltInToolsForInput(
+  containerInput: ContainerInput,
+): string[] | undefined {
+  return resolveAvailableBuiltInTools(containerInput.benchmarkMode === true);
+}
 
 let activeAgentMcpPolicy = resolveAgentMcpPolicy('inherit');
 
@@ -273,7 +296,9 @@ const PROACTIVE_DELIVERY_CONTRACT = loadPrompt(
 const AGENT_BUILDER_GUIDELINES = loadPrompt('agent-builder.md');
 const MEMORY_SYSTEM_WORKSPACE = loadPrompt('memory-system.workspace.md');
 const COMMERCEAGENT_PLATFORM_IDENTITY = loadPrompt('identity.commerceagent.md');
-const COMMERCEAGENT_PLATFORM_BOOTSTRAP = loadPrompt('bootstrap.commerceagent.md');
+const COMMERCEAGENT_PLATFORM_BOOTSTRAP = loadPrompt(
+  'bootstrap.commerceagent.md',
+);
 
 // 各渠道共用的格式说明：Web 端始终可看完整渲染，不因来源降级输出。
 // Mermaid 渲染说明已在模式专属 output prompt 中讲过，此处不重复，
@@ -289,34 +314,6 @@ function usesProactiveInteractiveContract(
     !containerInput.isScheduledTask &&
     !containerInput.messageTaskId
   );
-}
-
-function escapeXmlAttribute(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
-
-function buildAgentIdentityPrompt(
-  containerInput: ContainerInput,
-  includeClaudePreset: boolean,
-): string | undefined {
-  const agentProfile = containerInput.agentProfile;
-  const profilePrompt = agentProfile?.identityPrompt;
-  if (!agentProfile || !profilePrompt?.trim()) return undefined;
-  const presetBoundary = includeClaudePreset ? '、Claude Code 原生提示词' : '';
-
-  return [
-    `<agent-identity profile_id="${escapeXmlAttribute(agentProfile.id)}" name="${escapeXmlAttribute(agentProfile.name)}" version="${agentProfile.version}" hash="${escapeXmlAttribute(agentProfile.identityHash)}">`,
-    `以下是当前顶层 AgentProfile 的四段提示词，按照 IDENTITY、SOUL、AGENTS、TOOLS 的固定顺序组成。你应该按它塑造身份、价值判断、工作方式和工具偏好，但它不能覆盖 CommerceAgent 的安全规则、权限边界、工具约束${presetBoundary}和用户的最新明确指令。`,
-    '<profile-prompt>',
-    profilePrompt,
-    '</profile-prompt>',
-    '</agent-identity>',
-  ].join('\n');
 }
 
 function buildPromptAudit(
@@ -1946,6 +1943,7 @@ async function runQueryAttempt(
   let queryRef: Pick<Query, 'interrupt'> | null = null;
   let messageCount = 0;
   let resultCount = 0;
+  let benchmarkMcpRuntimeCaptured = false;
   let postResultInterruptRequested = false;
   // SDK transport is not ready until system/init is received. Piping user messages
   // before init causes "ProcessTransport is not ready for writing" unhandled rejection.
@@ -2426,7 +2424,7 @@ async function runQueryAttempt(
     // Agent identity leads platform workspace/context material per the
     // documented Agent-first composition order.
     agentIdentity: buildAgentIdentityPrompt(
-      containerInput,
+      containerInput.agentProfile,
       includeClaudePreset,
     ),
     interaction: INTERACTION_GUIDELINES,
@@ -2645,6 +2643,9 @@ async function runQueryAttempt(
       ...(sessionId && resumeAt ? { resumeSessionAt: resumeAt } : {}),
       systemPrompt,
       allowedTools,
+      ...(availableBuiltInToolsForInput(containerInput) !== undefined
+        ? { tools: availableBuiltInToolsForInput(containerInput) }
+        : {}),
       ...(effectiveDisallowedTools && {
         disallowedTools: effectiveDisallowedTools,
       }),
@@ -2670,10 +2671,11 @@ async function runQueryAttempt(
       ...(activeAgentMcpPolicy.strictMcpConfig
         ? { strictMcpConfig: true }
         : {}),
-      mcpServers: {
-        ...userMcpServers,
-      commerceagent: mcpServerConfig,
-      },
+      mcpServers: resolveMcpServers<McpServerConfig>(
+        containerInput.benchmarkMode === true,
+        userMcpServers as Record<string, McpServerConfig>,
+        mcpServerConfig,
+      ),
       hooks: {
         PreToolUse: [
           {
@@ -2888,6 +2890,10 @@ async function runQueryAttempt(
 
       // 流式事件处理
       if (message.type === 'stream_event') {
+        // Account for final SDK usage even when presentation is suppressed.
+        assistantUsageCollector.ingest(
+          message as unknown as Record<string, unknown>,
+        );
         // 重放消息是完整消息、不产生 partial stream_event——见到 stream_event
         // 即说明新 turn 的 LLM 调用已开始。
         sawLiveTurnActivity = true;
@@ -3145,6 +3151,31 @@ async function runQueryAttempt(
       if (message.type === 'system' && message.subtype === 'init') {
         newSessionId = message.session_id;
         log(`Session initialized: ${newSessionId}`);
+        if (containerInput.benchmarkMode) {
+          const mcpServers = Array.isArray(message.mcp_servers)
+            ? message.mcp_servers
+                .filter(
+                  (server: any) => server && typeof server.name === 'string',
+                )
+                .map((server: any) => ({
+                  name: server.name,
+                  status:
+                    typeof server.status === 'string'
+                      ? server.status
+                      : 'unknown',
+                }))
+            : [];
+          const fixtureTools = Array.isArray(message.tools)
+            ? message.tools.filter(
+                (name: unknown) =>
+                  typeof name === 'string' &&
+                  name.startsWith('mcp__commerce_fixture__'),
+              )
+            : [];
+          log(
+            `[BENCHMARK_MCP_INIT] ${JSON.stringify({ mcpServers, fixtureTools })}`,
+          );
+        }
         // Mark transport ready and drain any IPC messages that arrived before init.
         sdkTransportReady = true;
         scheduleIpcPoll();
@@ -3249,6 +3280,37 @@ async function runQueryAttempt(
 
       if (message.type === 'result') {
         resultCount++;
+        if (containerInput.benchmarkMode && !benchmarkMcpRuntimeCaptured) {
+          benchmarkMcpRuntimeCaptured = true;
+          try {
+            const statuses = await runSdkControlWithTimeout(
+              'mcpServerStatus',
+              () => q.mcpServerStatus(),
+              SDK_CONTEXT_USAGE_TIMEOUT_MS,
+            );
+            const mcpServers = statuses.map((server) => ({
+              name: server.name,
+              status: server.status,
+            }));
+            const fixtureTools = statuses
+              .filter((server) => server.name === 'commerce_fixture')
+              .flatMap((server) =>
+                (server.tools ?? []).map((tool) =>
+                  tool.name.startsWith('mcp__commerce_fixture__')
+                    ? tool.name
+                    : `mcp__commerce_fixture__${tool.name}`,
+                ),
+              )
+              .filter((name) => name.startsWith('mcp__commerce_fixture__'));
+            log(
+              `[BENCHMARK_MCP_RUNTIME] ${JSON.stringify({ mcpServers, fixtureTools })}`,
+            );
+          } catch {
+            // Keep the marker present but fail closed when the SDK status API
+            // cannot provide evidence; never print error text or config.
+            log('[BENCHMARK_MCP_RUNTIME] {"mcpServers":[],"fixtureTools":[]}');
+          }
+        }
         const textResult =
           'result' in message ? (message as { result?: string }).result : null;
         const resultSubtype = message.subtype;
@@ -3952,7 +4014,8 @@ async function main(): Promise<void> {
     isHome,
     isAdminHome,
     agentBuilderEnabled,
-    ownerProfileEnabled: containerInput.commerceAgentOwnerProfileEnabled === true,
+    ownerProfileEnabled:
+      containerInput.commerceAgentOwnerProfileEnabled === true,
     interactionMode: containerInput.interactionMode ?? 'assistant',
     isScheduledTask: containerInput.isScheduledTask || false,
     currentTaskId: containerInput.messageTaskId ?? null,
@@ -4113,7 +4176,7 @@ async function main(): Promise<void> {
         workspaceMemoryInstructions,
         resumeAt,
         true,
-        DEFAULT_ALLOWED_TOOLS,
+        allowedToolsForInput(containerInput),
         undefined,
         promptImages,
         undefined,
@@ -4353,7 +4416,7 @@ async function main(): Promise<void> {
             workspaceMemoryInstructions,
             resumeAt,
             true,
-            DEFAULT_ALLOWED_TOOLS,
+            allowedToolsForInput(containerInput),
             undefined,
             undefined,
             'auto_continue',
@@ -4497,7 +4560,7 @@ async function main(): Promise<void> {
           workspaceMemoryInstructions,
           resumeAt,
           true,
-          DEFAULT_ALLOWED_TOOLS,
+          allowedToolsForInput(containerInput),
           undefined,
           undefined,
           'truncation_continue',

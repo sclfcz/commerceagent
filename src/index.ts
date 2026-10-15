@@ -9417,12 +9417,13 @@ async function runAgent(
   const commerceAgentBootstrapPending =
     commerceAgentOwnerProfile?.onboarding.state === 'pending' ||
     commerceAgentOwnerProfile?.onboarding.state === 'claimed';
-  const commerceAgentOwnerProfileEnabled = isCommerceAgentOwnerProfileRuntimeEligible({
-    group,
-    profile: resolvedAgentProfile,
-    turnId,
-    isScheduledTask: Boolean(messageTaskId),
-  });
+  const commerceAgentOwnerProfileEnabled =
+    isCommerceAgentOwnerProfileRuntimeEligible({
+      group,
+      profile: resolvedAgentProfile,
+      turnId,
+      isScheduledTask: Boolean(messageTaskId),
+    });
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -15859,6 +15860,7 @@ async function processAgentConversation(
             sdk_message_uuid: output.sdkMessageUuid ?? null,
             source_kind: output.sourceKind || 'sdk_final',
             finalization_reason: output.finalizationReason || 'completed',
+            ...(output.providerFailure ? { provider_failure: true } : {}),
             workflow_runs: holdReason
               ? activeAgentWorkflowRuns
               : completedAgentWorkflowRuns,
@@ -16296,16 +16298,15 @@ async function processAgentConversation(
       runtimeAgentId: agentId,
       runtimeAgentKind: agent.kind,
     });
-    const commerceAgentOwnerProfileEnabled = isCommerceAgentOwnerProfileRuntimeEligible(
-      {
+    const commerceAgentOwnerProfileEnabled =
+      isCommerceAgentOwnerProfileRuntimeEligible({
         group: effectiveGroup,
         profile: agentProfile,
         turnId: lastProcessed.id,
         isScheduledTask: Boolean(lastProcessed.task_id),
         runtimeAgentId: agentId,
         runtimeAgentKind: agent.kind,
-      },
-    );
+      });
     const containerInput: ContainerInput = {
       prompt,
       sessionId,
@@ -21383,6 +21384,8 @@ async function main(): Promise<void> {
   setInterval(() => {
     void checkImBindingsHealth();
   }, IM_BINDING_HEALTH_CHECK_INTERVAL);
+  // Parent-managed instances provision only after startup cleanup and queue wiring.
+  process.send?.({ type: 'commerceagent_ready' });
 }
 
 async function checkImBindingsHealth(): Promise<void> {

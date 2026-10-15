@@ -1,0 +1,4 @@
+id: baseline
+description: 当前基线 Profile，不追加额外提示或工具变更。
+prompt_append: {}
+runtime_policy_overrides: {}
