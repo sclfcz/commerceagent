@@ -344,6 +344,7 @@ export async function main() {
   };
   privateJson(path.join(promptfooDirectory, 'resolved-config.json'), suite);
 
+  let stage = 'promptfoo_evaluation';
   try {
     const { evaluate } = await import('promptfoo');
     const evaluation = await evaluate(suite as never, {
@@ -387,6 +388,7 @@ export async function main() {
       expected,
       actual,
     });
+    stage = 'independent_reassessment';
     const independent = reassessPromptfoo(runDirectory);
     const report = {
       ...independent,
@@ -445,9 +447,13 @@ export async function main() {
         !independent.measurementValidityGate.passed)
     )
       process.exitCode = 1;
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '';
+    const code = /^[a-z][a-z0-9_:-]+$/i.test(message)
+      ? message
+      : `benchmark_${stage}_failed`;
     process.stderr.write(
-      'Promptfoo benchmark failed; private diagnostics retained\n',
+      `错误码: ${code}\n处理提示：检查本次运行目录中的 Promptfoo 结果、执行序列和复评证据。\n`,
     );
     process.exitCode = 1;
   }
@@ -457,9 +463,13 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 )
-  void main().catch(() => {
+  void main().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : '';
+    const code = /^[a-z][a-z0-9_:-]+$/i.test(message)
+      ? message
+      : 'benchmark_setup_failed';
     process.stderr.write(
-      'Promptfoo benchmark failed; private diagnostics retained\n',
+      `错误码: ${code}\n处理提示：检查 benchmark 参数、候选配置及隔离运行目录。\n`,
     );
     process.exitCode = 1;
   });

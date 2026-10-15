@@ -240,7 +240,10 @@ export async function runBenchmarkSelfTest() {
         );
       if (!runId) throw new Error(`selftest_${scenario}_artifacts_missing`);
       const runDirectory = path.join(resultsRoot, runId);
-      if (commandFailure && scenario !== 'upstream_error') {
+      if (
+        commandFailure &&
+        !fs.existsSync(path.join(runDirectory, 'summary.json'))
+      ) {
         const detail = commandFailure as Error & { stderr?: string };
         const innerCode = detail.stderr?.match(
           /错误码:\s*([a-z0-9_:-]+)/i,
@@ -248,36 +251,53 @@ export async function runBenchmarkSelfTest() {
         throw new Error(
           innerCode
             ? `selftest_${scenario}_${innerCode}`
-            : `selftest_${scenario}_runner_command_failed`,
+            : scenario === 'upstream_error'
+              ? 'selftest_upstream_error_artifacts_incomplete'
+              : `selftest_${scenario}_runner_command_failed`,
         );
       }
-      if (
-        commandFailure &&
-        !fs.existsSync(path.join(runDirectory, 'summary.json'))
-      )
-        throw new Error('selftest_upstream_error_artifacts_incomplete');
       const summary = JSON.parse(
         fs.readFileSync(path.join(runDirectory, 'summary.json'), 'utf8'),
       );
-      return { runDirectory, summary, result: summary.results?.[0] };
+      return {
+        runDirectory,
+        summary,
+        result: summary.results?.[0],
+        commandFailed: commandFailure !== null,
+      };
     };
 
     const normal = await runAttempt('normal', 'cp-01');
     const independent = normal.summary;
     const attemptResult = normal.result;
-    if (
-      independent.invalidRun ||
-      !independent.evidenceComplete ||
-      !independent.executionOrderValid ||
-      !independent.providerParityValid ||
-      independent.successfulFixtureCalls < 2 ||
-      attemptResult?.measurementValid !== true ||
-      attemptResult?.businessPass !== true ||
-      !attemptResult?.gates?.mcpRuntimeReady ||
-      !attemptResult?.gates?.usageReconciled ||
-      fake.requests < 3
-    )
-      throw new Error('selftest_end_to_end_assessment_failed');
+    if (normal.commandFailed && attemptResult?.measurementValid !== true) {
+      const failure = attemptResult?.measurementFailure;
+      throw new Error(
+        typeof failure === 'string'
+          ? `selftest_normal_measurement_${failure}`
+          : 'selftest_normal_measurement_classification_failed',
+      );
+    }
+    if (independent.invalidRun)
+      throw new Error('selftest_normal_independent_reassessment_invalid');
+    if (!independent.evidenceComplete)
+      throw new Error('selftest_normal_evidence_incomplete');
+    if (!independent.executionOrderValid)
+      throw new Error('selftest_normal_execution_order_invalid');
+    if (!independent.providerParityValid)
+      throw new Error('selftest_normal_provider_parity_invalid');
+    if (!attemptResult?.gates?.mcpRuntimeReady)
+      throw new Error('selftest_normal_fixture_mcp_unavailable');
+    if (attemptResult?.measurementValid !== true)
+      throw new Error('selftest_normal_measurement_not_valid');
+    if (!attemptResult?.gates?.usageReconciled)
+      throw new Error('selftest_normal_usage_not_reconciled');
+    if (independent.successfulFixtureCalls < 2)
+      throw new Error('selftest_normal_fixture_calls_missing');
+    if (attemptResult?.businessPass !== true)
+      throw new Error('selftest_normal_business_assertion_failed');
+    if (fake.requests < 3)
+      throw new Error('selftest_normal_fake_requests_missing');
 
     const fenced = await runAttempt('code_fence', 'cp-01');
     if (
