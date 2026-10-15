@@ -450,6 +450,10 @@ export async function runBenchmarkSelfTest() {
       const mcp = fs.existsSync(mcpFile)
         ? JSON.parse(fs.readFileSync(mcpFile, 'utf8'))
         : null;
+      const interruptionFile = path.join(attemptDirectory, 'interruption.json');
+      const interruption = fs.existsSync(interruptionFile)
+        ? JSON.parse(fs.readFileSync(interruptionFile, 'utf8'))
+        : null;
       const ledgerFile = path.join(attemptDirectory, 'fixture.jsonl');
       const ledger = fs.existsSync(ledgerFile)
         ? fs
@@ -495,6 +499,17 @@ export async function runBenchmarkSelfTest() {
             success: call.success,
             isError: call.isError,
           })),
+          interruption: interruption
+            ? {
+                stage: interruption.stage,
+                turnObserved: interruption.turnObserved,
+                errorName: interruption.errorName,
+                errorCode: interruption.errorCode,
+              }
+            : null,
+          attemptFiles: fs.existsSync(attemptDirectory)
+            ? fs.readdirSync(attemptDirectory).sort()
+            : [],
         })}\n`,
       );
     }
