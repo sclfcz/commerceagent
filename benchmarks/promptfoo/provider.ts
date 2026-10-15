@@ -30,6 +30,18 @@ import type {
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
 
+function safeDiagnosticCode(error: unknown): string | null {
+  const value = error as { code?: unknown; message?: unknown } | null;
+  if (typeof value?.code === 'string' && /^[A-Z0-9_]+$/.test(value.code))
+    return value.code;
+  if (
+    typeof value?.message === 'string' &&
+    /^[a-z][a-z0-9_:-]+$/i.test(value.message)
+  )
+    return value.message;
+  return null;
+}
+
 interface CandidateRunState {
   candidates: Candidate[];
   cases: Array<SpikeCase | BusinessCase>;
@@ -329,6 +341,7 @@ export default class CommerceAgentProvider implements ApiProvider {
                 name: call.name,
               }))
             : [],
+          diagnosticCode: safeDiagnosticCode(error),
         };
         privateJson(path.join(attemptDirectory, 'result.json'), result);
       }

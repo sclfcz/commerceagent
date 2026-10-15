@@ -470,6 +470,7 @@ export async function runBenchmarkSelfTest() {
           result: result
             ? {
                 measurementFailure: result.measurementFailure,
+                diagnosticCode: result.diagnosticCode ?? null,
                 businessFailure: result.businessFailure,
                 measurementValid: result.measurementValid,
                 businessPass: result.businessPass,

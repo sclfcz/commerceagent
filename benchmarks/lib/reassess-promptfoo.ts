@@ -456,6 +456,10 @@ export function reassessPromptfoo(runDirectory: string) {
       candidate.model,
     );
     if (missingEvidence) {
+      const runtimeResultFile = path.join(attemptDirectory, 'result.json');
+      const runtimeResult = fs.existsSync(runtimeResultFile)
+        ? JSON.parse(fs.readFileSync(runtimeResultFile, 'utf8'))
+        : null;
       const interruption = verifyInterruptionEvidence({
         directory: attemptDirectory,
         candidate: row.candidateAlias,
@@ -494,6 +498,9 @@ export function reassessPromptfoo(runDirectory: string) {
         qualityEligible: false,
         pass: false,
         measurementFailure: partialFailure,
+        ...(typeof runtimeResult?.diagnosticCode === 'string'
+          ? { diagnosticCode: runtimeResult.diagnosticCode }
+          : {}),
         businessFailure: null,
         failure: partialFailure,
         businessPass: null,
