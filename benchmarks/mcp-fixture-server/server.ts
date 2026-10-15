@@ -211,7 +211,7 @@ export async function startFixtureServer(options: {
     isIP(host) === 4 &&
     Object.values(os.networkInterfaces())
       .flatMap((entries) => entries ?? [])
-      .some((entry) => entry.family === 'IPv4' && entry.address === host);
+      .some((entry) => isIP(entry.address) === 4 && entry.address === host);
   if (!loopback && !hostInterface)
     throw new Error('fixture_non_loopback_bind_forbidden');
   fs.writeFileSync(options.ledgerFile, '', { flag: 'wx', mode: 0o600 });

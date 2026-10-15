@@ -67,7 +67,7 @@ export async function fixtureBindHost(
   isLocalAddress: (address: string) => boolean = (address: string) =>
     Object.values(os.networkInterfaces())
       .flatMap((entries) => entries ?? [])
-      .some((entry) => entry.family === 'IPv4' && entry.address === address),
+      .some((entry) => isIP(entry.address) === 4 && entry.address === address),
 ): Promise<string> {
   const configured = environment.BENCH_FIXTURE_BIND_HOST?.trim();
   if (configured && platform !== 'linux') return configured;
