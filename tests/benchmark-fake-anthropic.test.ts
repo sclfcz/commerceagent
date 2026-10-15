@@ -80,6 +80,12 @@ describe('offline Anthropic Messages fake service', () => {
     ).rejects.toMatchObject({ name: 'TimeoutError' });
   });
 
+  it('returns a deterministic upstream error response', async () => {
+    const upstream = await invokeScenario('upstream_error');
+    expect(upstream.response.status).toBe(503);
+    expect(upstream.body).toContain('synthetic upstream error');
+  });
+
   it('rejects calls without the synthetic test credential', async () => {
     const server = await startFakeAnthropicServer({
       scenario: 'normal',

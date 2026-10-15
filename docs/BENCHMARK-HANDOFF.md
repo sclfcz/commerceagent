@@ -6,6 +6,7 @@
 
 - Node.js 与 npm 版本符合根目录项目要求；完成根项目、`web/`、`container/agent-runner/` 和 `benchmarks/` 的 `npm ci`。
 - Docker daemon 正常，预先从当前 checkout 构建 Agent Runner 镜像；评测会把实际镜像固定为不可变 image ID 并写入 run manifest。
+- Linux 主机上 fixture 服务自动读取 Docker `bridge` 网络的 gateway，并只绑定该网桥地址；不监听 `0.0.0.0`。macOS/Windows 使用 Docker Desktop 的回环路径。Linux 上如设置 `BENCH_FIXTURE_BIND_HOST`，值必须是实际 bridge gateway。
 - 每个候选须提供 Anthropic Messages 兼容 endpoint、精确 model ID、密钥环境变量名、计费区域和网关声明。Provider/SDK 上报的模型名只证明请求中声明的模型，不能证明网关实际路由。
 
 ```bash
@@ -30,6 +31,8 @@ npm run bench:run -- --preflight --split dev --existing
 也可以将 `benchmarks/candidates.example.yaml` 复制为被忽略的 `benchmarks/candidates.local.yaml`，设置 `BENCH_CANDIDATES_FILE`，并在当前 shell 或本机安全密钥管理器中设置 YAML 所列的环境变量。配置字段包括匿名 alias、model ID、Anthropic Messages base URL、API key 环境变量名、billing region 和 `gateway` 状态。不要将密钥写入 YAML、命令参数、shell 历史、提交、issue 或聊天。
 
 Judge 与评测候选凭据分开。OpenCode Go 的一次性本地导入文件为 `benchmarks/opencode-go.local.json`，格式 `{"apiKey":"…"}`，权限须为 `0600`；导入器会在读入后立即删除文件。API Key 不要直接粘贴到对话或终端命令中。
+
+Judge 默认使用 OpenCode Go 的 OpenAI 兼容接口和 `mimo-v2.6-flash`。可在运行校准命令前通过 `BENCH_JUDGE_BASE_URL` 和 `BENCH_JUDGE_MODEL` 覆盖接口根地址与模型 ID，并通过 `BENCH_JUDGE_API_KEY` 单独提供该接口的 Key。自定义接口必须使用 HTTPS、兼容 OpenAI Chat Completions，并允许访问 `/chat/completions`；网络出口守卫只放行配置的精确 origin/path 前缀。每次运行会把请求的模型 ID 和接口写入私有 provenance。自定义 Judge 不得与参赛模型同家族，校准仍须盲标。
 
 ## 选型规则与价格
 
@@ -83,6 +86,7 @@ Judge 目前是参考项，不能进入排名。正式将 Judge 纳入排名前�
 - 候选身份未核验、测量不合格率超过 10% 或工具策略违规的候选不能排名。`gateway_pending` 是身份状态，不是模型失败。
 - 两两模型比较按 case 配对；模型矩阵使用 10,000 次配对 case bootstrap 区间及 Holm 校正。区间跨零时报告“未观察到显著差异”。Profile 筛选只作筛选结论；正式比较和 holdout 均按已提交规则解释。
 - 时延是冷启动 elapsed 与逻辑运行时间的 p50/p95。价格未知则总成本与成功任务成本保持 `unknown`；费用是费率估算，不等于平台账单。
+- `bench:selftest` 失败时会输出错误码、处理提示以及保留的 synthetic artifacts 路径；可先按错误码定位 Docker 镜像、bridge/MCP、上游脚本或复评/泄漏阶段。
 - 公共报告仅含匿名候选 alias 和汇总指标。私有 `result.json`、trace、数据库、候选映射和 pricing 源文件不能公开分享。
 
 ## 已验证与未验证范围

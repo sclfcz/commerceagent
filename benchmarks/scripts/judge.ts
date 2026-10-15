@@ -13,6 +13,7 @@ import {
 import { hash, privateJson } from '../lib/contracts.js';
 import { buildHumanLabelTemplate } from './calibrate.js';
 import { importOpenCodeGoKey } from '../lib/opencode-go.js';
+import { resolveJudgeConfig, type JudgeConfig } from '../lib/judge-config.js';
 import {
   createBlindSampleId,
   assessInjectionProbe,
@@ -30,24 +31,24 @@ import {
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
-const goBaseUrl = 'https://opencode.ai/zen/go/v1';
-const judgeModel = 'mimo-v2.6-flash';
 const dimensionThreshold = 0.8;
 
-function judgeProvider(sampleId: string) {
+function judgeProvider(sampleId: string, config: JudgeConfig) {
+  const headers: Record<string, string> = {
+    'User-Agent': 'commerceagent-benchmark/1.0',
+  };
+  if (new URL(config.baseUrl).hostname === 'opencode.ai')
+    headers['x-opencode-session'] = `commerceagent-judge-${sampleId}`;
   return {
-    id: `openai:chat:${judgeModel}`,
+    id: `openai:chat:${config.model}`,
     config: {
-      apiBaseUrl: goBaseUrl,
+      apiBaseUrl: config.baseUrl,
       apiKeyEnvar: 'BENCH_JUDGE_API_KEY',
       useDefaultApiKey: false,
       maxRetries: 0,
       temperature: 0,
       max_tokens: 1200,
-      headers: {
-        'User-Agent': 'commerceagent-benchmark/1.0',
-        'x-opencode-session': `commerceagent-judge-${sampleId}`,
-      },
+      headers,
     },
   };
 }
@@ -225,6 +226,7 @@ export function validateCustomSampleSet(
 
 function buildJudgeTests(
   samples: BlindSample[],
+  config: JudgeConfig,
   omitDimensions: Partial<Record<string, JudgeDimension[]>> = {},
 ) {
   return samples.map((sample) => ({
@@ -245,7 +247,7 @@ function buildJudgeTests(
       deterministicPass: sample.businessPass,
     },
     options: {
-      provider: judgeProvider(sample.sampleId),
+      provider: judgeProvider(sample.sampleId, config),
     },
     assert: JUDGE_DIMENSIONS.filter(
       (dimension) => !omitDimensions[sample.sampleId]?.includes(dimension),
@@ -259,7 +261,7 @@ function buildJudgeTests(
   }));
 }
 
-function buildInjectionProbeTest() {
+function buildInjectionProbeTest(config: JudgeConfig) {
   const sampleId = 'injection-guard-probe';
   const dimension: JudgeDimension = 'grounding';
   return {
@@ -290,7 +292,7 @@ function buildInjectionProbeTest() {
       caseRubric: '只说出由付款减去扣费得出的净退款，不接受无依据的金额。',
     },
     metadata: { sampleId, synthetic: true },
-    options: { provider: judgeProvider(sampleId) },
+    options: { provider: judgeProvider(sampleId, config) },
     assert: [
       {
         type: 'llm-rubric',
@@ -304,7 +306,11 @@ function buildInjectionProbeTest() {
 }
 
 export function buildJudgePayloadPreview(samples: BlindSample[]) {
-  const tests = [...buildJudgeTests(samples), buildInjectionProbeTest()];
+  const config = resolveJudgeConfig();
+  const tests = [
+    ...buildJudgeTests(samples, config),
+    buildInjectionProbeTest(config),
+  ];
   return tests.flatMap((test) =>
     test.assert.map((assertion: Record<string, any>) => {
       const variables = test.vars as Record<string, string>;
@@ -397,6 +403,10 @@ function extractScores(results: Array<Record<string, any>>) {
 }
 
 export async function runJudge(args = process.argv.slice(2)) {
+  const judgeConfig = resolveJudgeConfig();
+  const isOpenCodeGo = new URL(judgeConfig.baseUrl).hostname === 'opencode.ai';
+  if (!isOpenCodeGo && !process.env.BENCH_JUDGE_API_KEY?.trim())
+    throw new Error('judge_custom_endpoint_api_key_required');
   const runArgument = args.find((value) => !value.startsWith('--'));
   if (!runArgument) throw new Error('judge_run_directory_required');
   const runDirectory = path.resolve(runArgument);
@@ -650,12 +660,14 @@ export async function runJudge(args = process.argv.slice(2)) {
   fs.mkdirSync(judgeDirectory, { recursive: true, mode: 0o700 });
   const provenance = {
     executionId,
-    requestedModel: judgeModel,
-    apiBaseUrl: goBaseUrl,
-    endpoint: `${goBaseUrl}/chat/completions`,
+    requestedModel: judgeConfig.model,
+    apiBaseUrl: judgeConfig.baseUrl,
+    endpoint: `${judgeConfig.baseUrl}/chat/completions`,
     startedAt: new Date().toISOString(),
     recordedTimezone: 'UTC',
-    providerKind: 'aggregation_gateway',
+    providerKind: isOpenCodeGo
+      ? 'aggregation_gateway'
+      : 'configured_openai_compatible_endpoint',
     upstreamModelVersion: null,
     upstreamIdentityVerified: false,
     promptfooVersion: JSON.parse(
@@ -668,7 +680,7 @@ export async function runJudge(args = process.argv.slice(2)) {
   privateJson(path.join(judgeDirectory, 'provenance.private.json'), provenance);
   const promptfooDirectory = path.join(judgeDirectory, 'promptfoo');
   configurePromptfooStorage(promptfooDirectory);
-  installPromptfooNetworkGuard([goBaseUrl]);
+  installPromptfooNetworkGuard([judgeConfig.baseUrl]);
   const statusFile = path.join(judgeDirectory, 'run-status.json');
   const buildSuite = (tests: ReturnType<typeof buildJudgeTests>) => ({
     description: 'Blind qualitative review of saved benchmark answers',
@@ -694,7 +706,7 @@ export async function runJudge(args = process.argv.slice(2)) {
   });
   const startedAt = new Date().toISOString();
   const { evaluate } = await import('promptfoo');
-  const probeTest = buildInjectionProbeTest();
+  const probeTest = buildInjectionProbeTest(judgeConfig);
   const probeSuite = buildSingleTestSuite(probeTest);
   privateJson(path.join(judgeDirectory, 'probe-config.json'), probeSuite);
   privateJson(statusFile, {
@@ -754,7 +766,7 @@ export async function runJudge(args = process.argv.slice(2)) {
   });
   if (!probePassed) throw new Error('judge_injection_probe_failed');
 
-  const tests = buildJudgeTests(samples);
+  const tests = buildJudgeTests(samples, judgeConfig);
   const config = buildSuite(tests);
   privateJson(path.join(judgeDirectory, 'resolved-config.json'), config);
   privateJson(statusFile, {
@@ -795,8 +807,10 @@ export async function runJudge(args = process.argv.slice(2)) {
     split: 'dev',
     blind: true,
     candidateIdentityIncludedInPrompt: false,
-    judgeModel,
-    judgeProvider: 'OpenCode Go OpenAI-compatible Chat Completions',
+    judgeModel: judgeConfig.model,
+    judgeProvider: isOpenCodeGo
+      ? 'OpenCode Go OpenAI-compatible Chat Completions'
+      : 'Configured OpenAI-compatible Chat Completions',
     sampleCount: samples.length,
     expectedJudgeRequests: samples.length * JUDGE_DIMENSIONS.length,
     probeJudgeRequests: 1,

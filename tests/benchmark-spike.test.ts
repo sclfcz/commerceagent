@@ -22,6 +22,7 @@ import {
   type ContextEvidence,
 } from '../benchmarks/lib/context.js';
 import { startFixtureServer } from '../benchmarks/mcp-fixture-server/server.js';
+import { fixtureBindHost } from '../benchmarks/lib/attempt.js';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'benchmark-tests-'));
 afterAll(() => fs.rmSync(temp, { recursive: true, force: true }));
@@ -117,6 +118,28 @@ describe('spike business oracles and mutations', () => {
 });
 
 describe('fixture audit outside the Runner', () => {
+  test('uses Docker bridge gateway only on Linux and keeps desktop loopback behavior', async () => {
+    const host = await fixtureBindHost(
+      'linux',
+      {},
+      async () => '172.18.0.1',
+      () => true,
+    );
+    expect(host).toBe('172.18.0.1');
+    await expect(
+      fixtureBindHost(
+        'linux',
+        { BENCH_FIXTURE_BIND_HOST: '192.168.1.10' },
+        async () => '172.18.0.1',
+        () => true,
+      ),
+    ).rejects.toThrow('fixture_bind_host_must_be_docker_bridge_gateway');
+    expect(await fixtureBindHost('darwin', {})).toBe('127.0.0.1');
+    expect(
+      await fixtureBindHost('darwin', { BENCH_FIXTURE_BIND_HOST: '127.0.0.2' }),
+    ).toBe('127.0.0.2');
+  });
+
   test.each([
     '0.0.0.0',
     '::',

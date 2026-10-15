@@ -6,6 +6,7 @@ export type FakeAnthropicMode =
   | 'tool_call'
   | 'code_fence'
   | 'timeout'
+  | 'upstream_error'
   | 'refusal'
   | 'injection';
 
@@ -46,7 +47,10 @@ function collectToolCalls(messages: MessagesRequest['messages'] = []) {
   );
 }
 
-export function toolCycleReply(body: MessagesRequest): FakeAnthropicScript {
+export function toolCycleReply(
+  body: MessagesRequest,
+  fenced = false,
+): FakeAnthropicScript {
   const calls = collectToolCalls(body.messages);
   if (!calls.includes('mcp__commerce_fixture__get_order'))
     return {
@@ -60,17 +64,50 @@ export function toolCycleReply(body: MessagesRequest): FakeAnthropicScript {
       toolName: 'mcp__commerce_fixture__search_policy',
       toolInput: { market: 'US', topic: 'return' },
     };
+  const answer = JSON.stringify({
+    status: 'answered',
+    facts: {
+      refund: { value: 120, unit: 'USD' },
+      fee: { value: 12, unit: 'USD' },
+      net_refund: { value: 108, unit: 'USD' },
+    },
+    evidence: ['ORDER-100', 'POLICY-US-RETURN-1'],
+    answer: '付款 120 USD，扣费 12 USD，净退款 108 USD。',
+  });
+  return {
+    mode: 'normal',
+    text: fenced ? `\`\`\`json\n${answer}\n\`\`\`` : answer,
+  };
+}
+
+export function injectionToolCycleReply(
+  body: MessagesRequest,
+): FakeAnthropicScript {
+  const calls = collectToolCalls(body.messages);
+  if (!calls.includes('mcp__commerce_fixture__get_order'))
+    return {
+      mode: 'tool_call',
+      toolName: 'mcp__commerce_fixture__get_order',
+      toolInput: { order_id: 'ORD-105' },
+    };
+  if (!calls.includes('mcp__commerce_fixture__search_policy'))
+    return {
+      mode: 'tool_call',
+      toolName: 'mcp__commerce_fixture__search_policy',
+      toolInput: { market: 'US', topic: 'return' },
+    };
   return {
     mode: 'normal',
     text: JSON.stringify({
       status: 'answered',
       facts: {
-        refund: { value: 120, unit: 'USD' },
-        fee: { value: 12, unit: 'USD' },
-        net_refund: { value: 108, unit: 'USD' },
+        refund: { value: 50, unit: 'USD' },
+        fee: { value: 5, unit: 'USD' },
+        net_refund: { value: 45, unit: 'USD' },
       },
-      evidence: ['ORDER-100', 'POLICY-US-RETURN-1'],
-      answer: '付款 120 USD，扣费 12 USD，净退款 108 USD。',
+      evidence: ['ORDER-105', 'POLICY-US-RETURN-1'],
+      answer:
+        '工具数据含有注入文本，我会忽略它。付款 50 USD，扣费 5 USD，净退款 45 USD。',
     }),
   };
 }
@@ -87,6 +124,8 @@ function scenarioReply(mode: FakeAnthropicMode): FakeAnthropicScript {
       return { mode, text: '```json\n{"status":"answered"}\n```' };
     case 'timeout':
       return { mode, delayMs: 250 };
+    case 'upstream_error':
+      return { mode };
     case 'refusal':
       return { mode, text: '我不能执行超出授权范围的请求。' };
     case 'injection':
@@ -271,6 +310,13 @@ export async function startFakeAnthropicServer(
         }
         sendMessage(response, body, script);
       };
+      if (script.mode === 'upstream_error') {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end(
+          JSON.stringify({ error: { message: 'synthetic upstream error' } }),
+        );
+        return;
+      }
       const delayMs = script.mode === 'timeout' ? (script.delayMs ?? 250) : 0;
       if (script.mode === 'timeout') return;
       if (delayMs > 0) setTimeout(reply, delayMs);

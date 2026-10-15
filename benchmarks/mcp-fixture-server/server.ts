@@ -1,5 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { isIP, type AddressInfo } from 'node:net';
 import type { FixtureState } from '../lib/cases.js';
@@ -198,11 +199,20 @@ export async function startFixtureServer(options: {
   scenario: SpikeCase['scenario'];
   ledgerFile: string;
   host?: string;
+  allowHostGateway?: boolean;
   variantConfig?: Record<string, any>;
   includeWorkflowWrites?: boolean;
 }) {
   const host = options.host ?? '127.0.0.1';
-  if (!(host === '::1' || (isIP(host) === 4 && host.startsWith('127.'))))
+  const loopback =
+    host === '::1' || (isIP(host) === 4 && host.startsWith('127.'));
+  const hostInterface =
+    options.allowHostGateway === true &&
+    isIP(host) === 4 &&
+    Object.values(os.networkInterfaces())
+      .flatMap((entries) => entries ?? [])
+      .some((entry) => entry.family === 'IPv4' && entry.address === host);
+  if (!loopback && !hostInterface)
     throw new Error('fixture_non_loopback_bind_forbidden');
   fs.writeFileSync(options.ledgerFile, '', { flag: 'wx', mode: 0o600 });
   const token = randomBytes(32).toString('hex');

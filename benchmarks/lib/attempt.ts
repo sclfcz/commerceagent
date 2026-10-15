@@ -9,6 +9,10 @@ import {
 import { buildAgentProfilePrompt } from '../../src/agent-profile-prompts.js';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { isIP } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import {
@@ -36,6 +40,55 @@ import { persistInterruptionEvidence } from './interruption-evidence.js';
 
 const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
 const bench = path.join(repositoryRoot, 'benchmarks');
+const execFileAsync = promisify(execFile);
+
+/**
+ * Linux Docker's host-gateway resolves to the host-side bridge address. Bind
+ * only that address so bridge containers can reach the fixture without
+ * exposing it on every host interface. Docker Desktop keeps its loopback path.
+ */
+export async function fixtureBindHost(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+  inspectBridgeGateway: () => Promise<string> = async () => {
+    const result = await execFileAsync(
+      'docker',
+      [
+        'network',
+        'inspect',
+        'bridge',
+        '--format',
+        '{{(index .IPAM.Config 0).Gateway}}',
+      ],
+      { timeout: 5000, maxBuffer: 16 * 1024 },
+    );
+    return result.stdout.trim();
+  },
+  isLocalAddress: (address: string) => boolean = (address: string) =>
+    Object.values(os.networkInterfaces())
+      .flatMap((entries) => entries ?? [])
+      .some((entry) => entry.family === 'IPv4' && entry.address === address),
+): Promise<string> {
+  const configured = environment.BENCH_FIXTURE_BIND_HOST?.trim();
+  if (configured && platform !== 'linux') return configured;
+  if (platform !== 'linux') return '127.0.0.1';
+  let gateway = '';
+  try {
+    gateway = await inspectBridgeGateway();
+  } catch {
+    throw new Error('fixture_docker_bridge_gateway_unavailable');
+  }
+  if (
+    isIP(gateway) !== 4 ||
+    gateway.startsWith('127.') ||
+    gateway.startsWith('169.254.') ||
+    !isLocalAddress(gateway)
+  )
+    throw new Error('fixture_docker_bridge_gateway_not_local');
+  if (configured && configured !== gateway)
+    throw new Error('fixture_bind_host_must_be_docker_bridge_gateway');
+  return gateway;
+}
 
 export function runtimeSourceHash(repository: string): string {
   return hash({
@@ -115,14 +168,16 @@ export async function attempt(
       string,
       any
     >);
+  const fixtureHost = await fixtureBindHost();
   const fixture = await startFixtureServer({
     data: fixtureData,
     scenario: isBusinessCase ? 'normal' : test.scenario,
     ...(fixtureVariant ? { variantConfig: fixtureVariant.config } : {}),
+    allowHostGateway: process.platform === 'linux',
     includeWorkflowWrites:
       isBusinessCase && (test as BusinessCase).tags.includes('write-operation'),
     ledgerFile: path.join(directory, 'fixture.jsonl'),
-    host: process.env.BENCH_FIXTURE_BIND_HOST || '127.0.0.1',
+    host: fixtureHost,
   });
   let service: Awaited<ReturnType<typeof startService>> | null = null;
   let turnObserved = false;

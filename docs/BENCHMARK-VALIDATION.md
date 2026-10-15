@@ -92,7 +92,7 @@ run：`promptfoo-2026-10-13T02-17-16-887Z`，固定镜像、单候选、50 条 d
 
 测量有效 50/50，SDK fixture 连接及必需工具清单 50/50 就绪；fixture MCP 返回 99 个成功结果，另有 1 个预期注入超时，账本合计 100 条。Bash 和产品记忆 MCP 调用均为 0，fixture 绕道 0；执行顺序、独立重判与 Provider parity 通过。本次另记录到 1 个裸 `get_ad_report` 别名调用，SDK 返回 No-such-tool 后，同一次任务以正确的 `mcp__commerce_fixture__get_ad_report` 发起调用并收到了预期超时；fixture 服务本身没有 No-such-tool 错误。裸别名在离线复核中归为模型工具名错误，产品记忆 MCP 已从 benchmark SDK 配置中移除。
 
-业务断言通过 24/50。逐条 fixture replay 和标准答案复核将其余 26 条全部归为 `model_error`；`case_or_assertion_error=0`、`fixture_error=0`。详情在私有 [failure-review.e09fad3ccd50.json](/Users/a0000/Desktop/Project/CommerceAgent/benchmarks/results/promptfoo-2026-10-13T02-17-16-887Z/failure-review.e09fad3ccd50.json)，它不含原始回复，逐条记录失败检查、结构化差异、调用与状态复放结果及来源 hash。对外仍不能排名：候选身份 `gateway_pending`，合格样本 0，成本 unknown。写操作用例 8/8 完成状态断言和账本重放检查，期望最终状态通过 3/8。
+业务断言通过 24/50。逐条 fixture replay 和标准答案复核将其余 26 条全部归为 `model_error`；`case_or_assertion_error=0`、`fixture_error=0`。详情保存在本机私有证据文件 `benchmarks/results/promptfoo-2026-10-13T02-17-16-887Z/failure-review.e09fad3ccd50.json`，它不含原始回复，逐条记录失败检查、结构化差异、调用与状态复放结果及来源 hash。对外仍不能排名：候选身份 `gateway_pending`，合格样本 0，成本 unknown。写操作用例 8/8 完成状态断言和账本重放检查，期望最终状态通过 3/8。
 
 阶段 4 的数据契约和测量门槛通过验收；业务通过率 48% 仍是明确的模型质量缺口。阶段 5/6 未开始，holdout 运行次数为 0。全量测试 3096 项通过、24 项跳过。
 
