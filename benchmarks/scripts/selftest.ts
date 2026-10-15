@@ -427,6 +427,77 @@ export async function runBenchmarkSelfTest() {
               : '处理提示：查看保留的合成 artifacts 中 summary.json、trace.json 和 service 日志，按错误码定位失败阶段。';
     process.stderr.write(`错误码: ${code}\n${handling}\n`);
     process.stderr.write(`synthetic artifacts: ${root}\n`);
+    const runsDirectory = path.join(root, 'runs');
+    const runNames = fs.existsSync(runsDirectory)
+      ? fs
+          .readdirSync(runsDirectory)
+          .filter((name) => name.startsWith('offline-selftest-'))
+          .sort()
+      : [];
+    for (const runName of runNames) {
+      const runDirectory = path.join(runsDirectory, runName);
+      const summaryFile = path.join(runDirectory, 'summary.json');
+      const attemptDirectory = path.join(runDirectory, 'promptfoo-0001');
+      const summary = fs.existsSync(summaryFile)
+        ? JSON.parse(fs.readFileSync(summaryFile, 'utf8'))
+        : null;
+      const result = summary?.results?.[0];
+      const traceFile = path.join(attemptDirectory, 'trace.json');
+      const trace = fs.existsSync(traceFile)
+        ? JSON.parse(fs.readFileSync(traceFile, 'utf8'))
+        : null;
+      const mcpFile = path.join(attemptDirectory, 'mcp-runtime-evidence.json');
+      const mcp = fs.existsSync(mcpFile)
+        ? JSON.parse(fs.readFileSync(mcpFile, 'utf8'))
+        : null;
+      const ledgerFile = path.join(attemptDirectory, 'fixture.jsonl');
+      const ledger = fs.existsSync(ledgerFile)
+        ? fs
+            .readFileSync(ledgerFile, 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map((line) => JSON.parse(line))
+        : [];
+      process.stderr.write(
+        `synthetic diagnosis: ${JSON.stringify({
+          runId: runName,
+          invalidRun: summary?.invalidRun ?? null,
+          successfulFixtureCalls: summary?.successfulFixtureCalls ?? null,
+          result: result
+            ? {
+                measurementFailure: result.measurementFailure,
+                businessFailure: result.businessFailure,
+                measurementValid: result.measurementValid,
+                businessPass: result.businessPass,
+                gates: result.gates,
+              }
+            : null,
+          stream: trace
+            ? {
+                failure: trace.failure,
+                reason: trace.reason,
+                toolEvents: trace.tools?.map(
+                  (tool: Record<string, unknown>) => ({
+                    name: tool.name,
+                    failed: tool.failed,
+                    unavailable: tool.unavailable,
+                    resultObserved: tool.resultObserved,
+                  }),
+                ),
+                eventTypes: trace.trace?.map(
+                  (event: Record<string, unknown>) => event.type,
+                ),
+              }
+            : null,
+          mcp,
+          fixtureLedger: ledger.map((call: Record<string, unknown>) => ({
+            name: call.name,
+            success: call.success,
+            isError: call.isError,
+          })),
+        })}\n`,
+      );
+    }
     process.exitCode = 1;
     return null;
   } finally {
