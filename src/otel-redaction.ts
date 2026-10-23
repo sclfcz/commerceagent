@@ -27,6 +27,8 @@ const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const NATIONAL_ID = /(?<!\d)\d{17}[\dXx](?![\dXx])/g;
 const PHONE =
   /(?<!\d)(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?)\d{3,4}[\s.-]?\d{4}(?!\d)/g;
+const EVIDENCE_ID =
+  /(?<![A-Za-z0-9])(?:[A-Z]{2,}(?:-[A-Z]{2,})*)-\d{1,6}(?:-(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))?(?![A-Za-z0-9]|-\d)/g;
 
 function shannonEntropy(value: string): number {
   const counts = new Map<string, number>();
@@ -109,7 +111,12 @@ function redactChineseAddresses(value: string): string {
 }
 
 function redactText(value: string): string {
-  let result = value
+  const preservedIds: string[] = [];
+  let result = value.replace(EVIDENCE_ID, (id) => {
+    const index = preservedIds.push(id) - 1;
+    return `__CA_EVIDENCE_ID_${index}__`;
+  });
+  result = result
     // Run credential/token patterns before phone/card patterns so digits in a
     // token can never be partially replaced while leaving the token prefix.
     .replace(SECRET_SCHEME, `$1${REDACTED}`)
@@ -141,6 +148,10 @@ function redactText(value: string): string {
   result = result.replace(
     /\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,5}\s+(?:Street|St|Road|Rd|Avenue|Ave|Boulevard|Blvd|Lane|Ln|Drive|Dr|Apartment|Apt|Unit)\.?\s*(?:#\s*)?[A-Za-z0-9-]*\b/gi,
     REDACTED,
+  );
+  result = result.replace(
+    /__CA_EVIDENCE_ID_(\d+)__/g,
+    (placeholder, rawIndex) => preservedIds[Number(rawIndex)] ?? placeholder,
   );
   return result.slice(0, MAX_CONTENT_LENGTH);
 }
@@ -179,9 +190,10 @@ export function redactObservabilityValue(
 }
 
 export function getResidualSensitiveCategories(value: string): string[] {
+  const scanValue = value.replace(EVIDENCE_ID, '[SAFE_EVIDENCE_ID]');
   const has = (pattern: RegExp) => {
     pattern.lastIndex = 0;
-    return pattern.test(value);
+    return pattern.test(scanValue);
   };
   const categories: string[] = [];
   if (has(SECRET_SCHEME)) categories.push('auth_scheme');
@@ -191,7 +203,7 @@ export function getResidualSensitiveCategories(value: string): string[] {
     SENSITIVE_ASSIGNMENT.flags,
   );
   const hasUnredactedAssignment = Array.from(
-    value.matchAll(assignmentPattern),
+    scanValue.matchAll(assignmentPattern),
   ).some((match) => {
     const complete = match[0] ?? '';
     const prefix = match[1] ?? '';
@@ -206,21 +218,22 @@ export function getResidualSensitiveCategories(value: string): string[] {
   if (has(API_STYLE_TOKEN)) categories.push('api_style_token');
   if (has(JWT)) categories.push('jwt');
   if (has(LONG_HEX)) categories.push('long_hex');
-  if (new RegExp(NATIONAL_ID.source, NATIONAL_ID.flags).test(value)) {
+  if (new RegExp(NATIONAL_ID.source, NATIONAL_ID.flags).test(scanValue)) {
     categories.push('national_id');
   }
   if (has(EMAIL)) categories.push('email');
   if (has(PHONE)) categories.push('phone');
-  if (redactCardNumbers(value) !== value) categories.push('payment_card');
-  if (redactIpAddresses(value) !== value) categories.push('ip_address');
-  if (redactChineseAddresses(value) !== value)
+  if (redactCardNumbers(scanValue) !== scanValue)
+    categories.push('payment_card');
+  if (redactIpAddresses(scanValue) !== scanValue) categories.push('ip_address');
+  if (redactChineseAddresses(scanValue) !== scanValue)
     categories.push('street_address');
   const highEntropyPattern = new RegExp(
     HIGH_ENTROPY_TOKEN.source,
     HIGH_ENTROPY_TOKEN.flags,
   );
   if (
-    Array.from(value.matchAll(highEntropyPattern)).some(([match]) =>
+    Array.from(scanValue.matchAll(highEntropyPattern)).some(([match]) =>
       isHighEntropyToken(match),
     )
   ) {

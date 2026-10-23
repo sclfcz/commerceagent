@@ -122,4 +122,24 @@ describe('OpenTelemetry content redaction', () => {
     expect(fallback).not.toContain('dXNlcjpwYXNz');
     expect(fallback).not.toContain(original);
   });
+
+  test('preserves uppercase fixture evidence IDs without allowing long phone or card values', () => {
+    const evidenceIds = [
+      'AD-CAMP-100-20260901',
+      'ORDER-100',
+      'POLICY-US-RETURN-1',
+      'CH-220',
+      'REFUND-001',
+      'HANDOFF-001',
+    ];
+    const raw = `${evidenceIds.join(' ')} ORDER-13800138000 ORDER-4111111111111111`;
+    const result = serializeRedactedContent(raw);
+
+    for (const evidenceId of evidenceIds) {
+      expect(result).toContain(evidenceId);
+    }
+    expect(result).not.toContain('13800138000');
+    expect(result).not.toContain('4111111111111111');
+    expect(result).toContain('ORDER-[REDACTED]');
+  });
 });
