@@ -721,6 +721,12 @@ export const SystemSettingsSchema = z
     maxLoginAttempts: z.number().int().min(1).max(100).optional(),
     loginLockoutMinutes: z.number().int().min(1).max(1440).optional(),
     fallbackModel: z.string().max(64).optional(),
+    observabilityEnabled: z.boolean().optional(),
+    observabilityEndpoint: z.string().max(512).optional(),
+    observabilityPublicKey: z.string().max(256).optional(),
+    observabilitySampleRate: z.number().min(0).max(1).optional(),
+    observabilityIncludeContent: z.boolean().optional(),
+    observabilitySecretKey: z.string().max(2048).optional(),
   })
   .strict();
 

@@ -96,6 +96,12 @@ export interface SystemSettings {
   maxLoginAttempts: number;
   loginLockoutMinutes: number;
   fallbackModel: string;
+  observabilityEnabled: boolean;
+  observabilityEndpoint: string;
+  observabilityPublicKey: string;
+  observabilitySampleRate: number;
+  observabilityIncludeContent: boolean;
+  observabilityHasSecretKey: boolean;
 }
 
 export interface HostIntegrationSettings {

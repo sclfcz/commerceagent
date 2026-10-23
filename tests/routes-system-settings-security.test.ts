@@ -34,7 +34,9 @@ vi.mock('../src/middleware/auth.ts', async (importOriginal) => {
         display_name: 'Settings Security User',
         role: process.env.COMMERCEAGENT_TEST_ROLE ?? 'member',
         status: 'active',
-        permissions: JSON.parse(process.env.COMMERCEAGENT_TEST_PERMISSIONS ?? '[]'),
+        permissions: JSON.parse(
+          process.env.COMMERCEAGENT_TEST_PERMISSIONS ?? '[]',
+        ),
         must_change_password: false,
       });
       return next();
@@ -135,6 +137,29 @@ describe('system settings capability boundaries', () => {
       body: JSON.stringify({ billingEnabled: true }),
     });
     expect(response.status).toBe(400);
+  });
+
+  test('stores OTel Secret Key encrypted and never returns it from system config', async () => {
+    asUser('member', ['manage_system_config']);
+    const secret = 'synthetic-otel-secret-never-return-this';
+    const saved = await app.request('/api/config/system', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observabilitySecretKey: secret }),
+    });
+    expect(saved.status).toBe(200);
+    const responseBody = await saved.text();
+    expect(responseBody).not.toContain(secret);
+    expect(JSON.parse(responseBody).observabilityHasSecretKey).toBe(true);
+
+    const stored = fs.readFileSync(
+      path.join(tmpDir, 'config', 'otel-secret.json'),
+      'utf8',
+    );
+    expect(stored).not.toContain(secret);
+    expect(
+      fs.statSync(path.join(tmpDir, 'config', 'otel-secret.json')).mode & 0o777,
+    ).toBe(0o600);
   });
 
   test('stale clients may submit retired automation fields, which are ignored', async () => {

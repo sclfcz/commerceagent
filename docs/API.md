@@ -73,6 +73,27 @@ Public：
   `data/extra/` 和任务运行历史
 - `POST /api/groups/:jid/reset-owner`，admin break-glass
 - `GET /api/groups/:jid/messages`
+
+## 系统设置与 OpenTelemetry
+
+`GET|PUT /api/config/system` 受 `manage_system_config` 权限保护。系统设置响应包含
+`observabilityEnabled`、`observabilityEndpoint`、`observabilityPublicKey`、
+`observabilitySampleRate`、`observabilityIncludeContent` 和只读的
+`observabilityHasSecretKey`。写入请求可带 `observabilitySecretKey`；Secret Key
+只写入本机 AES-256-GCM 加密文件，读取响应永远不会返回它。该设置遵循
+Web 持久配置优先于 `COMMERCEAGENT_OTEL_*` 环境变量，环境变量优先于代码默认值。
+
+默认关闭。开启后通过 OTLP/HTTP 向配置的 Langfuse 根地址发送 trace，路径为
+`/api/public/otel/v1/traces`，使用 Basic Auth（用户名为 Public Key，密码为
+Secret Key）。不要求特定部署形态，可使用 Langfuse 云版或自托管实例。
+
+第一阶段只导出运行 ID、轮次 ID、工作区与用户 ID 的 SHA-256 哈希、Profile
+版本、模型名、工具名、Token、耗时、错误类别和 `run_finished.reason`。消息正文、
+工具参数、工具返回和错误文本不会导出。`observabilityIncludeContent` 暂为预留
+开关：在后续阶段完成脱敏和权限设计前，即使打开也不会使正文离开本机。导出异步
+执行；导出失败不会影响 Agent 回复或 usage/计费记录，只增加进程内失败计数并输出
+一次不含端点、凭据和 payload 的分类日志。
+
 - `DELETE /api/groups/:jid/messages/:messageId`
 - `GET|PUT /api/groups/:jid/env`
 - `GET|PUT /api/groups/:jid/mcp`，仅兼容旧客户端

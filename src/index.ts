@@ -396,6 +396,11 @@ import {
 } from './channel-account-routing.js';
 import { testChannelAccountCredentials } from './channel-account-connectivity.js';
 import {
+  recordObservabilityEvent,
+  recordObservabilityFailure,
+  startObservabilityRun,
+} from './otel-observability.js';
+import {
   buildAgentProfilePrompt,
   hasAgentProfilePrompts,
 } from './agent-profile-prompts.js';
@@ -9390,6 +9395,16 @@ async function runAgent(
   const resolvedAgentProfile = resolveEffectiveAgentProfile(
     agentProfile ?? getAgentProfileForWorkspace(group.folder, group.created_by),
   );
+  const observabilityRunId = queue.getActiveQueryId(chatJid) ?? undefined;
+  if (observabilityRunId) {
+    startObservabilityRun({
+      runId: observabilityRunId,
+      turnId,
+      workspace: group.folder,
+      profileVersion: resolvedAgentProfile?.version,
+      userId: group.created_by ?? undefined,
+    });
+  }
   const interactionMode = resolveRuntimeInteractionMode(
     getWorkspaceInteractionMode(group.folder),
     { agentKind: 'main' },
@@ -9452,6 +9467,12 @@ async function runAgent(
 
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = async (output: ContainerOutput) => {
+    if (output.providerFailure) {
+      recordObservabilityFailure(observabilityRunId, 'provider_failure');
+    } else if (output.status === 'error') {
+      recordObservabilityFailure(observabilityRunId, 'runner_error');
+    }
+    recordObservabilityEvent(observabilityRunId, output.streamEvent);
     queue.markRunnerActivity(chatJid);
     if (
       output.ipcReceipts?.length &&

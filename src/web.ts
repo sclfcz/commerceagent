@@ -126,6 +126,7 @@ import { PLUGIN_EXPANSION_ATTACHMENT_TYPE } from './plugin-expander-sentinel.js'
 import { persistPluginExpansion } from './plugin-expander-store.js';
 import { logger } from './logger.js';
 import { recordRunContextSnapshot } from './run-context-snapshot.js';
+import { finishObservabilityRun } from './otel-observability.js';
 import { RunStreamFence } from './run-stream-fence.js';
 import {
   executeSessionReset,
@@ -3191,6 +3192,7 @@ export function broadcastRunFinished(
   reason: RunFinishReason,
   finishedAt: number,
 ): void {
+  finishObservabilityRun(runId, reason);
   const baseJid = stripRuntimeJidSuffix(chatJid);
   const jid = normalizeRuntimeJid(chatJid);
   const allowedUserIds = getGroupAllowedUserIds(baseJid);

@@ -24,6 +24,12 @@ describe('system settings API projection', () => {
 
     const configRoute = read('src/routes/config.ts');
     for (const key of uiKeys) {
+      if (key === 'observabilityHasSecretKey') {
+        expect(configRoute).toContain(
+          'observabilityHasSecretKey: hasObservabilitySecret(),',
+        );
+        continue;
+      }
       expect(
         configRoute.includes(`${key}: settings.${key},`),
         `system settings projection is missing "${key}"`,
