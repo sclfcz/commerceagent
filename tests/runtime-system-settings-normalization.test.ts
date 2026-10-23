@@ -39,6 +39,21 @@ afterAll(() => {
 });
 
 describe('system settings normalization', () => {
+  test('OTel endpoints require HTTPS except the two local HTTP targets', () => {
+    expect(runtime.isSafeOtelEndpoint('https://otel.example')).toBe(true);
+    expect(runtime.isSafeOtelEndpoint('http://localhost:3000')).toBe(true);
+    expect(runtime.isSafeOtelEndpoint('http://127.0.0.1:3000')).toBe(true);
+    expect(runtime.isSafeOtelEndpoint('http://127.0.0.2:3000')).toBe(false);
+    expect(runtime.isSafeOtelEndpoint('http://otel.example')).toBe(false);
+    expect(runtime.isSafeOtelEndpoint('http://[::1]:3000')).toBe(false);
+    expect(runtime.isSafeOtelEndpoint('https://user:pass@otel.example')).toBe(
+      false,
+    );
+    expect(
+      runtime.isSafeOtelEndpoint('https://otel.example/path?secret=x'),
+    ).toBe(false);
+  });
+
   test('env, API save, and file reads share the same bounds', () => {
     const fromEnv = runtime.getSystemSettings();
     expect(fromEnv.containerTimeout).toBe(60_000);

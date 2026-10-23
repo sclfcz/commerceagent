@@ -109,6 +109,7 @@ import {
   saveAppearanceConfig,
   getSystemSettings,
   hasObservabilitySecret,
+  isSafeOtelEndpoint,
   saveObservabilitySecret,
   getEffectiveExternalDir,
   getContainerEnvConfig,
@@ -2264,6 +2265,17 @@ configRoutes.put(
       );
     }
 
+    const actor = c.get('user') as AuthUser;
+    const writesObservabilitySettings = Object.keys(validation.data).some(
+      (key) => key.startsWith('observability'),
+    );
+    if (writesObservabilitySettings && actor.role !== 'admin') {
+      return c.json(
+        { error: 'Only administrators can change OpenTelemetry settings' },
+        403,
+      );
+    }
+
     try {
       const before = toSystemSettingsResponse(getSystemSettings());
       // Deprecated compatibility inputs. Accept them so stale Web clients do
@@ -2271,6 +2283,18 @@ configRoutes.put(
       const effectiveSettings = { ...validation.data };
       const secretKey = effectiveSettings.observabilitySecretKey;
       delete effectiveSettings.observabilitySecretKey;
+      if (
+        effectiveSettings.observabilityEndpoint &&
+        !isSafeOtelEndpoint(effectiveSettings.observabilityEndpoint)
+      ) {
+        return c.json(
+          {
+            error:
+              'OpenTelemetry 地址必须使用 HTTPS；HTTP 仅允许 localhost 或 127.0.0.1。',
+          },
+          400,
+        );
+      }
       for (const key of [
         'maxConcurrentHostProcesses',
         'maxConcurrentScripts',
@@ -2309,7 +2333,6 @@ configRoutes.put(
       );
       if (secretKey) changedFields.push('observabilitySecretKey');
       if (changedFields.length > 0) {
-        const actor = c.get('user') as AuthUser;
         logAuthEvent({
           event_type: 'system_settings_updated',
           username: actor.username,

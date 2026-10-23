@@ -76,7 +76,8 @@ Public：
 
 ## 系统设置与 OpenTelemetry
 
-`GET|PUT /api/config/system` 受 `manage_system_config` 权限保护。系统设置响应包含
+`GET|PUT /api/config/system` 受 `manage_system_config` 权限保护。OpenTelemetry 字段的
+修改还要求调用者角色为 admin；其他系统配置仍按原权限策略处理。系统设置响应包含
 `observabilityEnabled`、`observabilityEndpoint`、`observabilityPublicKey`、
 `observabilitySampleRate`、`observabilityIncludeContent` 和只读的
 `observabilityHasSecretKey`。写入请求可带 `observabilitySecretKey`；Secret Key
@@ -85,14 +86,20 @@ Web 持久配置优先于 `COMMERCEAGENT_OTEL_*` 环境变量，环境变量优�
 
 默认关闭。开启后通过 OTLP/HTTP 向配置的 Langfuse 根地址发送 trace，路径为
 `/api/public/otel/v1/traces`，使用 Basic Auth（用户名为 Public Key，密码为
-Secret Key）。不要求特定部署形态，可使用 Langfuse 云版或自托管实例。
+Secret Key）。公网地址必须使用 HTTPS；HTTP 仅允许 `localhost` 和 `127.0.0.1`
+用于本机调试。不要求特定部署形态，可使用 Langfuse 云版或自托管实例。
 
-第一阶段只导出运行 ID、轮次 ID、工作区与用户 ID 的 SHA-256 哈希、Profile
-版本、模型名、工具名、Token、耗时、错误类别和 `run_finished.reason`。消息正文、
-工具参数、工具返回和错误文本不会导出。`observabilityIncludeContent` 暂为预留
-开关：在后续阶段完成脱敏和权限设计前，即使打开也不会使正文离开本机。导出异步
-执行；导出失败不会影响 Agent 回复或 usage/计费记录，只增加进程内失败计数并输出
-一次不含端点、凭据和 payload 的分类日志。
+trace 记录运行 ID、轮次 ID、工作区与用户 ID 的 SHA-256 哈希、Profile 版本、模型名、
+工具名、Token、耗时、错误类别和 `run_finished.reason`。每次**轮次**按采样率独立
+抽样，同一会话的不同轮次可能有不同的采样结果。默认不导出正文、工具参数或工具返回。
+只有显式开启 `observabilityIncludeContent` 后，才会导出经过脱敏的用户输入、助手输出、
+工具输入和工具返回；API Key、Endpoint、手机号、邮箱、地址、收件人/客户字段、Cookie
+和令牌会在本机移除或替换后再进入 span。导出异步执行；导出失败不会影响 Agent 回复或
+usage/计费记录，只增加进程内失败计数并输出一次不含端点、凭据和 payload 的分类日志。
+
+CommerceAgent 不提供 Langfuse Trace 浏览路由。`manage_system_config` 用户可配置目标
+地址和密钥；Trace 查看权限由目标 Langfuse 项目的成员权限控制。由于同一项目内的哈希
+标识只用于筛选，不是授权边界，部署者应将项目查看权限限制给获准的运维人员。
 
 - `DELETE /api/groups/:jid/messages/:messageId`
 - `GET|PUT /api/groups/:jid/env`

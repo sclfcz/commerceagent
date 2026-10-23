@@ -533,8 +533,7 @@ export function SystemSettingsSection({
             </h2>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
               可连接 Langfuse
-              云版或自托管服务。默认关闭；启用后仅发送运行元数据，不包含消息正文、工具参数或返回值。正文上报目前只保存设置，Stage
-              2 完成脱敏前不会导出正文。
+              云版或自托管服务。默认关闭；默认仅发送运行元数据。显式开启正文上报后，用户输入、助手输出和工具数据会先脱敏再导出。
             </p>
           </header>
           <div className="space-y-4 max-w-2xl">
@@ -547,7 +546,9 @@ export function SystemSettingsSection({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="otel-endpoint">Langfuse 地址</Label>
+              <Label htmlFor="otel-endpoint">
+                Langfuse 地址（公网必须 HTTPS）
+              </Label>
               <Input
                 id="otel-endpoint"
                 type="url"
@@ -559,7 +560,8 @@ export function SystemSettingsSection({
                 autoComplete="url"
               />
               <p className="text-xs text-muted-foreground">
-                填写服务根地址，导出路径由 CommerceAgent 自动补全。
+                填写服务根地址，导出路径由 CommerceAgent 自动补全；HTTP 仅支持
+                localhost 与 127.0.0.1。
               </p>
             </div>
             <div className="space-y-2">
@@ -610,10 +612,12 @@ export function SystemSettingsSection({
             <div className="flex items-start justify-between gap-4">
               <div>
                 <Label htmlFor="otel-include-content">
-                  允许上报正文（预留）
+                  允许上报脱敏后的正文
                 </Label>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Stage 2 的脱敏与权限隔离完成后才会生效。
+                  每个轮次按采样率独立抽样。API
+                  Key、Endpoint、联系方式、地址、收件信息、Cookie
+                  和令牌会在本机脱敏。
                 </p>
               </div>
               <Switch

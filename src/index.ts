@@ -9397,13 +9397,16 @@ async function runAgent(
   );
   const observabilityRunId = queue.getActiveQueryId(chatJid) ?? undefined;
   if (observabilityRunId) {
-    startObservabilityRun({
-      runId: observabilityRunId,
-      turnId,
-      workspace: group.folder,
-      profileVersion: resolvedAgentProfile?.version,
-      userId: group.created_by ?? undefined,
-    });
+    startObservabilityRun(
+      {
+        runId: observabilityRunId,
+        turnId,
+        workspace: group.folder,
+        profileVersion: resolvedAgentProfile?.version,
+        userId: group.created_by ?? undefined,
+      },
+      prompt,
+    );
   }
   const interactionMode = resolveRuntimeInteractionMode(
     getWorkspaceInteractionMode(group.folder),

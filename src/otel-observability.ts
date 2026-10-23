@@ -8,7 +8,12 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 
 import type { StreamEvent } from './types.js';
-import { getObservabilitySecret, getSystemSettings } from './runtime-config.js';
+import { serializeRedactedContent } from './otel-redaction.js';
+import {
+  getObservabilitySecret,
+  getSystemSettings,
+  isSafeOtelEndpoint,
+} from './runtime-config.js';
 import { logger } from './logger.js';
 
 const SERVICE_NAME = 'commerceagent';
@@ -32,6 +37,7 @@ export interface ObservabilityExportConfig {
   publicKey: string;
   secretKey: string;
   sampleRate: number;
+  includeContent: boolean;
 }
 
 function hashIdentity(value: string | undefined): string {
@@ -61,6 +67,7 @@ function readExportConfig(): ObservabilityExportConfig {
     publicKey: settings.observabilityPublicKey,
     secretKey: getObservabilitySecret(),
     sampleRate: settings.observabilitySampleRate,
+    includeContent: settings.observabilityIncludeContent,
   };
 }
 
@@ -74,7 +81,9 @@ function makeExporter(config: ObservabilityExportConfig): {
   const endpoint = config.endpoint.trim().replace(/\/+$/, '');
   const publicKey = config.publicKey.trim();
   const secret = config.secretKey;
-  if (!endpoint || !publicKey || !secret) return null;
+  if (!endpoint || !isSafeOtelEndpoint(endpoint) || !publicKey || !secret) {
+    return null;
+  }
 
   const auth = Buffer.from(`${publicKey}:${secret}`).toString('base64');
   const exporter = new OTLPTraceExporter({
@@ -113,16 +122,21 @@ export class ObservabilityRun {
   private readonly startedAt = Date.now();
   private readonly toolSpans = new Map<string, Span>();
   private readonly modelSpans = new Map<string, Span>();
+  private readonly includeContent: boolean;
+  private readonly assistantOutput: string[] = [];
+  private assistantOutputLength = 0;
   private finished = false;
 
   constructor(
     identity: ObservabilityRunIdentity,
     config: ObservabilityExportConfig,
+    initialInput?: string,
   ) {
     const initialized = makeExporter(config);
     if (!initialized) throw new Error('observability exporter not configured');
     this.provider = initialized.provider;
     this.tracer = initialized.tracer;
+    this.includeContent = config.includeContent;
     const userHash = hashIdentity(identity.userId);
     const workspaceHash = hashIdentity(identity.workspace);
     this.root = initialized.tracer.startSpan('commerceagent.turn', {
@@ -139,6 +153,12 @@ export class ObservabilityRun {
         'service.name': SERVICE_NAME,
       },
     });
+    if (this.includeContent && initialInput) {
+      this.root.setAttribute(
+        'langfuse.observation.input',
+        serializeRedactedContent(initialInput),
+      );
+    }
   }
 
   private parentContext() {
@@ -157,6 +177,13 @@ export class ObservabilityRun {
             'gen_ai.operation.name': 'execute_tool',
             'gen_ai.tool.name': event.toolName ?? 'unknown',
             'commerceagent.agent_scope': event.agentScope ?? 'unknown',
+            ...(this.includeContent
+              ? {
+                  'langfuse.observation.input': serializeRedactedContent(
+                    event.toolInput ?? event.toolInputSummary ?? '',
+                  ),
+                }
+              : {}),
           },
         },
         parent,
@@ -176,6 +203,12 @@ export class ObservabilityRun {
       if (span && event.toolResult?.startsWith('⚠️ ')) {
         span.setAttribute('error.type', 'tool_error');
         span.setStatus({ code: 2 });
+      }
+      if (span && this.includeContent && event.toolResult) {
+        span.setAttribute(
+          'langfuse.observation.output',
+          serializeRedactedContent(event.toolResult),
+        );
       }
       span?.end();
       this.toolSpans.delete(event.toolUseId);
@@ -251,6 +284,18 @@ export class ObservabilityRun {
       }
       return;
     }
+    if (
+      this.includeContent &&
+      event.eventType === 'text_delta' &&
+      event.text &&
+      this.assistantOutputLength < 16_000
+    ) {
+      const remaining = 16_000 - this.assistantOutputLength;
+      const next = event.text.slice(0, remaining);
+      this.assistantOutput.push(next);
+      this.assistantOutputLength += next.length;
+      return;
+    }
     if (event.eventType === 'status' && event.statusText) {
       const normalized = event.statusText.toLowerCase();
       if (normalized.includes('error') || normalized.includes('failed')) {
@@ -278,6 +323,12 @@ export class ObservabilityRun {
       'commerceagent.run_finished.reason': reason,
       'commerceagent.run.duration_ms': duration,
     });
+    if (this.includeContent && this.assistantOutput.length > 0) {
+      this.root.setAttribute(
+        'langfuse.observation.output',
+        serializeRedactedContent(this.assistantOutput.join('')),
+      );
+    }
     if (reason === 'runner_exit' || reason === 'stopped') {
       this.root.setAttribute('error.type', reason);
       this.root.setStatus({ code: 2 });
@@ -302,10 +353,15 @@ export class ObservabilityRun {
 
 export function startObservabilityRun(
   identity: ObservabilityRunIdentity,
+  initialInput?: string,
 ): void {
   if (activeRuns.has(identity.runId)) return;
   try {
-    const run = new ObservabilityRun(identity, readExportConfig());
+    const run = new ObservabilityRun(
+      identity,
+      readExportConfig(),
+      initialInput,
+    );
     activeRuns.set(identity.runId, run);
   } catch {
     // Misconfiguration must not affect the agent turn; no secret or endpoint
@@ -316,9 +372,10 @@ export function startObservabilityRun(
 export function createObservabilityRun(
   identity: ObservabilityRunIdentity,
   config: ObservabilityExportConfig,
+  initialInput?: string,
 ): ObservabilityRun | null {
   try {
-    return new ObservabilityRun(identity, config);
+    return new ObservabilityRun(identity, config, initialInput);
   } catch {
     return null;
   }

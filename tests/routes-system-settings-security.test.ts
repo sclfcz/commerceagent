@@ -114,6 +114,51 @@ afterAll(() => {
 });
 
 describe('system settings capability boundaries', () => {
+  test('users without manage_system_config cannot read or change OTel settings', async () => {
+    asUser('member');
+    expect((await app.request('/api/config/system')).status).toBe(403);
+    const response = await app.request('/api/config/system', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        observabilityEnabled: true,
+        observabilitySecretKey: 'synthetic-denied-secret',
+      }),
+    });
+    expect(response.status).toBe(403);
+    expect(fs.existsSync(path.join(tmpDir, 'config', 'otel-secret.json'))).toBe(
+      false,
+    );
+  });
+
+  test('non-admin with manage_system_config still cannot change OTel settings', async () => {
+    asUser('member', ['manage_system_config']);
+    const response = await app.request('/api/config/system', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ observabilityEnabled: true }),
+    });
+    expect(response.status).toBe(403);
+  });
+
+  test('rejects remote HTTP OTel endpoints before storing credentials', async () => {
+    asUser('admin', ['manage_system_config']);
+    const response = await app.request('/api/config/system', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        observabilityEnabled: true,
+        observabilityEndpoint: 'http://otel.example.test',
+        observabilityPublicKey: 'pk-synthetic',
+        observabilitySecretKey: 'synthetic-endpoint-secret',
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(fs.existsSync(path.join(tmpDir, 'config', 'otel-secret.json'))).toBe(
+      false,
+    );
+  });
+
   test('system config response excludes host and billing fields', async () => {
     asUser('member', ['manage_system_config']);
     const response = await app.request('/api/config/system');
@@ -140,7 +185,7 @@ describe('system settings capability boundaries', () => {
   });
 
   test('stores OTel Secret Key encrypted and never returns it from system config', async () => {
-    asUser('member', ['manage_system_config']);
+    asUser('admin', ['manage_system_config']);
     const secret = 'synthetic-otel-secret-never-return-this';
     const saved = await app.request('/api/config/system', {
       method: 'PUT',

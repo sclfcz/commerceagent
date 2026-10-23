@@ -4,6 +4,7 @@ import { once } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { StreamEvent } from '../shared/stream-event.js';
+import { createHash } from 'node:crypto';
 import {
   createObservabilityRun,
   getObservabilityExportFailureCount,
@@ -24,6 +25,7 @@ const config: ObservabilityExportConfig = {
   publicKey: 'pk-test',
   secretKey: 'sk-test',
   sampleRate: 1,
+  includeContent: false,
 };
 
 async function listen(server: Server): Promise<number> {
@@ -154,6 +156,120 @@ describe('OpenTelemetry runtime export', () => {
     expect(requestBody).toContain('get_order');
     expect(requestBody).toContain('usage-event-id-1');
     expect(requestBody).toContain('completed');
+  });
+
+  it('exports only locally redacted content when explicitly enabled', async () => {
+    let requestBody = '';
+    let resolveRequest!: () => void;
+    const requestReceived = new Promise<void>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const server = createServer((req, res) => {
+      req.setEncoding('utf8');
+      req.on('data', (chunk: string) => (requestBody += chunk));
+      req.on('end', () => {
+        res.writeHead(200).end();
+        resolveRequest();
+      });
+    });
+    servers.push(server);
+    const port = await listen(server);
+    const run = createObservabilityRun(
+      identity,
+      {
+        ...config,
+        endpoint: `http://127.0.0.1:${port}`,
+        includeContent: true,
+      },
+      'Please deliver the parcel and confirm the order status. Email private@example.test, call +1 415-555-2671, use https://api.example.test/v1 with api_key=sk-live-otelsynthetic1234567890 Bearer synthetic-bearer-value. Address: 123 Main Street.',
+    );
+    expect(run).not.toBeNull();
+    run!.record({
+      eventType: 'tool_use_start',
+      toolName: 'lookup_order',
+      toolUseId: 'private-tool-call',
+      toolInput: {
+        order_id: 'synthetic-order-123',
+        recipientName: 'Synthetic Recipient Name',
+        shipping_address: '88 Example Road, Example City',
+        phoneNumber: '13800138000',
+      },
+    } as StreamEvent);
+    run!.record({
+      eventType: 'tool_result',
+      toolUseId: 'private-tool-call',
+      toolResult:
+        'Order synthetic-order-123 is delayed. recipient: Synthetic Recipient Name, address: 88 Example Road, Example City; Cookie: session=synthetic-cookie; Authorization: Bearer synthetic-result-token',
+      detail: 'detail-must-not-be-exported',
+    } as StreamEvent);
+    run!.record({
+      eventType: 'text_delta',
+      text: 'Answer: the parcel is delayed and the order is still active.',
+    } as StreamEvent);
+    run!.finish('completed');
+    await requestReceived;
+
+    for (const sensitive of [
+      'private@example.test',
+      '+1 415-555-2671',
+      'https://api.example.test/v1',
+      'sk-live-otelsynthetic1234567890',
+      'synthetic-bearer-value',
+      '123 Main Street',
+      'Synthetic Recipient Name',
+      '88 Example Road, Example City',
+      '13800138000',
+      'synthetic-cookie',
+      'synthetic-result-token',
+      'detail-must-not-be-exported',
+    ]) {
+      expect(requestBody).not.toContain(sensitive);
+    }
+    expect(requestBody).toContain('Please deliver the parcel');
+    expect(requestBody).toContain('Answer: the parcel is delayed');
+    expect(requestBody).toContain('[REDACTED]');
+  });
+
+  it('keeps user identity hashes scoped to each trace', async () => {
+    const requestBodies: string[] = [];
+    let resolveRequests!: () => void;
+    const requestsReceived = new Promise<void>((resolve) => {
+      resolveRequests = resolve;
+    });
+    const server = createServer((req, res) => {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk: string) => (body += chunk));
+      req.on('end', () => {
+        requestBodies.push(body);
+        res.writeHead(200).end();
+        if (requestBodies.length === 2) resolveRequests();
+      });
+    });
+    servers.push(server);
+    const port = await listen(server);
+    const userA = createObservabilityRun(
+      { ...identity, runId: 'run-user-a', userId: 'private-user-a' },
+      { ...config, endpoint: `http://127.0.0.1:${port}` },
+    );
+    const userB = createObservabilityRun(
+      { ...identity, runId: 'run-user-b', userId: 'private-user-b' },
+      { ...config, endpoint: `http://127.0.0.1:${port}` },
+    );
+    expect(userA).not.toBeNull();
+    expect(userB).not.toBeNull();
+    userA!.finish('completed');
+    userB!.finish('completed');
+    await requestsReceived;
+
+    const hashA = createHash('sha256').update('private-user-a').digest('hex');
+    const hashB = createHash('sha256').update('private-user-b').digest('hex');
+    expect(requestBodies[0]).toContain(hashA);
+    expect(requestBodies[0]).not.toContain(hashB);
+    expect(requestBodies[0]).not.toContain('private-user-b');
+    expect(requestBodies[1]).toContain(hashB);
+    expect(requestBodies[1]).not.toContain(hashA);
+    expect(requestBodies[1]).not.toContain('private-user-a');
   });
 
   it('keeps turn completion and usage independent of an unreachable exporter', async () => {
