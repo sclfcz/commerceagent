@@ -617,7 +617,7 @@ export function SystemSettingsSection({
                 <p className="mt-1 text-xs text-muted-foreground">
                   每个轮次按采样率独立抽样。API
                   Key、Endpoint、联系方式、地址、收件信息、Cookie
-                  和令牌会在本机脱敏。
+                  和令牌会在本机脱敏；脱敏尽力而为，不保证识别所有个人信息。生产环境处理真实客户数据时建议保持关闭正文上报。
                 </p>
               </div>
               <Switch

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import {
+  failClosedOnResidualSensitiveContent,
   redactObservabilityValue,
   serializeRedactedContent,
 } from '../src/otel-redaction.js';
@@ -70,5 +71,55 @@ describe('OpenTelemetry content redaction', () => {
       '[REDACTED]',
     );
     expect(serializeRedactedContent('x'.repeat(20_000))).toHaveLength(16_000);
+  });
+
+  test('redacts credentials, provider tokens, personal identifiers, cards, IPs and naked municipality addresses', () => {
+    const sensitiveSamples = [
+      'Authorization: Basic dXNlcjpwYXNz',
+      'ghp_1234567890abcdefghijklmnopqrstuv',
+      'gho_1234567890abcdefghijklmnopqrstuv',
+      'github_pat_1234567890_abcdefghijklmnopqrstuvwxyz',
+      'AKIAIOSFODNN7EXAMPLE',
+      'ASIAIOSFODNN7EXAMPLE',
+      'xoxb-SYNTHETIC-ONLY-DO-NOT-USE',
+      'glpat-1234567890abcdefghijklmnop',
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      'o9R5q0nZ7W2cK4mY8sA1vP6d',
+      '11010519491231002X',
+      '4111111111111111',
+      '10.0.3.12:8080',
+      '[2001:db8::1]:443',
+      '北京市朝阳区建国路88号3楼',
+    ];
+    const raw = `Sensitive values: ${sensitiveSamples.join(' | ')}`;
+    const result = serializeRedactedContent({
+      text: raw,
+      order_id: 'ORD-2026-0912',
+      amount: 129.5,
+      date: '2026-09-12',
+    });
+
+    for (const sensitive of sensitiveSamples) {
+      expect(result).not.toContain(sensitive);
+    }
+    expect(result).toContain('ORD-2026-0912');
+    expect(result).toContain('129.5');
+    expect(result).toContain('2026-09-12');
+  });
+
+  test('fails closed to original length and hash if a high-risk value survives redaction', () => {
+    const original = 'This body contains a synthetic credential.';
+    const fallback = failClosedOnResidualSensitiveContent(
+      original,
+      'Authorization: Basic dXNlcjpwYXNz',
+    );
+    const parsed = JSON.parse(fallback);
+    expect(parsed).toEqual({
+      content_redacted: true,
+      original_length: original.length,
+      original_sha256: expect.any(String),
+    });
+    expect(fallback).not.toContain('dXNlcjpwYXNz');
+    expect(fallback).not.toContain(original);
   });
 });
