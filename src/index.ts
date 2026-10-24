@@ -9379,6 +9379,23 @@ function ensureTerminalContainerStarted(chatJid: string): boolean {
 }
 
 async function runAgent(
+  ...args: Parameters<typeof runAgentTurn>
+): ReturnType<typeof runAgentTurn> {
+  const [group, , chatJid] = args;
+  return withObservabilityCleanup(
+    chatJid,
+    () => queue.getActiveQueryId(chatJid) ?? undefined,
+    () => runAgentTurn(...args),
+    (result) => {
+      if (queue.getRecentStopDisposition(group.folder) === 'discard')
+        return 'stopped';
+      if (result.status === 'success') return 'completed';
+      return result.status === 'closed' ? 'released' : 'runner_exit';
+    },
+  );
+}
+
+async function runAgentTurn(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,

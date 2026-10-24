@@ -36,6 +36,7 @@
     "bench:judge": "npm --prefix benchmarks run judge --",
     "bench:judge:batch": "npm --prefix benchmarks run judge:batch --",
     "bench:calibrate": "npm --prefix benchmarks run calibrate --",
+    "bench:langfuse-drafts": "npm --prefix benchmarks run langfuse-drafts --",
     "bench:selftest": "npm --prefix benchmarks run selftest --",
     "bench:review": "npm --prefix benchmarks run review --"
   },

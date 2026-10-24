@@ -425,3 +425,11 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 - 验证：Fake Messages 服务 6 种响应脚本、预算计算和选型门槛测试 8 项通过；68 条 reference/oracle 自检通过、932 个变异被拒绝；当前源码 Docker 镜像完整 E2E selftest 通过（1 次 attempt、2 次 fixture MCP 调用、测量有效、parity/reassessment/report/leak check 通过）。无真实模型调用、无 holdout 运行、无选型结论。
 - 后续最终代码路径把 `bench:selftest` 改为驱动真实 Promptfoo Provider 与运行器，而非手工拼接 Promptfoo 结果；CI/本地 `make bench-selftest` 必须从当前 checkout 构建镜像，避免旧 latest 镜像的 entrypoint 漂移。完整 selftest 最终复跑通过，synthetic candidate 保持 `gateway_pending`，因此业务通过只验证链路，不计入模型质量。
 - 最终验收：全量 `make test` 为 354 个测试文件、3162 项通过；benchmark typecheck、项目 typecheck、`make build`、`docs:check`、`format:check`、`git diff --check` 均通过。预算 CLI 已用历史 50-attempt run 验证输出 150 次筛选 attempts、CNY 14.13 估算和冷启动时间代理值。离线 full selftest 报告 1 次业务 attempt 测量有效、2 次 fixture MCP 成功调用、独立重评/报告/泄漏探针通过、真实模型调用 0、holdout 0。
+
+### 阶段 3 Langfuse 元数据回流草稿（2026-10-24）
+
+- 主 Agent `runAgent` 与 Conversation Agent 都通过 `withObservabilityCleanup` 在所有返回/异常路径收尾；每条已注册 run 在 `containerTimeout + 60s` 后还有超时关闭兜底，并清除 runId、chatJid、turnId 映射和定时器。新轮次遇到同 chat 的旧 trace 会先关闭旧 run，避免静默漏 trace。
+- 新增只读 `bench:langfuse-drafts`：从系统设置或 `COMMERCEAGENT_OTEL_*` 环境回退读取 Langfuse 地址/Key；查询限时窗的 Observations API v2 `core,metadata` 与 Scores API v3 数值分数，不请求 input/output、状态文本、工具参数/返回、评分评论、模型名、Endpoint、用户或工作区标识。Trace ID 只在内存中关联，不写入草稿。
+- 输出仅为 `benchmarks/results/langfuse-drafts/` 下 0700/0600 的空白结构草稿；Prompt、业务分类、风险等级、split、期望状态/事实/证据、工具计划和 rubric 均留空。脚本不读取或写入 cases/dev、cases/holdout，不触碰 holdout ledger，不提供自动提升或提交功能。草稿必须由人补全、通过 reference/oracle 自检和变异测试并确认后，才能手动进入回归用例。
+- 本机 Langfuse Compose 的 Web 端口改映射到 `127.0.0.1:3100`，CommerceAgent 保持默认 3000；主系统设置地址同步到 3100，正文上报关闭。所有 Compose 宿主端口保持 loopback 绑定，历史联调 trace 仍为 0。
+- 验证：Langfuse 草稿与 OTel 生命周期专项测试 15 项通过；benchmark typecheck、`make typecheck`、`make build`、`docs:check`、格式检查通过。全量测试沿用 4 workers 和临时权限镜像，358 个测试文件、3196 项通过。单元测试使用模拟 Langfuse API；另外只读联调本机空项目，返回 0 observations/0 drafts，随后移除了空结果目录。没有读取正文、写入 cases、读取 holdout 或调用外部模型。阶段 4 及之后未开始。

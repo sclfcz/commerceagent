@@ -104,6 +104,11 @@ CommerceAgent 不提供 Langfuse Trace 浏览路由。`manage_system_config` 用
 地址和密钥；Trace 查看权限由目标 Langfuse 项目的成员权限控制。由于同一项目内的哈希
 标识只用于筛选，不是授权边界，部署者应将项目查看权限限制给获准的运维人员。
 
+Langfuse 可使用云版或自托管实例；CommerceAgent 只需要对应项目的 API 地址、Public Key
+和 Secret Key。benchmark 的 `bench:langfuse-drafts` 命令是只读回流工具，只查询元数据与
+评分字段，不读取 trace 正文、工具参数/返回或评分评论；输出仅为被 Git 忽略的空白结构草稿，
+不会写入业务用例或 holdout。需要正文时，必须由人工在受控环境中另行补全并完成脱敏审核。
+
 - `DELETE /api/groups/:jid/messages/:messageId`
 - `GET|PUT /api/groups/:jid/env`
 - `GET|PUT /api/groups/:jid/mcp`，仅兼容旧客户端
