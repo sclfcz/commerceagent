@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { ROOT_CONTEXT, trace, type Span } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
@@ -19,12 +19,17 @@ import { logger } from './logger.js';
 const SERVICE_NAME = 'commerceagent';
 const OTEL_TIMEOUT_MS = 2_000;
 const FLUSH_TIMEOUT_MS = 2_500;
+const STALE_RUN_TIMEOUT_BUFFER_MS = 60_000;
 const activeRuns = new Map<string, ObservabilityRun>();
+const activeRunsByChatJid = new Map<string, ObservabilityRun>();
+const activeRunsByTurnId = new Map<string, ObservabilityRun>();
+const activeRunTimeouts = new Map<ObservabilityRun, NodeJS.Timeout>();
 let exportFailureCount = 0;
 let loggedExportFailure = false;
 
 export interface ObservabilityRunIdentity {
-  runId: string;
+  runId?: string;
+  chatJid?: string;
   turnId?: string;
   workspace: string;
   profileVersion?: number;
@@ -125,7 +130,10 @@ export class ObservabilityRun {
   private readonly includeContent: boolean;
   private readonly assistantOutput: string[] = [];
   private assistantOutputLength = 0;
+  private runId: string;
   private finished = false;
+  readonly chatJid?: string;
+  readonly turnId?: string;
 
   constructor(
     identity: ObservabilityRunIdentity,
@@ -137,6 +145,11 @@ export class ObservabilityRun {
     this.provider = initialized.provider;
     this.tracer = initialized.tracer;
     this.includeContent = config.includeContent;
+    this.chatJid = identity.chatJid;
+    this.turnId = identity.turnId;
+    this.runId =
+      identity.runId ??
+      (identity.turnId ? `turn-${identity.turnId}` : randomUUID());
     const userHash = hashIdentity(identity.userId);
     const workspaceHash = hashIdentity(identity.workspace);
     this.root = initialized.tracer.startSpan('commerceagent.turn', {
@@ -144,7 +157,7 @@ export class ObservabilityRun {
         'langfuse.trace.name': 'commerceagent.turn',
         'langfuse.user.id': userHash,
         'langfuse.session.id': workspaceHash,
-        'langfuse.trace.metadata.run_id': identity.runId,
+        'langfuse.trace.metadata.run_id': this.runId,
         'langfuse.trace.metadata.turn_id': identity.turnId ?? 'unknown',
         'langfuse.trace.metadata.workspace_id_hash': workspaceHash,
         'langfuse.trace.metadata.agent_profile_version':
@@ -163,6 +176,12 @@ export class ObservabilityRun {
 
   private parentContext() {
     return trace.setSpanContext(ROOT_CONTEXT, this.root.spanContext());
+  }
+
+  bindRunId(runId: string): void {
+    if (!runId || runId === this.runId) return;
+    this.runId = runId;
+    this.root.setAttribute('langfuse.trace.metadata.run_id', runId);
   }
 
   record(event: StreamEvent): void {
@@ -351,21 +370,122 @@ export class ObservabilityRun {
   }
 }
 
+function removeActiveRun(run: ObservabilityRun): void {
+  const timeout = activeRunTimeouts.get(run);
+  if (timeout) clearTimeout(timeout);
+  activeRunTimeouts.delete(run);
+  for (const [alias, candidate] of activeRuns) {
+    if (candidate === run) activeRuns.delete(alias);
+  }
+  for (const [jid, candidate] of activeRunsByChatJid) {
+    if (candidate === run) activeRunsByChatJid.delete(jid);
+  }
+  for (const [turnId, candidate] of activeRunsByTurnId) {
+    if (candidate === run) activeRunsByTurnId.delete(turnId);
+  }
+}
+
+function finishAndRemoveActiveRun(run: ObservabilityRun, reason: string): void {
+  removeActiveRun(run);
+  run.finish(reason);
+}
+
+function configuredStaleRunTimeoutMs(): number {
+  try {
+    const timeout = getSystemSettings().containerTimeout;
+    return Math.max(1_000, timeout) + STALE_RUN_TIMEOUT_BUFFER_MS;
+  } catch {
+    return 1_800_000 + STALE_RUN_TIMEOUT_BUFFER_MS;
+  }
+}
+
+export function getActiveObservabilityRunCount(): number {
+  return new Set(activeRuns.values()).size;
+}
+
+export function startObservabilityRunWithConfig(
+  identity: ObservabilityRunIdentity,
+  config: ObservabilityExportConfig,
+  initialInput?: string,
+  staleTimeoutMs = configuredStaleRunTimeoutMs(),
+): void {
+  const runId =
+    identity.runId ?? (identity.turnId ? `turn-${identity.turnId}` : undefined);
+  if (!runId) return;
+
+  const activeChatRun = identity.chatJid
+    ? activeRunsByChatJid.get(identity.chatJid)
+    : undefined;
+  if (activeChatRun) {
+    // Duplicate start notifications for the same turn are harmless. A new
+    // turn on the same chat means the old run missed its terminal callback;
+    // close it rather than silently suppressing this turn's trace.
+    if (identity.turnId && activeChatRun.turnId === identity.turnId) return;
+    finishAndRemoveActiveRun(activeChatRun, 'runner_exit');
+  }
+
+  const activeRun = activeRuns.get(runId);
+  if (activeRun) {
+    if (
+      activeRun.chatJid === identity.chatJid &&
+      activeRun.turnId === identity.turnId
+    ) {
+      return;
+    }
+    finishAndRemoveActiveRun(activeRun, 'runner_exit');
+  }
+
+  try {
+    const run = new ObservabilityRun(
+      { ...identity, runId },
+      config,
+      initialInput,
+    );
+    activeRuns.set(runId, run);
+    if (identity.chatJid) activeRunsByChatJid.set(identity.chatJid, run);
+    if (identity.turnId) activeRunsByTurnId.set(identity.turnId, run);
+    const timeout = setTimeout(
+      () => finishAndRemoveActiveRun(run, 'runner_exit'),
+      staleTimeoutMs,
+    );
+    timeout.unref?.();
+    activeRunTimeouts.set(run, timeout);
+  } catch {
+    // Misconfiguration must not affect the agent turn; no secret or endpoint
+    // detail is logged here.
+  }
+}
+
 export function startObservabilityRun(
   identity: ObservabilityRunIdentity,
   initialInput?: string,
 ): void {
-  if (activeRuns.has(identity.runId)) return;
   try {
-    const run = new ObservabilityRun(
-      identity,
-      readExportConfig(),
-      initialInput,
-    );
-    activeRuns.set(identity.runId, run);
+    startObservabilityRunWithConfig(identity, readExportConfig(), initialInput);
   } catch {
-    // Misconfiguration must not affect the agent turn; no secret or endpoint
-    // detail is logged here.
+    // Observability configuration reads must never interrupt the agent turn.
+  }
+}
+
+export async function withObservabilityCleanup<T>(
+  chatJid: string,
+  getRunId: () => string | undefined,
+  operation: () => Promise<T>,
+  getFinishReason: (result: T) => string,
+): Promise<T> {
+  let reason = 'runner_exit';
+  try {
+    const result = await operation();
+    reason = getFinishReason(result);
+    return result;
+  } finally {
+    let runId = '';
+    try {
+      runId = getRunId() ?? '';
+    } catch {
+      // The chat mapping remains the cleanup fallback if queue state is gone.
+    }
+    finishObservabilityRun(chatJid, runId, reason);
   }
 }
 
@@ -385,21 +505,37 @@ export function recordObservabilityEvent(
   runId: string | undefined,
   event: StreamEvent | undefined,
 ): void {
-  if (!runId || !event) return;
-  activeRuns.get(runId)?.record(event);
+  if (!event) return;
+  const run =
+    (runId ? activeRuns.get(runId) : undefined) ??
+    (event.queryRunId ? activeRuns.get(event.queryRunId) : undefined) ??
+    (event.turnId ? activeRunsByTurnId.get(event.turnId) : undefined);
+  if (!run) return;
+  if (event.queryRunId) {
+    run.bindRunId(event.queryRunId);
+    activeRuns.set(event.queryRunId, run);
+  }
+  run.record(event);
 }
 
 export function recordObservabilityFailure(
+  chatJid: string,
   runId: string | undefined,
   category: 'provider_failure' | 'runner_error' | 'runtime_error',
 ): void {
-  if (!runId) return;
-  activeRuns.get(runId)?.recordFailure(category);
+  const run =
+    (runId ? activeRuns.get(runId) : undefined) ??
+    activeRunsByChatJid.get(chatJid);
+  run?.recordFailure(category);
 }
 
-export function finishObservabilityRun(runId: string, reason: string): void {
-  const run = activeRuns.get(runId);
+export function finishObservabilityRun(
+  chatJid: string,
+  runId: string,
+  reason: string,
+): void {
+  const run = activeRuns.get(runId) ?? activeRunsByChatJid.get(chatJid);
   if (!run) return;
-  activeRuns.delete(runId);
-  run.finish(reason);
+  run.bindRunId(runId);
+  finishAndRemoveActiveRun(run, reason);
 }

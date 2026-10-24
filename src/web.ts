@@ -3192,7 +3192,7 @@ export function broadcastRunFinished(
   reason: RunFinishReason,
   finishedAt: number,
 ): void {
-  finishObservabilityRun(runId, reason);
+  finishObservabilityRun(chatJid, runId, reason);
   const baseJid = stripRuntimeJidSuffix(chatJid);
   const jid = normalizeRuntimeJid(chatJid);
   const allowedUserIds = getGroupAllowedUserIds(baseJid);
