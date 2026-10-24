@@ -109,9 +109,18 @@ function assertMetadataOnly(row: Record<string, unknown>): void {
     'userId',
     'sessionId',
   ]) {
-    if (Object.hasOwn(row, field))
+    if (Object.hasOwn(row, field) && containsContent(row[field]))
       throw new Error('langfuse_content_field_rejected');
   }
+}
+
+function containsContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'string') return value.trim().length > 0;
+  if (Array.isArray(value)) return value.some(containsContent);
+  if (typeof value === 'object')
+    return Object.values(value).some(containsContent);
+  return true;
 }
 
 function safeOpaqueId(value: unknown): string | null {

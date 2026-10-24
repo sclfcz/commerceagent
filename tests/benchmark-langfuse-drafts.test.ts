@@ -281,4 +281,31 @@ describe('Langfuse metadata-only regression drafts', () => {
       }),
     ).rejects.toThrow('langfuse_content_field_rejected');
   });
+
+  it('accepts null or empty optional body fields without copying them', async () => {
+    const fetcher: typeof fetch = async (input) => {
+      const url = new URL(String(input));
+      const data = url.pathname.endsWith('/scores')
+        ? [{ ...scores[0], comment: null, metadata: { note: '' } }]
+        : url.searchParams.get('name') === 'commerceagent.turn'
+          ? [{ ...roots[0], input: null, output: '', statusMessage: null }]
+          : tools;
+      return new Response(JSON.stringify({ data, meta: { cursor: null } }), {
+        status: 200,
+      });
+    };
+
+    const bundle = await collectLangfuseDraftBundle({
+      endpoint: 'http://127.0.0.1:3100',
+      publicKey: 'pk-synthetic',
+      secretKey: 'sk-synthetic',
+      from: new Date('2026-10-20T00:00:00.000Z'),
+      to: new Date('2026-10-24T00:00:00.000Z'),
+      minScore: 4,
+      fetcher,
+    });
+    expect(bundle.selection.draftCount).toBe(1);
+    expect(JSON.stringify(bundle)).not.toContain('statusMessage');
+    expect(JSON.stringify(bundle)).not.toContain('comment');
+  });
 });
