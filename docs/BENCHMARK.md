@@ -240,7 +240,37 @@ Provider 导入无论成功或失败均立即删除 `provider-snapshot`。每个
 Container 验收或模型质量结论。
 
 阶段 4 的业务用例集已加入。阶段 5 已按真实 fixture 工具返回修正 Judge 输入，并完成相同样本诊断和 20 条新人工盲标。新样本在关键维度几乎全为高分，且每个关键维度都没有 3 条人工低分，样本信息不足；本轮 κ 不作报告，也不能据此判断 Judge 好坏或进入排名。阶段 6 只按确定性断言排名；Profile 对比和正式多候选运行尚未开始。最新结果见 [验证记录](BENCHMARK-VALIDATION.md)。
-第一版不引入 Langfuse；线上观测仍需先定义脱敏和保留期限。
+
+## Langfuse 失败回流草稿
+
+CommerceAgent 的 Langfuse OTel 导出为独立 opt-in 设置；benchmark 默认使用隔离 `DATA_DIR`，
+不读取或继承生产 Langfuse 配置，因此 `bench:run` 与 `bench:selftest` 不会向 Langfuse 写入 trace。
+回流命令只读 Langfuse API，地址和密钥取自 CommerceAgent 系统设置，或由已有的
+`COMMERCEAGENT_OTEL_ENDPOINT`、`COMMERCEAGENT_OTEL_PUBLIC_KEY`、
+`COMMERCEAGENT_OTEL_SECRET_KEY` 环境回退配置提供；不要把密钥放进命令行参数。
+
+```bash
+npm run bench:langfuse-drafts -- --from 2026-10-17T00:00:00Z --to 2026-10-24T00:00:00Z --min-score 4
+```
+
+省略时间时查询最近 7 天；单次查询窗口最多 31 天。目标需支持 Langfuse Observations API v2
+和 Scores API v3（Langfuse v4+）。脚本使用 Observations API 的 `core,metadata` 字段读取
+`commerceagent.turn` 与 `commerceagent.tool`，并用 Scores API v3
+识别低于阈值的数值评分。默认阈值为 4（1–5 评分中低于 4）；只保留 run/turn ID、终态、
+错误类别、工具名和低分条数用于选择与引用。查询不会请求 input/output、工具参数或返回、
+状态文本、评分评论、模型名、用户/工作区标识或 Endpoint。trace ID 只在内存里关联观察和评分，
+不会写入草稿。若兼容服务仍返回被禁止字段且其值非空，导出会中止；null 或空字符串占位会被
+视为空值并忽略，绝不会写入草稿。
+
+草稿写入被 `.gitignore` 排除的 `benchmarks/results/langfuse-drafts/`，文件权限为本机私有模式。
+它只生成结构骨架：Prompt、业务分类、风险等级、split、期望状态、事实、证据、工具计划和
+rubric 都留空，不推断预期答案，也不从回复正文补写内容。脚本不读取或写入
+`benchmarks/cases/dev/`、`benchmarks/cases/holdout/`，不修改 holdout ledger、不自动提交，
+也没有把草稿提升为正式用例的命令。
+
+人工审核者必须在受控环境中补全合成或已批准的任务内容及风险等级、期望状态；真实会话正文
+不能由此脚本导出。进入正式回归集前，每条草稿都必须通过固定参考答案自检、变异测试并由人
+确认。holdout 只允许在最终正式运行中使用一次，回流和调试阶段不得读取或触碰 holdout。
 
 ## 开发验证
 

@@ -36,6 +36,7 @@
     "bench:judge": "npm --prefix benchmarks run judge --",
     "bench:judge:batch": "npm --prefix benchmarks run judge:batch --",
     "bench:calibrate": "npm --prefix benchmarks run calibrate --",
+    "bench:langfuse-drafts": "npm --prefix benchmarks run langfuse-drafts --",
     "bench:selftest": "npm --prefix benchmarks run selftest --",
     "bench:review": "npm --prefix benchmarks run review --"
   },
@@ -43,6 +44,9 @@
     "@anthropic-ai/claude-agent-sdk": "0.3.205",
     "@hono/node-server": "^2.0.12",
     "@larksuiteoapi/node-sdk": "^1.58.0",
+    "@opentelemetry/api": "1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.200.0",
+    "@opentelemetry/sdk-trace-base": "2.0.1",
     "adm-zip": "^0.6.0",
     "baileys": "^7.0.0-rc13",
     "bcryptjs": "^3.0.3",

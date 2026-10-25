@@ -203,6 +203,8 @@ read-only 投影按 host-issued turn ID 精确匹配当前或已接纳的 queued
 | 路由族/操作                                       | 权限                                               |
 | ------------------------------------------------- | -------------------------------------------------- |
 | Provider、系统容量、Host 集成、注册策略、系统外观 | `manage_system_config`                             |
+| 查看 OpenTelemetry 配置                           | `manage_system_config`                             |
+| 修改 OpenTelemetry 配置和密钥                     | admin + `manage_system_config`                     |
 | Plugin Catalog 手动扫描                           | admin / `manage_system_config` 路径中的 admin 检查 |
 | 系统 MCP 写入                                     | admin                                              |
 | 用户创建、禁用、恢复、角色与权限                  | `manage_users`                                     |
@@ -215,6 +217,13 @@ read-only 投影按 host-issued turn ID 精确匹配当前或已接纳的 queued
 
 系统 MCP 默认仅 admin 可用；只有显式设置为 shared 后，普通成员的 Agent 才能进入
 有效能力清单。API 不回传 Secret 明文。
+
+CommerceAgent 不提供 Langfuse Trace 查看接口。`manage_system_config` 可配置导出目标；
+只有同时具备 `manage_system_config` 的管理员可以修改 OpenTelemetry 开关、地址和密钥；
+具备该权限的用户可读取非 Secret 设置。Trace 查看由 Langfuse 项目自身的成员权限决定。
+`user_id_hash` 和 `workspace_id_hash`
+用于 Trace 搜索与过滤，不构成访问控制。部署者应限制 Langfuse 项目成员，避免未获授权的
+用户查看其他用户的 Trace。
 
 ## 7. WebSocket
 

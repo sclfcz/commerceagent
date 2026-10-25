@@ -396,6 +396,12 @@ import {
 } from './channel-account-routing.js';
 import { testChannelAccountCredentials } from './channel-account-connectivity.js';
 import {
+  recordObservabilityEvent,
+  recordObservabilityFailure,
+  startObservabilityRun,
+  withObservabilityCleanup,
+} from './otel-observability.js';
+import {
   buildAgentProfilePrompt,
   hasAgentProfilePrompts,
 } from './agent-profile-prompts.js';
@@ -9373,6 +9379,23 @@ function ensureTerminalContainerStarted(chatJid: string): boolean {
 }
 
 async function runAgent(
+  ...args: Parameters<typeof runAgentTurn>
+): ReturnType<typeof runAgentTurn> {
+  const [group, , chatJid] = args;
+  return withObservabilityCleanup(
+    chatJid,
+    () => queue.getActiveQueryId(chatJid) ?? undefined,
+    () => runAgentTurn(...args),
+    (result) => {
+      if (queue.getRecentStopDisposition(group.folder) === 'discard')
+        return 'stopped';
+      if (result.status === 'success') return 'completed';
+      return result.status === 'closed' ? 'released' : 'runner_exit';
+    },
+  );
+}
+
+async function runAgentTurn(
   group: RegisteredGroup,
   prompt: string,
   chatJid: string,
@@ -9390,6 +9413,20 @@ async function runAgent(
   const resolvedAgentProfile = resolveEffectiveAgentProfile(
     agentProfile ?? getAgentProfileForWorkspace(group.folder, group.created_by),
   );
+  const observabilityRunId = queue.getActiveQueryId(chatJid) ?? undefined;
+  if (observabilityRunId || turnId) {
+    startObservabilityRun(
+      {
+        runId: observabilityRunId,
+        chatJid,
+        turnId,
+        workspace: group.folder,
+        profileVersion: resolvedAgentProfile?.version,
+        userId: group.created_by ?? undefined,
+      },
+      prompt,
+    );
+  }
   const interactionMode = resolveRuntimeInteractionMode(
     getWorkspaceInteractionMode(group.folder),
     { agentKind: 'main' },
@@ -9452,6 +9489,16 @@ async function runAgent(
 
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = async (output: ContainerOutput) => {
+    if (output.providerFailure) {
+      recordObservabilityFailure(
+        chatJid,
+        observabilityRunId,
+        'provider_failure',
+      );
+    } else if (output.status === 'error') {
+      recordObservabilityFailure(chatJid, observabilityRunId, 'runner_error');
+    }
+    recordObservabilityEvent(observabilityRunId, output.streamEvent);
     queue.markRunnerActivity(chatJid);
     if (
       output.ipcReceipts?.length &&
@@ -13971,6 +14018,19 @@ async function processAgentConversation(
   chatJid: string,
   agentId: string,
 ): Promise<void | boolean> {
+  const virtualChatJid = `${chatJid}#agent:${agentId}`;
+  return withObservabilityCleanup(
+    virtualChatJid,
+    () => queue.getActiveQueryId(virtualChatJid) ?? undefined,
+    () => processAgentConversationTurn(chatJid, agentId),
+    (result) => (result === false ? 'runner_exit' : 'completed'),
+  );
+}
+
+async function processAgentConversationTurn(
+  chatJid: string,
+  agentId: string,
+): Promise<void | boolean> {
   const agent = getAgent(agentId);
   if (!agent || (agent.kind !== 'conversation' && agent.kind !== 'spawn')) {
     logger.warn(
@@ -14222,6 +14282,20 @@ async function processAgentConversation(
     formatMessages(missedMessages, {
       knownMessageIds: knownReferencedMessageIds,
     });
+  const observabilityRunId = queue.getActiveQueryId(virtualJid) ?? undefined;
+  if (observabilityRunId || lastProcessed.id) {
+    startObservabilityRun(
+      {
+        runId: observabilityRunId,
+        chatJid: virtualJid,
+        turnId: lastProcessed.id,
+        workspace: effectiveGroup.folder,
+        profileVersion: agentProfile?.version,
+        userId: effectiveGroup.created_by ?? undefined,
+      },
+      prompt,
+    );
+  }
   const images = collectMessageImages(virtualChatJid, missedMessages, {
     knownMessageIds: activeSessionReferencedMessageIds,
   });
@@ -15189,6 +15263,20 @@ async function processAgentConversation(
   };
 
   const wrappedOnOutput = async (output: ContainerOutput) => {
+    if (output.providerFailure) {
+      recordObservabilityFailure(
+        virtualJid,
+        observabilityRunId,
+        'provider_failure',
+      );
+    } else if (output.status === 'error') {
+      recordObservabilityFailure(
+        virtualJid,
+        observabilityRunId,
+        'runner_error',
+      );
+    }
+    recordObservabilityEvent(observabilityRunId, output.streamEvent);
     // #547: warm-lifecycle bookkeeping — mark activity, and flag query-idle on
     // a substantive result / interruption so the runner can be kept warm.
     queue.markRunnerActivity(virtualJid);

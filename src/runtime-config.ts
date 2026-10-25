@@ -3921,6 +3921,7 @@ const SYSTEM_SETTINGS_FILE = path.join(
   CLAUDE_CONFIG_DIR,
   'system-settings.json',
 );
+const OTEL_SECRET_FILE = path.join(CLAUDE_CONFIG_DIR, 'otel-secret.json');
 
 export interface SystemSettings {
   containerTimeout: number;
@@ -3955,6 +3956,11 @@ export interface SystemSettings {
   // false = 关闭定时扫描，admin 仍可手点 POST /api/plugins/catalog/scan。
   // 适用于不希望本机私有 plugin 自动入共享 catalog 的环境。
   pluginAutoScan: boolean;
+  observabilityEnabled: boolean;
+  observabilityEndpoint: string;
+  observabilityPublicKey: string;
+  observabilitySampleRate: number;
+  observabilityIncludeContent: boolean;
 }
 
 // Upper bound for the login lockout window. auth.ts reclaims login-attempt
@@ -3984,6 +3990,11 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   mainAgentAutoCompactPercentage: 0,
   fallbackModel: '',
   pluginAutoScan: true,
+  observabilityEnabled: false,
+  observabilityEndpoint: '',
+  observabilityPublicKey: '',
+  observabilitySampleRate: 1,
+  observabilityIncludeContent: false,
 };
 
 type SystemSettingsSource = 'file' | 'env' | 'api';
@@ -4074,6 +4085,35 @@ function normalizeSystemSettings(
       fallbackModel = raw.fallbackModel.trim().slice(0, 64);
     } else {
       invalidFields.add('fallbackModel');
+    }
+  }
+
+  let observabilityEndpoint = DEFAULT_SYSTEM_SETTINGS.observabilityEndpoint;
+  if (raw.observabilityEndpoint !== undefined) {
+    if (typeof raw.observabilityEndpoint === 'string') {
+      const candidate = raw.observabilityEndpoint.trim().replace(/\/+$/, '');
+      if (
+        candidate.length <= 512 &&
+        (candidate === '' || isSafeOtelEndpoint(candidate))
+      ) {
+        observabilityEndpoint = candidate;
+      } else {
+        invalidFields.add('observabilityEndpoint');
+      }
+    } else {
+      invalidFields.add('observabilityEndpoint');
+    }
+  }
+
+  let observabilityPublicKey = DEFAULT_SYSTEM_SETTINGS.observabilityPublicKey;
+  if (raw.observabilityPublicKey !== undefined) {
+    if (
+      typeof raw.observabilityPublicKey === 'string' &&
+      raw.observabilityPublicKey.length <= 256
+    ) {
+      observabilityPublicKey = raw.observabilityPublicKey.trim();
+    } else {
+      invalidFields.add('observabilityPublicKey');
     }
   }
 
@@ -4197,6 +4237,25 @@ function normalizeSystemSettings(
       'pluginAutoScan',
       DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,
     ),
+    observabilityEnabled: booleanField(
+      'observabilityEnabled',
+      DEFAULT_SYSTEM_SETTINGS.observabilityEnabled,
+    ),
+    observabilityEndpoint,
+    observabilityPublicKey,
+    observabilitySampleRate: numberField(
+      'observabilitySampleRate',
+      DEFAULT_SYSTEM_SETTINGS.observabilitySampleRate,
+      0,
+      1,
+      false,
+    ),
+    // Stage 1 stores the explicit opt-in, but intentionally exports metadata
+    // only until Stage 2 adds content redaction.
+    observabilityIncludeContent: booleanField(
+      'observabilityIncludeContent',
+      DEFAULT_SYSTEM_SETTINGS.observabilityIncludeContent,
+    ),
   };
 
   if (invalidFields.size > 0) {
@@ -4217,7 +4276,96 @@ function readSystemSettingsFromFile(): SystemSettings | null {
   const raw = JSON.parse(
     fs.readFileSync(SYSTEM_SETTINGS_FILE, 'utf-8'),
   ) as Record<string, unknown>;
-  return normalizeSystemSettings(raw, 'file');
+  return normalizeSystemSettings(
+    {
+      observabilityEnabled:
+        raw.observabilityEnabled ??
+        parseEnvBoolean(process.env.COMMERCEAGENT_OTEL_ENABLED),
+      observabilityEndpoint:
+        raw.observabilityEndpoint ?? process.env.COMMERCEAGENT_OTEL_ENDPOINT,
+      observabilityPublicKey:
+        raw.observabilityPublicKey ?? process.env.COMMERCEAGENT_OTEL_PUBLIC_KEY,
+      observabilitySampleRate:
+        raw.observabilitySampleRate ??
+        parseEnvNumber(process.env.COMMERCEAGENT_OTEL_SAMPLE_RATE),
+      observabilityIncludeContent:
+        raw.observabilityIncludeContent ??
+        parseEnvBoolean(process.env.COMMERCEAGENT_OTEL_INCLUDE_CONTENT),
+      ...raw,
+    },
+    'file',
+  );
+}
+
+function parseEnvBoolean(value: string | undefined): boolean | undefined {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return undefined;
+}
+
+function parseEnvNumber(value: string | undefined): number | undefined {
+  if (!value?.trim()) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+export function isSafeOtelEndpoint(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === 'https:' ||
+        (url.protocol === 'http:' &&
+          ['localhost', '127.0.0.1'].includes(url.hostname.toLowerCase()))) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+interface StoredOtelSecret {
+  iv: string;
+  tag: string;
+  data: string;
+}
+
+export function saveObservabilitySecret(secret: string): void {
+  const normalized = secret.trim();
+  if (normalized.length > 2048)
+    throw new Error('Observability secret is too long');
+  if (!normalized) {
+    try {
+      fs.unlinkSync(OTEL_SECRET_FILE);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    return;
+  }
+  fs.mkdirSync(CLAUDE_CONFIG_DIR, { recursive: true });
+  const encrypted = encryptChannelSecret({ secret: normalized });
+  writeSecretFile(OTEL_SECRET_FILE, JSON.stringify(encrypted) + '\n');
+}
+
+export function hasObservabilitySecret(): boolean {
+  return Boolean(getObservabilitySecret());
+}
+
+export function getObservabilitySecret(): string {
+  try {
+    if (fs.existsSync(OTEL_SECRET_FILE)) {
+      const encrypted = JSON.parse(
+        fs.readFileSync(OTEL_SECRET_FILE, 'utf8'),
+      ) as StoredOtelSecret;
+      const payload = decryptChannelSecret<{ secret?: unknown }>(encrypted);
+      if (typeof payload.secret === 'string') return payload.secret;
+    }
+  } catch {
+    logger.warn('Failed to read observability secret');
+  }
+  return process.env.COMMERCEAGENT_OTEL_SECRET_KEY || '';
 }
 
 function buildEnvFallbackSettings(): SystemSettings {
@@ -4244,6 +4392,12 @@ function buildEnvFallbackSettings(): SystemSettings {
         process.env.AUTO_COMPACT_PERCENTAGE,
       fallbackModel: process.env.FALLBACK_MODEL,
       pluginAutoScan: process.env.PLUGIN_AUTO_SCAN,
+      observabilityEnabled: process.env.COMMERCEAGENT_OTEL_ENABLED,
+      observabilityEndpoint: process.env.COMMERCEAGENT_OTEL_ENDPOINT,
+      observabilityPublicKey: process.env.COMMERCEAGENT_OTEL_PUBLIC_KEY,
+      observabilitySampleRate: process.env.COMMERCEAGENT_OTEL_SAMPLE_RATE,
+      observabilityIncludeContent:
+        process.env.COMMERCEAGENT_OTEL_INCLUDE_CONTENT,
     },
     'env',
   );

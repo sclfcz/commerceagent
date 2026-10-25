@@ -17,7 +17,8 @@
     "regrade": "tsx scripts/regrade-business.ts",
     "judge": "tsx scripts/judge.ts",
     "judge:batch": "node --import tsx scripts/judge-calibration-batch.ts",
-    "calibrate": "tsx scripts/calibrate.ts"
+    "calibrate": "tsx scripts/calibrate.ts",
+    "langfuse-drafts": "tsx scripts/langfuse-drafts.ts"
   },
   "devDependencies": {
     "promptfoo": "0.124.1",

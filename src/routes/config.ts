@@ -108,6 +108,9 @@ import {
   getAppearanceConfig,
   saveAppearanceConfig,
   getSystemSettings,
+  hasObservabilitySecret,
+  isSafeOtelEndpoint,
+  saveObservabilitySecret,
   getEffectiveExternalDir,
   getContainerEnvConfig,
   saveSystemSettings,
@@ -2220,6 +2223,12 @@ function toSystemSettingsResponse(
     maxLoginAttempts: settings.maxLoginAttempts,
     loginLockoutMinutes: settings.loginLockoutMinutes,
     fallbackModel: settings.fallbackModel,
+    observabilityEnabled: settings.observabilityEnabled,
+    observabilityEndpoint: settings.observabilityEndpoint,
+    observabilityPublicKey: settings.observabilityPublicKey,
+    observabilitySampleRate: settings.observabilitySampleRate,
+    observabilityIncludeContent: settings.observabilityIncludeContent,
+    observabilityHasSecretKey: hasObservabilitySecret(),
   };
 }
 
@@ -2256,11 +2265,36 @@ configRoutes.put(
       );
     }
 
+    const actor = c.get('user') as AuthUser;
+    const writesObservabilitySettings = Object.keys(validation.data).some(
+      (key) => key.startsWith('observability'),
+    );
+    if (writesObservabilitySettings && actor.role !== 'admin') {
+      return c.json(
+        { error: 'Only administrators can change OpenTelemetry settings' },
+        403,
+      );
+    }
+
     try {
       const before = toSystemSettingsResponse(getSystemSettings());
       // Deprecated compatibility inputs. Accept them so stale Web clients do
       // not fail the whole request, but never persist or apply them.
       const effectiveSettings = { ...validation.data };
+      const secretKey = effectiveSettings.observabilitySecretKey;
+      delete effectiveSettings.observabilitySecretKey;
+      if (
+        effectiveSettings.observabilityEndpoint &&
+        !isSafeOtelEndpoint(effectiveSettings.observabilityEndpoint)
+      ) {
+        return c.json(
+          {
+            error:
+              'OpenTelemetry 地址必须使用 HTTPS；HTTP 仅允许 localhost 或 127.0.0.1。',
+          },
+          400,
+        );
+      }
       for (const key of [
         'maxConcurrentHostProcesses',
         'maxConcurrentScripts',
@@ -2271,6 +2305,25 @@ configRoutes.put(
       ] as const) {
         delete effectiveSettings[key];
       }
+      const candidateSettings = {
+        ...getSystemSettings(),
+        ...effectiveSettings,
+      };
+      if (
+        candidateSettings.observabilityEnabled &&
+        (!candidateSettings.observabilityEndpoint ||
+          !candidateSettings.observabilityPublicKey ||
+          !(secretKey || hasObservabilitySecret()))
+      ) {
+        return c.json(
+          {
+            error:
+              '启用 OpenTelemetry 前，请填写服务地址、Public Key 和 Secret Key。',
+          },
+          400,
+        );
+      }
+      if (secretKey?.trim()) saveObservabilitySecret(secretKey);
       const saved = saveSystemSettings(effectiveSettings);
       const response = toSystemSettingsResponse(saved);
       const changedFields = changedSettingFields(
@@ -2278,8 +2331,8 @@ configRoutes.put(
         response,
         effectiveSettings,
       );
+      if (secretKey) changedFields.push('observabilitySecretKey');
       if (changedFields.length > 0) {
-        const actor = c.get('user') as AuthUser;
         logAuthEvent({
           event_type: 'system_settings_updated',
           username: actor.username,

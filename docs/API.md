@@ -73,6 +73,42 @@ Public：
   `data/extra/` 和任务运行历史
 - `POST /api/groups/:jid/reset-owner`，admin break-glass
 - `GET /api/groups/:jid/messages`
+
+## 系统设置与 OpenTelemetry
+
+`GET|PUT /api/config/system` 受 `manage_system_config` 权限保护。OpenTelemetry 字段的
+修改还要求调用者角色为 admin；其他系统配置仍按原权限策略处理。系统设置响应包含
+`observabilityEnabled`、`observabilityEndpoint`、`observabilityPublicKey`、
+`observabilitySampleRate`、`observabilityIncludeContent` 和只读的
+`observabilityHasSecretKey`。写入请求可带 `observabilitySecretKey`；Secret Key
+只写入本机 AES-256-GCM 加密文件，读取响应永远不会返回它。该设置遵循
+Web 持久配置优先于 `COMMERCEAGENT_OTEL_*` 环境变量，环境变量优先于代码默认值。
+
+默认关闭。开启后通过 OTLP/HTTP 向配置的 Langfuse 根地址发送 trace，路径为
+`/api/public/otel/v1/traces`，使用 Basic Auth（用户名为 Public Key，密码为
+Secret Key）。公网地址必须使用 HTTPS；HTTP 仅允许 `localhost` 和 `127.0.0.1`
+用于本机调试。不要求特定部署形态，可使用 Langfuse 云版或自托管实例。
+
+trace 记录运行 ID、轮次 ID、工作区与用户 ID 的 SHA-256 哈希、Profile 版本、模型名、
+工具名、Token、耗时、错误类别和 `run_finished.reason`。每次**轮次**按采样率独立
+抽样，同一会话的不同轮次可能有不同的采样结果。默认不导出正文、工具参数或工具返回。
+只有显式开启 `observabilityIncludeContent` 后，才会导出经过脱敏的用户输入、助手输出、
+工具输入和工具返回；API Key、Endpoint、常见第三方令牌、手机号、邮箱、身份证号、银行卡号、
+IP 地址、地址、收件人/客户字段、Cookie 和令牌会在本机移除或替换后再进入 span。如果
+脱敏后仍命中高风险模式，正文会降级为只发送原文长度和 SHA-256。正文脱敏是尽力而为，
+不保证识别所有自由文本中的个人信息（例如未标注的人名）；处理真实客户数据的生产环境
+建议保持元数据模式，不开启正文上报。导出异步执行；导出失败不会影响 Agent 回复或
+usage/计费记录，只增加进程内失败计数并输出一次不含端点、凭据和 payload 的分类日志。
+
+CommerceAgent 不提供 Langfuse Trace 浏览路由。`manage_system_config` 用户可配置目标
+地址和密钥；Trace 查看权限由目标 Langfuse 项目的成员权限控制。由于同一项目内的哈希
+标识只用于筛选，不是授权边界，部署者应将项目查看权限限制给获准的运维人员。
+
+Langfuse 可使用云版或自托管实例；CommerceAgent 只需要对应项目的 API 地址、Public Key
+和 Secret Key。benchmark 的 `bench:langfuse-drafts` 命令是只读回流工具，只查询元数据与
+评分字段，不读取 trace 正文、工具参数/返回或评分评论；输出仅为被 Git 忽略的空白结构草稿，
+不会写入业务用例或 holdout。需要正文时，必须由人工在受控环境中另行补全并完成脱敏审核。
+
 - `DELETE /api/groups/:jid/messages/:messageId`
 - `GET|PUT /api/groups/:jid/env`
 - `GET|PUT /api/groups/:jid/mcp`，仅兼容旧客户端

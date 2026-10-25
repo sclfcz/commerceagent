@@ -276,6 +276,15 @@ export function SystemSettingsSection({
   // fallbackModel 是自由字符串，独立于数值 field 抽象；仅在 runtime scope 展示。
   const [fallbackModel, setFallbackModel] = useState('');
   const [initialFallbackModel, setInitialFallbackModel] = useState('');
+  const [observabilityEnabled, setObservabilityEnabled] = useState(false);
+  const [observabilityEndpoint, setObservabilityEndpoint] = useState('');
+  const [observabilityPublicKey, setObservabilityPublicKey] = useState('');
+  const [observabilitySecretKey, setObservabilitySecretKey] = useState('');
+  const [observabilitySampleRate, setObservabilitySampleRate] = useState('1');
+  const [observabilityIncludeContent, setObservabilityIncludeContent] =
+    useState(false);
+  const [observabilityHasSecretKey, setObservabilityHasSecretKey] =
+    useState(false);
 
   const loadSettings = useCallback(async () => {
     if (!canManage) return;
@@ -289,6 +298,13 @@ export function SystemSettingsSection({
       setInitialValues(nextValues);
       setFallbackModel(data.fallbackModel ?? '');
       setInitialFallbackModel(data.fallbackModel ?? '');
+      setObservabilityEnabled(data.observabilityEnabled ?? false);
+      setObservabilityEndpoint(data.observabilityEndpoint ?? '');
+      setObservabilityPublicKey(data.observabilityPublicKey ?? '');
+      setObservabilitySecretKey('');
+      setObservabilitySampleRate(String(data.observabilitySampleRate ?? 1));
+      setObservabilityIncludeContent(data.observabilityIncludeContent ?? false);
+      setObservabilityHasSecretKey(data.observabilityHasSecretKey ?? false);
       setTouched({});
       setSubmitted(false);
     } catch (error) {
@@ -324,6 +340,17 @@ export function SystemSettingsSection({
 
   const fallbackModelDirty =
     scope === 'runtime' && fallbackModel.trim() !== initialFallbackModel.trim();
+  const observabilityDirty =
+    scope === 'runtime' &&
+    (!!observabilityEnabled !== !!settings?.observabilityEnabled ||
+      observabilityEndpoint.trim() !==
+        (settings?.observabilityEndpoint ?? '') ||
+      observabilityPublicKey.trim() !==
+        (settings?.observabilityPublicKey ?? '') ||
+      observabilitySampleRate !==
+        String(settings?.observabilitySampleRate ?? 1) ||
+      observabilityIncludeContent !== !!settings?.observabilityIncludeContent ||
+      observabilitySecretKey.length > 0);
 
   const dirty = useMemo(
     () =>
@@ -332,21 +359,46 @@ export function SystemSettingsSection({
         activeFields.some(
           (field) => values[field.key] !== initialValues[field.key],
         )) ||
+      fallbackModelDirty ||
+      observabilityDirty,
+    [
+      activeFields,
+      initialValues,
+      values,
       fallbackModelDirty,
-    [activeFields, initialValues, values, fallbackModelDirty],
+      observabilityDirty,
+    ],
   );
 
   const handleSave = async () => {
     if (!settings || !values) return;
     setSubmitted(true);
     if (Object.keys(errors).length > 0) return;
+    const sampleRate = Number(observabilitySampleRate);
+    if (
+      scope === 'runtime' &&
+      (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1)
+    ) {
+      toast.error('采样率必须是 0 到 1 之间的数字。');
+      return;
+    }
 
-    const payload: Partial<SystemSettings> = {};
+    const payload: Partial<SystemSettings> & {
+      observabilitySecretKey?: string;
+    } = {};
     for (const field of activeFields) {
       payload[field.key] = field.toStored(Number(values[field.key]));
     }
     if (scope === 'runtime') {
       payload.fallbackModel = fallbackModel.trim();
+      payload.observabilityEnabled = observabilityEnabled;
+      payload.observabilityEndpoint = observabilityEndpoint.trim();
+      payload.observabilityPublicKey = observabilityPublicKey.trim();
+      payload.observabilitySampleRate = sampleRate;
+      payload.observabilityIncludeContent = observabilityIncludeContent;
+      if (observabilitySecretKey) {
+        payload.observabilitySecretKey = observabilitySecretKey;
+      }
     }
 
     setSaving(true);
@@ -358,6 +410,13 @@ export function SystemSettingsSection({
       setInitialValues(nextValues);
       setFallbackModel(data.fallbackModel ?? '');
       setInitialFallbackModel(data.fallbackModel ?? '');
+      setObservabilityEnabled(data.observabilityEnabled ?? false);
+      setObservabilityEndpoint(data.observabilityEndpoint ?? '');
+      setObservabilityPublicKey(data.observabilityPublicKey ?? '');
+      setObservabilitySecretKey('');
+      setObservabilitySampleRate(String(data.observabilitySampleRate ?? 1));
+      setObservabilityIncludeContent(data.observabilityIncludeContent ?? false);
+      setObservabilityHasSecretKey(data.observabilityHasSecretKey ?? false);
       setTouched({});
       setSubmitted(false);
       toast.success('系统参数已保存，将应用于后续启动的任务');
@@ -463,6 +522,111 @@ export function SystemSettingsSection({
             className="max-w-xs"
             aria-label="额度墙回退模型"
           />
+        </section>
+      )}
+
+      {scope === 'runtime' && (
+        <section className="border-t border-border py-6">
+          <header className="mb-5 max-w-2xl">
+            <h2 className="text-base font-semibold text-foreground">
+              OpenTelemetry 导出
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              可连接 Langfuse
+              云版或自托管服务。默认关闭；默认仅发送运行元数据。显式开启正文上报后，用户输入、助手输出和工具数据会先脱敏再导出。
+            </p>
+          </header>
+          <div className="space-y-4 max-w-2xl">
+            <div className="flex items-center justify-between gap-4">
+              <Label htmlFor="otel-enabled">启用 OTel 导出</Label>
+              <Switch
+                id="otel-enabled"
+                checked={observabilityEnabled}
+                onCheckedChange={setObservabilityEnabled}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="otel-endpoint">
+                Langfuse 地址（公网必须 HTTPS）
+              </Label>
+              <Input
+                id="otel-endpoint"
+                type="url"
+                value={observabilityEndpoint}
+                onChange={(event) =>
+                  setObservabilityEndpoint(event.target.value)
+                }
+                placeholder="https://cloud.langfuse.com"
+                autoComplete="url"
+              />
+              <p className="text-xs text-muted-foreground">
+                填写服务根地址，导出路径由 CommerceAgent 自动补全；HTTP 仅支持
+                localhost 与 127.0.0.1。
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="otel-public-key">Langfuse Public Key</Label>
+              <Input
+                id="otel-public-key"
+                value={observabilityPublicKey}
+                onChange={(event) =>
+                  setObservabilityPublicKey(event.target.value)
+                }
+                autoComplete="off"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="otel-secret-key">Langfuse Secret Key</Label>
+              <Input
+                id="otel-secret-key"
+                type="password"
+                value={observabilitySecretKey}
+                onChange={(event) =>
+                  setObservabilitySecretKey(event.target.value)
+                }
+                placeholder={
+                  observabilityHasSecretKey
+                    ? '已配置；留空保持不变'
+                    : '仅保存时提交'
+                }
+                autoComplete="new-password"
+              />
+              <p className="text-xs text-muted-foreground">
+                保存后使用 AES-256-GCM 加密并以本机权限保护；API 不会返回密钥。
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="otel-sample-rate">采样率（0–1）</Label>
+              <Input
+                id="otel-sample-rate"
+                type="number"
+                min="0"
+                max="1"
+                step="0.05"
+                value={observabilitySampleRate}
+                onChange={(event) =>
+                  setObservabilitySampleRate(event.target.value)
+                }
+              />
+            </div>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <Label htmlFor="otel-include-content">
+                  允许上报脱敏后的正文
+                </Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  每个轮次按采样率独立抽样。API
+                  Key、Endpoint、联系方式、地址、收件信息、Cookie
+                  和令牌会在本机脱敏；脱敏尽力而为，不保证识别所有个人信息。生产环境处理真实客户数据时建议保持关闭正文上报。
+                </p>
+              </div>
+              <Switch
+                id="otel-include-content"
+                checked={observabilityIncludeContent}
+                onCheckedChange={setObservabilityIncludeContent}
+              />
+            </div>
+          </div>
         </section>
       )}
 
@@ -643,8 +807,8 @@ export function HostIntegrationSettingsSection({
                   className="mt-1 text-xs leading-5 text-muted-foreground"
                 >
                   开启后自动继承宿主机提示词、Rules、全部 Skills 与 MCP，
-                  无需再逐项选择；CommerceAgent 管理的能力继续附加。普通用户的 默认
-                  CommerceAgent 始终使用托管配置。
+                  无需再逐项选择；CommerceAgent 管理的能力继续附加。普通用户的
+                  默认 CommerceAgent 始终使用托管配置。
                 </p>
               </div>
               <Switch
