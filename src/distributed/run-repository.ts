@@ -651,6 +651,12 @@ export class RunRepository {
     runId: string;
     workerId: string;
     leaseToken: number;
+    /**
+     * Optional re-queue delay (admission rejections). Without it a rejected run
+     * keeps its original available_at, which means it stays at the head of the
+     * global queue and can starve other tenants.
+     */
+    retryDelayMs?: number;
   }): Promise<boolean> {
     const applied = await withTransaction(this.pool, async (connection) => {
       const rows = await queryRows(
@@ -664,15 +670,32 @@ export class RunRepository {
       const attempt = toNumber(rows[0].attempt);
       const updated = await execute(
         connection,
-        `UPDATE dist_task_runs
-            SET status = 'queued',
-                attempt = GREATEST(attempt - 1, 0),
-                lease_token = lease_token + 1,
-                lease_owner = NULL,
-                lease_expires_at = NULL,
-                updated_at = NOW(3)
-          WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?`,
-        [input.runId, input.workerId, input.leaseToken],
+        input.retryDelayMs && input.retryDelayMs > 0
+          ? `UPDATE dist_task_runs
+                SET status = 'queued',
+                    attempt = GREATEST(attempt - 1, 0),
+                    lease_token = lease_token + 1,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    available_at = NOW(3) + INTERVAL ? MICROSECOND,
+                    updated_at = NOW(3)
+              WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?`
+          : `UPDATE dist_task_runs
+                SET status = 'queued',
+                    attempt = GREATEST(attempt - 1, 0),
+                    lease_token = lease_token + 1,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = NOW(3)
+              WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?`,
+        input.retryDelayMs && input.retryDelayMs > 0
+          ? [
+              input.retryDelayMs * 1000,
+              input.runId,
+              input.workerId,
+              input.leaseToken,
+            ]
+          : [input.runId, input.workerId, input.leaseToken],
       );
       if (updated.affectedRows === 0) return false;
       await this.insertEvent(connection, {

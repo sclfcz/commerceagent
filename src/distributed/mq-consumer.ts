@@ -8,6 +8,7 @@ import {
   type TopologyOptions,
 } from './amqp-topology.js';
 import type { RunRepository } from './run-repository.js';
+import type { TenantSlots } from './tenant-slots.js';
 
 export interface MqConsumerOptions {
   amqpUrl: string;
@@ -18,6 +19,8 @@ export interface MqConsumerOptions {
   /** Recorded in dist_consumed_messages; must be stable per worker. */
   consumerId: string;
   topology?: TopologyOptions;
+  /** Per-tenant admission control; omitted when disabled. */
+  tenantSlots?: TenantSlots;
   /** How long to hold a delivery while waiting for a free execution slot. */
   capacityWaitMs?: number;
   logger?: (event: Record<string, unknown>) => void;
@@ -46,6 +49,7 @@ export class MqConsumer {
     duplicate: 0,
     retried: 0,
     deadLettered: 0,
+    admissionRejected: 0,
   };
 
   constructor(private readonly options: MqConsumerOptions) {
@@ -155,6 +159,37 @@ export class MqConsumer {
         messageId,
       });
       if (result.outcome === 'claimed' && result.claim) {
+        // Admission is decided in Redis before the run starts. A rejection puts
+        // the run back in the queue (attempt untouched) and acks the wake-up:
+        // the next message or the fallback poll will retry it.
+        if (
+          this.options.tenantSlots &&
+          !(await this.options.tenantSlots.acquire(
+            result.claim.tenantId,
+            result.claim.runId,
+          ))
+        ) {
+          this.counters.admissionRejected += 1;
+          try {
+            await this.options.repository.release({
+              runId: result.claim.runId,
+              workerId: this.options.consumerId,
+              leaseToken: result.claim.leaseToken,
+              retryDelayMs: 200 + Math.floor(Math.random() * 200),
+            });
+          } catch (releaseError) {
+            this.options.logger?.({
+              event: 'admission_release_failed',
+              runId: result.claim.runId,
+              error:
+                releaseError instanceof Error
+                  ? releaseError.message.slice(0, 200)
+                  : 'unknown',
+            });
+          }
+          channel.ack(message);
+          return;
+        }
         this.counters.claimed += 1;
         this.options.worker.adopt(result.claim);
       } else {

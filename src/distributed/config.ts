@@ -51,6 +51,12 @@ export interface DistributedConfig {
   relayCrashAfterConfirmRate: number;
   /** Relay fault injection: publish the same message twice. */
   relayDuplicateRate: number;
+  /** Redis connection used only for admission control (slots, token buckets). */
+  redisUrl: string;
+  /** Per-tenant concurrency limit; 0 disables admission control. */
+  tenantConcurrency: number;
+  /** Behaviour when Redis admission calls fail. */
+  admissionFailMode: 'open' | 'closed';
 }
 
 function readInt(
@@ -79,6 +85,16 @@ function readRate(env: NodeJS.ProcessEnv, field: string): number {
   if (!Number.isFinite(value) || value < 0 || value > 1)
     throw new DistributedConfigError(field, `${field} must be within [0,1]`);
   return value;
+}
+
+function readFailMode(env: NodeJS.ProcessEnv): 'open' | 'closed' {
+  const raw = (env.DIST_ADMISSION_FAIL_MODE ?? 'open').trim().toLowerCase();
+  if (raw !== 'open' && raw !== 'closed')
+    throw new DistributedConfigError(
+      'DIST_ADMISSION_FAIL_MODE',
+      "DIST_ADMISSION_FAIL_MODE must be 'open' or 'closed'",
+    );
+  return raw;
 }
 
 function readDispatch(env: NodeJS.ProcessEnv): 'poll' | 'mq' {
@@ -178,6 +194,12 @@ export function loadDistributedConfig(
       'DIST_RELAY_CRASH_AFTER_CONFIRM_RATE',
     ),
     relayDuplicateRate: readRate(env, 'DIST_RELAY_DUPLICATE_RATE'),
+    redisUrl: env.DIST_REDIS_URL?.trim() || 'redis://127.0.0.1:6379',
+    tenantConcurrency: readInt(env, 'DIST_TENANT_CONCURRENCY', 0, {
+      min: 0,
+      max: 10_000,
+    }),
+    admissionFailMode: readFailMode(env),
   };
   if (config.backoffBaseMs > config.backoffMaxMs)
     throw new DistributedConfigError(

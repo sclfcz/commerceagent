@@ -7,6 +7,8 @@ import type { DistributedConfig } from '../../src/distributed/config.js';
 import { createPool, type Pool } from '../../src/distributed/mysql.js';
 import { runMigrations } from '../../src/distributed/migrate.js';
 import { RunRepository } from '../../src/distributed/run-repository.js';
+import type { Redis } from 'ioredis';
+import { createStrictRedis } from '../../src/distributed/redis.js';
 
 /**
  * Integration tests run against a real MySQL 8.0+ instance. When
@@ -15,11 +17,15 @@ import { RunRepository } from '../../src/distributed/run-repository.js';
  */
 export const TEST_MYSQL_URL = process.env.DIST_MYSQL_TEST_URL?.trim() ?? '';
 export const TEST_AMQP_URL = process.env.DIST_AMQP_TEST_URL?.trim() ?? '';
+export const TEST_REDIS_URL = process.env.DIST_REDIS_TEST_URL?.trim() ?? '';
 export const hasMysql = TEST_MYSQL_URL.length > 0;
 export const hasAmqp = TEST_AMQP_URL.length > 0;
 export const describeMysql = hasMysql ? describe : describe.skip;
 /** Suites that need both MySQL and RabbitMQ. */
 export const describeDist = hasMysql && hasAmqp ? describe : describe.skip;
+export const hasRedis = TEST_REDIS_URL.length > 0;
+/** Admission-control suites only need Redis. */
+export const describeRedis = hasRedis ? describe : describe.skip;
 
 export const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -44,6 +50,37 @@ export async function clearRuns(pool: Pool): Promise<void> {
   await pool.query('DELETE FROM dist_outbox');
   await pool.query('DELETE FROM dist_task_run_events');
   await pool.query('DELETE FROM dist_task_runs');
+}
+
+export async function createTestRedis(): Promise<Redis> {
+  if (!hasRedis) throw new Error('DIST_REDIS_TEST_URL is required');
+  const redis = createStrictRedis(TEST_REDIS_URL);
+  await redis.connect();
+  return redis;
+}
+
+/**
+ * Delete only this subsystem's keys; never flush a shared server.
+ * Pass a narrow pattern (test files run in parallel against one Redis DB).
+ */
+export async function clearDistKeys(
+  redis: Redis,
+  pattern = 'dist:*',
+): Promise<void> {
+  for (const current of [pattern]) {
+    let cursor = '0';
+    do {
+      const [next, keys] = await redis.scan(
+        cursor,
+        'MATCH',
+        pattern,
+        'COUNT',
+        200,
+      );
+      cursor = next;
+      if (keys.length) await redis.del(...keys);
+    } while (cursor !== '0');
+  }
 }
 
 /** Unique queue prefix so parallel files never share broker state. */

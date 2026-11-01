@@ -5,6 +5,7 @@ import {
   type Executor,
 } from './executors.js';
 import type { ClaimedRun, RunRepository } from './run-repository.js';
+import type { TenantSlots } from './tenant-slots.js';
 
 export class LeaseLostError extends Error {
   constructor(message = 'lease lost') {
@@ -19,6 +20,8 @@ export interface WorkerLogger {
 
 interface RunState {
   claim: ClaimedRun;
+  /** True once this worker released its tenant slot (avoids releasing twice). */
+  slotReleased: boolean;
   controller: AbortController;
   done: Promise<void>;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
@@ -32,6 +35,8 @@ export interface WorkerOptions {
   executor: Executor;
   config: DistributedConfig;
   logger?: WorkerLogger;
+  /** Per-tenant admission control; omitted when disabled. */
+  tenantSlots?: TenantSlots;
 }
 
 const sleep = (ms: number) =>
@@ -48,6 +53,7 @@ export class Worker {
   private readonly executor: Executor;
   private readonly config: DistributedConfig;
   private readonly logger: WorkerLogger;
+  private readonly tenantSlots: TenantSlots | undefined;
   private readonly runs = new Map<string, RunState>();
   private stopping = false;
   private started = false;
@@ -59,6 +65,7 @@ export class Worker {
     this.executor = options.executor;
     this.config = options.config;
     this.logger = options.logger ?? (() => {});
+    this.tenantSlots = options.tenantSlots;
   }
 
   /** Number of runs currently executing in this process. */
@@ -129,7 +136,18 @@ export class Worker {
         );
         continue;
       }
-      for (const claim of claimed) this.execute(claim);
+      let admitted = 0;
+      for (const claim of claimed) {
+        if (!(await this.admit(claim))) continue;
+        admitted += 1;
+        this.execute(claim);
+      }
+      if (!admitted && claimed.length) {
+        // Every claim was rejected by admission control. The runs keep their
+        // original available_at, so back off briefly instead of re-claiming the
+        // same rows in a tight loop.
+        await this.sleep(Math.min(this.pollDelayMs(), 250));
+      }
     }
   }
 
@@ -155,10 +173,70 @@ export class Worker {
     return Math.round(this.config.pollMs * (1 + Math.random() * 0.3));
   }
 
+  /**
+   * Ask Redis for a tenant slot before starting the run. A rejection returns the
+   * run to the queue without consuming an attempt (available_at is preserved).
+   */
+  private async admit(claim: ClaimedRun): Promise<boolean> {
+    if (!this.tenantSlots) return true;
+    const granted = await this.tenantSlots.acquire(claim.tenantId, claim.runId);
+    if (granted) return true;
+    this.logger({
+      event: 'admission_rejected',
+      workerId: this.config.workerId,
+      runId: claim.runId,
+      tenantId: claim.tenantId,
+    });
+    try {
+      await this.repository.release({
+        runId: claim.runId,
+        workerId: this.config.workerId,
+        leaseToken: claim.leaseToken,
+        // Short re-queue delay: a rejected run must not keep the head of the
+        // global queue, otherwise one over-quota tenant starves the others.
+        retryDelayMs: 200 + Math.floor(Math.random() * 200),
+      });
+    } catch (error) {
+      this.logger({
+        event: 'admission_release_failed',
+        workerId: this.config.workerId,
+        runId: claim.runId,
+        error: errorMessage(error),
+      });
+    }
+    return false;
+  }
+
+  private async loseLease(
+    claim: ClaimedRun,
+    state: RunState,
+    reason: string,
+  ): Promise<void> {
+    if (state.leaseLost) return;
+    state.leaseLost = true;
+    this.logger({
+      event: 'heartbeat_lost',
+      workerId: this.config.workerId,
+      runId: claim.runId,
+      reason,
+    });
+    try {
+      await this.repository.recordHeartbeatLost({
+        runId: claim.runId,
+        workerId: this.config.workerId,
+        leaseToken: claim.leaseToken,
+      });
+    } catch {
+      /* best effort */
+    }
+    state.controller.abort(new LeaseLostError(reason));
+  }
+
   private execute(claim: ClaimedRun): void {
     const controller = new AbortController();
     const state: RunState = {
       claim,
+      slotReleased: false,
       controller,
       done: Promise.resolve(),
       heartbeatTimer: null,
@@ -232,6 +310,12 @@ export class Worker {
         }
       } finally {
         if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+        // A worker that lost its lease must NOT free the slot: the new owner may
+        // already hold it under the same runId. Expiry cleans it up instead.
+        if (this.tenantSlots && !state.slotReleased && !state.leaseLost) {
+          state.slotReleased = true;
+          await this.tenantSlots.release(claim.tenantId, claim.runId);
+        }
         this.runs.delete(claim.runId);
       }
     })();
@@ -255,20 +339,19 @@ export class Worker {
       });
       if (applied) {
         state.lastHeartbeatAt = Date.now();
+        // The tenant slot expires on the same deadline as the lease, so it has
+        // to be renewed with it. A missing slot means someone else may already
+        // hold this tenant's capacity: treat it exactly like a lost lease.
+        if (this.tenantSlots) {
+          const renewed = await this.tenantSlots.renew(
+            claim.tenantId,
+            claim.runId,
+          );
+          if (!renewed) await this.loseLease(claim, state, 'slot_expired');
+        }
         return;
       }
-      state.leaseLost = true;
-      this.logger({
-        event: 'heartbeat_lost',
-        workerId: this.config.workerId,
-        runId: claim.runId,
-      });
-      await this.repository.recordHeartbeatLost({
-        runId: claim.runId,
-        workerId: this.config.workerId,
-        leaseToken: claim.leaseToken,
-      });
-      state.controller.abort(new LeaseLostError());
+      await this.loseLease(claim, state, 'heartbeat_rejected');
     } catch (error) {
       // A transient database error is not proof that the lease is gone. Only
       // give up once the last successful heartbeat is about to age out.
@@ -318,6 +401,12 @@ export class Worker {
       if (state.heartbeatTimer) {
         clearInterval(state.heartbeatTimer);
         state.heartbeatTimer = null;
+      }
+      if (this.tenantSlots && !state.slotReleased) {
+        // Free the slot while we still own the lease; the DB release below lets
+        // another worker pick the run up immediately.
+        state.slotReleased = true;
+        await this.tenantSlots.release(state.claim.tenantId, state.claim.runId);
       }
       state.leaseLost = true;
       try {

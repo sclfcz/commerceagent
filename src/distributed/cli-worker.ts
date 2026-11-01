@@ -14,6 +14,8 @@ import { SleepExecutor } from './executors.js';
 import { Worker } from './worker.js';
 import { Reaper } from './reaper.js';
 import { MqConsumer } from './mq-consumer.js';
+import { createRedis } from './redis.js';
+import { TenantSlots } from './tenant-slots.js';
 
 const log = (event: Record<string, unknown>) => {
   process.stdout.write(
@@ -30,6 +32,8 @@ async function main(): Promise<void> {
   let worker: Worker | null = null;
   let reaper: Reaper | null = null;
   let consumer: MqConsumer | null = null;
+  let tenantSlots: TenantSlots | null = null;
+  let redis: ReturnType<typeof createRedis> | null = null;
   let shuttingDown = false;
 
   const shutdown = async (signal: string) => {
@@ -40,6 +44,8 @@ async function main(): Promise<void> {
       await consumer?.stop();
       await reaper?.stop();
       await worker?.stop();
+      await tenantSlots?.close();
+      redis = null;
       // Last stdout line: `dist:bench` parses this to aggregate claim latency
       // and deadlock retries across worker processes.
       log({
@@ -47,6 +53,7 @@ async function main(): Promise<void> {
         workerId: config.workerId,
         dispatch: config.dispatch,
         consumer: consumer?.stats() ?? null,
+        tenantConcurrency: config.tenantConcurrency,
         ...stats.snapshot(),
       });
       await pool.end();
@@ -71,6 +78,22 @@ async function main(): Promise<void> {
     backoffMaxMs: config.backoffMaxMs,
     stats,
   });
+  if (config.tenantConcurrency > 0) {
+    redis = createRedis(config.redisUrl);
+    tenantSlots = new TenantSlots({
+      redis,
+      leaseMs: config.leaseMs,
+      limit: config.tenantConcurrency,
+      failMode: config.admissionFailMode,
+      logger: log,
+    });
+    log({
+      event: 'admission_enabled',
+      tenantConcurrency: config.tenantConcurrency,
+      failMode: config.admissionFailMode,
+      redisUrl: config.redisUrl.replace(/\/\/[^@]*@/, '//***@'),
+    });
+  }
   reaper = new Reaper(repository, {
     intervalMs: config.reaperIntervalMs,
     logger: log,
@@ -80,6 +103,7 @@ async function main(): Promise<void> {
     executor: new SleepExecutor(),
     config,
     logger: log,
+    ...(tenantSlots ? { tenantSlots } : {}),
   });
   reaper.start();
   worker.start();
@@ -91,6 +115,7 @@ async function main(): Promise<void> {
       concurrency: config.concurrency,
       consumerId: config.workerId,
       logger: log,
+      ...(tenantSlots ? { tenantSlots } : {}),
     });
     await consumer.start();
     log({
