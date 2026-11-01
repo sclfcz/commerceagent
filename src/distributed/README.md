@@ -96,6 +96,14 @@ world may deduplicate on.
 `Reaper` additionally scans for `unknown` steps older than 5 minutes whose run
 is already terminal (`DIST_UNKNOWN_SWEEP_MS`, monitoring only).
 
+**Lookup race:** "lookup says not found, so send" assumes the provider has
+already made a _timed-out_ send visible. If the first send is still in flight
+server-side when the retry looks it up, the retry sends again and the provider
+sees two requests. A provider that honours the idempotency key collapses them;
+one that does not will record a duplicate. This was observed once during
+development (2 duplicates out of 1000 messages in one repeat); the delivered
+chaos run had 0 because the retry happened after the message was visible.
+
 ## Failure modes
 
 `DIST_ADMISSION_FAIL_MODE=open` (default): a Redis error admits the work and

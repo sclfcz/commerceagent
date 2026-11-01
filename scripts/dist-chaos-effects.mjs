@@ -187,13 +187,20 @@ async function runGroup(pool, mock, group) {
   const startedAt = Date.now();
   const kills = [];
   let killCount = 0;
+  let productiveKills = 0;
 
   const scheduleKill = (delayMs) => {
     if (killCount >= KILLS) return;
-    setTimeout(() => {
+    setTimeout(async () => {
       const victims = workers.filter((child) => child.exitCode === null);
       if (victims.length) {
         const victim = victims[Math.floor(Math.random() * victims.length)];
+        const [[running]] = await pool.query(
+          `SELECT COUNT(*) AS total FROM dist_task_runs
+            WHERE status = 'running' AND lease_owner = ?`,
+          [victim.workerId],
+        );
+        if (Number(running.total) > 0) productiveKills += 1;
         victim.kill('SIGKILL');
         killCount += 1;
         kills.push({ workerId: victim.workerId, atMs: Date.now() - startedAt });
@@ -217,8 +224,19 @@ async function runGroup(pool, mock, group) {
   }, 2_000 + ZOMBIE_PAUSE_MS);
 
   try {
-    if (!(await waitForTerminal(pool)))
-      throw new Error(`${group.id}: runs never reached a terminal state`);
+    // Keep the loop alive until every scheduled kill has happened, so the
+    // required 5 SIGKILLs are not silently skipped when runs finish early.
+    const deadline = Date.now() + OVERALL_TIMEOUT_MS;
+    for (;;) {
+      const [[pending]] = await pool.query(
+        `SELECT COUNT(*) AS total FROM dist_task_runs
+          WHERE status IN ('queued','running','retry_wait')`,
+      );
+      if (Number(pending.total) === 0 && killCount >= KILLS) break;
+      if (Date.now() > deadline)
+        throw new Error(`${group.id}: runs never reached a terminal state`);
+      await sleep(200);
+    }
     const finishedAt = Date.now();
 
     const [[statuses]] = await pool.query(
@@ -295,6 +313,7 @@ async function runGroup(pool, mock, group) {
       staleUnknownSteps: Number(staleUnknown.total),
       durationMs: finishedAt - startedAt,
       kills: kills.length,
+      productiveKills,
     };
   } finally {
     for (const child of workers) child.kill('SIGCONT');
