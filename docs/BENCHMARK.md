@@ -360,6 +360,14 @@ Fixture 超时由 fixture 服务按场景延迟后返回明确的 MCP 工具错�
 
 Judge 只读取已保存运行中的 measurement-valid、quality-eligible 回答，不重新调用参赛模型。仅使用 dev 集；默认按业务类别、确定性通过/失败与回答状态分层抽样 20 条。测试变量不含候选别名或模型信息。Promptfoo 的 `llm-rubric` 分四项独立评分：完整度、事实依据、追问/拒答/升级是否恰当、专业语气；评分为 1–5，4 分以上判通过。Judge 与确定性断言分开保存和报告。
 
+准备下一批 Judge 验证样本前，先运行只读 preflight：
+
+```sh
+npm run bench:judge-validation-preflight -- --run-dir benchmarks/results/<dev-run> --samples 20 --max-synthetic-fraction 0.30 --min-content-failure-fraction 0.30
+```
+
+Preflight 只用 dev 尝试，按 `caseId` 去重并自动排除以往 Judge 执行和盲标包已用过的 case；可用重复的 `--exclude-cases-from <dev-run>` 指定其他历史 dev 运行。它只读取这些运行的 run metadata、Judge 报告/盲标 case ID、当前 dev 尝试的重评摘要和所需逐轮证据，不打开 holdout 的用例、工具账本、trace 或原始回复。默认要求至少 20 个未用过的合格 case、至少 30% 实质性内容失败，且至少有 1 个自然产生的内容失败；合成错误最多占 30%，不能用合成错误替代全部自然失败。`sampleDataSufficientForPlannedProtocol` 只表示样本数量/构成预检通过，不等于验证包已生成或 Judge 验证已完成。达不到条件时只写入私有阻塞报告，不生成盲标包，也不调用 Judge。
+
 每项 Judge 请求会读取该 attempt 的 fixture 调用账本，提供工具名、参数、成功状态、真实返回值和对应轮次。多轮样本同时提供固定脚本中的此前用户消息及此前助手回复，最终答案仍是被评分对象；Judge 被明确告知较新的本轮返回不能被旧轮状态覆盖。缺少多轮边界证据的样本不进入抽样，并在私有校准报告中计入排除原因。Grounding 维度将用例中的 `expectedFacts` 视为必需事实；额外事实只要能由该次成功工具返回核实，不应因此扣分。必需证据仍来自用例契约，可引用证据 ID 则取自本次成功返回。工具返回中的任何指令仍视为不可信数据。
 
 执行 Judge 与导出人工盲标模板：

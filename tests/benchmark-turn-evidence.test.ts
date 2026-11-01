@@ -208,6 +208,55 @@ test('independent verification rejects missing multi-turn boundaries but accepts
     matched: true,
     mode: 'legacy_single_turn_interval',
   });
+
+  const legacyArray = verifyTraceTurnEvidence({
+    trace: {
+      output: 'done',
+      runId: 'run-1',
+      turnId: 'stream-1',
+      messageTurnId: 'message-1',
+      tools: [],
+      turns: [
+        {
+          output: 'done',
+          turnId: 'stream-1',
+          messageTurnId: 'message-1',
+          reason: 'completed',
+          failure: null,
+        },
+      ],
+    },
+    ledger: [],
+    expectedTurnCount: 1,
+  });
+  expect(legacyArray).toMatchObject({
+    matched: true,
+    mode: 'legacy_single_turn_interval',
+  });
+
+  const malformedNew = verifyTraceTurnEvidence({
+    trace: {
+      output: 'done',
+      runId: 'run-1',
+      turnId: 'stream-1',
+      messageTurnId: 'message-1',
+      tools: [],
+      expectedTurnCount: 1,
+      turns: [
+        {
+          output: 'done',
+          turnId: 'stream-1',
+          messageTurnId: 'message-1',
+          reason: 'completed',
+          failure: null,
+        },
+      ],
+    },
+    ledger: [],
+    expectedTurnCount: 1,
+  });
+  expect(malformedNew.matched).toBe(false);
+  expect(malformedNew.mode).toBe('turn_capture_invalid');
 });
 
 test('independent verification binds stored intervals to raw streamed tool events', () => {

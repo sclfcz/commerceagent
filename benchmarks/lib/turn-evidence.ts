@@ -226,6 +226,17 @@ export function verifyTraceTurnEvidence(input: {
     : null;
   const turnCaptureMalformed =
     storedTurns !== null && !storedTurns.every(isCapturedTurn);
+  const legacySingleTurnArray =
+    storedTurns?.length === 1 &&
+    !!storedTurns[0] &&
+    typeof storedTurns[0] === 'object' &&
+    typeof storedTurns[0].turnId === 'string' &&
+    typeof storedTurns[0].output === 'string' &&
+    !('turnIndex' in storedTurns[0]) &&
+    !('runId' in storedTurns[0]) &&
+    !('fixtureSequenceStart' in storedTurns[0]) &&
+    !('fixtureSequenceEnd' in storedTurns[0]) &&
+    !('streamTools' in storedTurns[0]);
   const hasTurnBoundaries =
     storedTurns !== null &&
     !turnCaptureMalformed &&
@@ -237,7 +248,9 @@ export function verifyTraceTurnEvidence(input: {
         Array.isArray(turn.streamTools),
     );
   const legacySingleTurn =
-    storedTurns === null &&
+    (storedTurns === null || legacySingleTurnArray) &&
+    !('expectedTurnCount' in input.trace) &&
+    !('perTurnFixtureEvidence' in input.trace) &&
     !hasTurnBoundaries &&
     input.expectedTurnCount === 1 &&
     typeof input.trace.turnId === 'string' &&

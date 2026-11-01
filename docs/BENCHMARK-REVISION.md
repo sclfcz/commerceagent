@@ -450,3 +450,11 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 - Judge 读取 dev 用例且拒绝 holdout case；对多轮样本以最终用户问题/最终回答作为评分对象，同时提供此前固定轮次上下文及逐轮标记的真实工具返回。本轮证据优先于旧轮次状态。私有报告记录因 case 契约或逐轮证据不足而排除的数量。
 - 对抗性自审发现并修复了几项会导致误判的边界：损坏的新格式单轮轨迹曾可能降级走兼容旧格式路径；损坏的超大 ledger 区间可能导致长循环；非 fixture 子 Agent 的工具结果事件可能误伤 fixture 测量门槛；fixture 事件还需要同时绑定本轮 runId 与 turnId。现在损坏/缺失的轮次对象与边界都会拒绝，序号范围受 ledger 长度限制，fixture 事件按 runId/turnId 交叉核对，非 fixture 事件留给工具策略断言。并发同名 MCP 调用不能映射到具体 ledger 行，因此仍只核对轮次区间、名称/次数/状态；可见能力拓扑不等于工具被调用，也不等于有路由 oracle。未执行真实模型或 Judge 请求，未读取、修改或运行 holdout。
 - 验证：`npm run format:changed`、`npm run docs:check`、`make typecheck`、`npm run bench:typecheck`、`make build`、`git diff --check` 通过；逐轮证据、能力覆盖、assessment、Judge 与独立复评相关 5 个测试文件 52 项通过；全量 `make test` 为 363 个文件、3,257 项通过。`bench:selftest` 用当前 checkout 构建的临时 Runner 镜像通过：fixture MCP 已连接、2 次工具调用完成账本复核、独立重评与公开泄漏检查通过；代码围栏判为测量有效但格式失败、上游 503 判为测量失败、注入断言通过且无写操作。第一次自检误用了旧镜像并因身份 helper 缺失失败，已保留诊断后改用当前源码镜像重跑通过；临时镜像标签和失败 artifacts 已清理并恢复原本默认镜像标签。没有真实模型/Judge 调用，也没有读取、修改或运行 holdout。
+
+### 独立 Judge 验证集前置检查（2026-11-01）
+
+- 新增 `bench:judge-validation-preflight`：只接受 dev 源 run，按 case 去重，排除历史 dev Judge 报告和人工盲标包已用 case，并统计仍可用的自然内容失败。目标是至少 20 个不同的合格 dev case、至少一个自然内容失败，实质性内容失败占至少 30%；合成错误最多占 30%，不能让合成样本替代所有自然失败。preflight 只写私有计数报告，不生成标签、不调用 Judge。
+- 本机 dev 历史去重显示，曾被 Judge 使用的 case 有 40 个。对 2026-10-13 的 50 尝试 dev run，50 条在旧 summary 中标为 eligible，但逐轮复核拒绝了 3 条缺少可验证边界的旧多轮轨迹；按 case 去重并排除历史 Judge case 后只有 9 个有效新 case，且没有自然实质性失败。20 条目标样本至少需要 20 个不同 fresh case 和 1 个自然内容失败，故 readiness=false；未生成盲标包，未调用模型或 Judge。
+- 先期目录盘点曾解析本地 summary 以辨别 split，但没有打开 holdout 的 cases、traces、fixture ledger 或回复。正式 preflight 已改为先读 run metadata：holdout 只检查 split 字段后跳过，不解析其 summary 或 Judge artifacts。回归测试以无效 JSON 作为 holdout 报告内容，证明脚本不会打开该文件。
+- preflight 测试覆盖 30% synthetic cap、自然失败最低数、fresh case 去重、跨 dev 执行历史排除及 holdout 文件跳过；实际旧 run 检查结果保存在被 Git 忽略的 `benchmarks/results/<run-id>/judge/validation-preflight.*.private.json`。此结果不能用于 Judge 校准或模型排名；下一步需要至少 20 个新的、测量有效的 dev case 和至少一个自然内容失败，之后再盲标并评估 Judge。
+- 验证：preflight/轮次/Judge 专项 3 个测试文件 29 项通过；全量 `make test` 为 364 个文件、3,263 项通过；benchmark 与全项目类型检查、格式、文档、构建和 diff 检查通过。preflight 写入的私有报告仅含运行编号、hash、历史 case 数和 readiness 计数，没有回答内容、候选身份或 endpoint。没有执行外部模型/Judge 调用。
