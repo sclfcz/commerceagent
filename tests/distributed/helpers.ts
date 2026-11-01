@@ -68,11 +68,15 @@ export function testConfig(
     leaseMs: 900,
     heartbeatMs: 200,
     concurrency: 1,
+    claimBatch: 1,
     pollMs: 20,
     reaperIntervalMs: 100,
     backoffBaseMs: 20,
     backoffMaxMs: 60,
     ...overrides,
+    ...(overrides.claimBatch === undefined
+      ? { claimBatch: overrides.concurrency ?? 1 }
+      : {}),
   };
 }
 
@@ -104,7 +108,7 @@ const lockFile = path.join(
  * cross-process file lock; a crashed run's lock is reclaimed after 10 minutes.
  */
 export async function acquireSuiteLock(
-  timeoutMs = 240_000,
+  timeoutMs = 120_000,
 ): Promise<() => void> {
   if (!hasMysql) return () => {};
   const deadline = Date.now() + timeoutMs;
@@ -116,12 +120,31 @@ export async function acquireSuiteLock(
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      let reclaimable = false;
       try {
         const stat = fs.statSync(lockFile);
-        if (Date.now() - stat.mtimeMs > 600_000)
-          fs.rmSync(lockFile, { force: true });
+        const raw = fs.readFileSync(lockFile, 'utf8').trim();
+        const owner = Number(raw);
+        // An empty file is a lock being written right now, not a stale one:
+        // only a *parseable* dead pid (or a lock older than 10 minutes, in
+        // case the pid was reused) may be reclaimed.
+        if (Number.isSafeInteger(owner) && owner > 0) {
+          let ownerAlive = true;
+          try {
+            process.kill(owner, 0);
+          } catch (probe) {
+            ownerAlive = (probe as NodeJS.ErrnoException).code !== 'ESRCH';
+          }
+          reclaimable = !ownerAlive;
+        }
+        if (!reclaimable && Date.now() - stat.mtimeMs > 600_000)
+          reclaimable = true;
       } catch {
-        /* the lock disappeared between stat and rm */
+        reclaimable = true; // vanished between open and stat
+      }
+      if (reclaimable) {
+        fs.rmSync(lockFile, { force: true });
+        continue;
       }
       if (Date.now() > deadline)
         throw new Error('timed out waiting for the distributed test lock');

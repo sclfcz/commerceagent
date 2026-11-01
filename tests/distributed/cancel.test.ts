@@ -65,11 +65,11 @@ describeMysql('cancellation', () => {
       maxAttempts: 3,
     });
 
-    await waitFor(
-      async () => (await repository.getRun(run.id))?.status === 'running',
-      { label: 'run to start', timeoutMs: 10_000 },
-    );
-    expect(worker.inFlight).toBe(1);
+    await waitFor(async () => worker.inFlight === 1, {
+      label: 'worker to start the run',
+      timeoutMs: 10_000,
+    });
+    expect((await repository.getRun(run.id))?.status).toBe('running');
 
     const cancelledAt = Date.now();
     expect(await repository.cancel(run.id)).toBe(true);

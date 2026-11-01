@@ -9,6 +9,7 @@ import { loadDistributedConfig } from './config.js';
 import { createPool } from './mysql.js';
 import { runMigrations } from './migrate.js';
 import { RunRepository } from './run-repository.js';
+import { RuntimeStats } from './runtime-stats.js';
 import { SleepExecutor } from './executors.js';
 import { Worker } from './worker.js';
 import { Reaper } from './reaper.js';
@@ -21,6 +22,7 @@ const log = (event: Record<string, unknown>) => {
 
 async function main(): Promise<void> {
   const config = loadDistributedConfig();
+  const stats = new RuntimeStats();
   const pool = createPool(config.mysqlUrl, {
     connectionLimit: Math.min(64, Math.max(6, config.concurrency * 2 + 2)),
   });
@@ -35,8 +37,14 @@ async function main(): Promise<void> {
     try {
       await reaper?.stop();
       await worker?.stop();
+      // Last stdout line: `dist:bench` parses this to aggregate claim latency
+      // and deadlock retries across worker processes.
+      log({
+        event: 'worker_stats',
+        workerId: config.workerId,
+        ...stats.snapshot(),
+      });
       await pool.end();
-      log({ event: 'shutdown_complete', workerId: config.workerId });
       process.exit(0);
     } catch (error) {
       log({
@@ -56,6 +64,7 @@ async function main(): Promise<void> {
     leaseMs: config.leaseMs,
     backoffBaseMs: config.backoffBaseMs,
     backoffMaxMs: config.backoffMaxMs,
+    stats,
   });
   reaper = new Reaper(repository, {
     intervalMs: config.reaperIntervalMs,
@@ -72,9 +81,10 @@ async function main(): Promise<void> {
   log({
     event: 'worker_started',
     workerId: config.workerId,
-    concurrency: config.concurrency,
     leaseMs: config.leaseMs,
     heartbeatMs: config.heartbeatMs,
+    concurrency: config.concurrency,
+    claimBatch: config.claimBatch,
     migrationsApplied: migrations.applied,
   });
 }

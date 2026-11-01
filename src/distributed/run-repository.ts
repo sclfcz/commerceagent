@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { fullJitterBackoff } from './backoff.js';
+import type { RuntimeStats } from './runtime-stats.js';
 import {
   execute,
   queryRows,
@@ -25,6 +27,7 @@ export type RunEventName =
   | 'failed_retry'
   | 'dead'
   | 'reaped'
+  | 'released'
   | 'stale_write_rejected'
   | 'cancelled';
 
@@ -95,6 +98,8 @@ export interface RunRepositoryOptions {
   backoffMaxMs: number;
   /** Injectable for deterministic backoff in tests. */
   random?: () => number;
+  /** Optional counters used by `dist:bench`; cheap when omitted. */
+  stats?: RuntimeStats;
 }
 
 const MAX_PAYLOAD_BYTES = 512 * 1024;
@@ -183,7 +188,7 @@ export class RunRepository {
     runId: string;
     workerId: string;
     leaseToken: number;
-    operation: 'heartbeat' | 'complete' | 'fail';
+    operation: 'heartbeat' | 'complete' | 'fail' | 'release';
     reason: string;
   }): Promise<void> {
     // Deliberately a separate transaction: the rejected write must not roll
@@ -264,22 +269,25 @@ export class RunRepository {
 
   async claim(workerId: string, limit: number): Promise<ClaimedRun[]> {
     if (!Number.isSafeInteger(limit) || limit < 1) return [];
-    return withTransaction(this.pool, async (connection) => {
-      const due = await queryRows(
-        connection,
-        `SELECT id FROM dist_task_runs
+    const startedAt = performance.now();
+    const claimed = await withTransaction(
+      this.pool,
+      async (connection) => {
+        const due = await queryRows(
+          connection,
+          `SELECT id FROM dist_task_runs
           WHERE status IN ('queued','retry_wait') AND available_at <= NOW(3)
           ORDER BY available_at, id
           LIMIT ?
           FOR UPDATE SKIP LOCKED`,
-        [limit],
-      );
-      if (!due.length) return [];
-      const ids = due.map((row) => String(row.id));
-      const placeholders = ids.map(() => '?').join(',');
-      await execute(
-        connection,
-        `UPDATE dist_task_runs
+          [limit],
+        );
+        if (!due.length) return [];
+        const ids = due.map((row) => String(row.id));
+        const placeholders = ids.map(() => '?').join(',');
+        await execute(
+          connection,
+          `UPDATE dist_task_runs
             SET status = 'running',
                 attempt = attempt + 1,
                 lease_owner = ?,
@@ -289,37 +297,44 @@ export class RunRepository {
                 updated_at = NOW(3)
           WHERE id IN (${placeholders})
             AND status IN ('queued','retry_wait')`,
-        [workerId, this.leaseMicros, ...ids],
-      );
-      const rows = await queryRows(
-        connection,
-        `SELECT id, tenant_id, task_id, payload, attempt, max_attempts, lease_token
+          [workerId, this.leaseMicros, ...ids],
+        );
+        const rows = await queryRows(
+          connection,
+          `SELECT id, tenant_id, task_id, payload, attempt, max_attempts, lease_token
            FROM dist_task_runs
           WHERE id IN (${placeholders}) AND status = 'running' AND lease_owner = ?`,
-        [...ids, workerId],
-      );
-      const claimed: ClaimedRun[] = [];
-      for (const row of rows) {
-        const leaseToken = toNumber(row.lease_token);
-        await this.insertEvent(connection, {
-          runId: String(row.id),
-          leaseToken,
-          workerId,
-          event: 'claimed',
-          detail: { attempt: toNumber(row.attempt) },
-        });
-        claimed.push({
-          runId: String(row.id),
-          tenantId: String(row.tenant_id),
-          taskId: String(row.task_id),
-          payload: (row.payload ?? {}) as Record<string, unknown>,
-          attempt: toNumber(row.attempt),
-          maxAttempts: toNumber(row.max_attempts),
-          leaseToken,
-        });
-      }
-      return claimed;
-    });
+          [...ids, workerId],
+        );
+        const claimed: ClaimedRun[] = [];
+        for (const row of rows) {
+          const leaseToken = toNumber(row.lease_token);
+          await this.insertEvent(connection, {
+            runId: String(row.id),
+            leaseToken,
+            workerId,
+            event: 'claimed',
+            detail: { attempt: toNumber(row.attempt) },
+          });
+          claimed.push({
+            runId: String(row.id),
+            tenantId: String(row.tenant_id),
+            taskId: String(row.task_id),
+            payload: (row.payload ?? {}) as Record<string, unknown>,
+            attempt: toNumber(row.attempt),
+            maxAttempts: toNumber(row.max_attempts),
+            leaseToken,
+          });
+        }
+        return claimed;
+      },
+      { onRetry: () => this.options.stats?.recordTransactionRetry() },
+    );
+    this.options.stats?.recordClaim(
+      performance.now() - startedAt,
+      claimed.length,
+    );
+    return claimed;
   }
 
   /**
@@ -508,6 +523,59 @@ export class RunRepository {
     return outcome;
   }
 
+  /**
+   * Hand a claimed run back to the queue without consuming an attempt.
+   *
+   * Used when a worker shuts down gracefully: a deliberate stop should not
+   * burn one of the run's `max_attempts`, and `available_at` is preserved so
+   * the run keeps its original position in the queue.
+   */
+  async release(input: {
+    runId: string;
+    workerId: string;
+    leaseToken: number;
+  }): Promise<boolean> {
+    const applied = await withTransaction(this.pool, async (connection) => {
+      const rows = await queryRows(
+        connection,
+        `SELECT attempt FROM dist_task_runs
+          WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?
+          FOR UPDATE`,
+        [input.runId, input.workerId, input.leaseToken],
+      );
+      if (!rows.length) return false;
+      const attempt = toNumber(rows[0].attempt);
+      const updated = await execute(
+        connection,
+        `UPDATE dist_task_runs
+            SET status = 'queued',
+                attempt = GREATEST(attempt - 1, 0),
+                lease_token = lease_token + 1,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = NOW(3)
+          WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?`,
+        [input.runId, input.workerId, input.leaseToken],
+      );
+      if (updated.affectedRows === 0) return false;
+      await this.insertEvent(connection, {
+        runId: input.runId,
+        leaseToken: input.leaseToken + 1,
+        workerId: input.workerId,
+        event: 'released',
+        detail: { attempt, nextAttempt: Math.max(attempt - 1, 0) },
+      });
+      return true;
+    });
+    if (!applied)
+      await this.recordStaleWrite({
+        ...input,
+        operation: 'release',
+        reason: 'fencing_mismatch',
+      });
+    return applied;
+  }
+
   async reapExpired(limit = 100): Promise<
     Array<{
       runId: string;
@@ -520,7 +588,7 @@ export class RunRepository {
     return withTransaction(this.pool, async (connection) => {
       const rows = await queryRows(
         connection,
-        `SELECT id, lease_owner, lease_token, attempt, max_attempts
+        `SELECT id, lease_owner, lease_token, lease_expires_at, attempt, max_attempts
            FROM dist_task_runs
           WHERE status = 'running' AND lease_expires_at < NOW(3)
           ORDER BY lease_expires_at
@@ -541,16 +609,22 @@ export class RunRepository {
           attempt >= maxAttempts ? 'dead' : 'retry_wait';
         const previousToken = toNumber(row.lease_token);
         const previousOwner = (row.lease_owner as string | null) ?? null;
+        const previousLeaseExpiresAt = (row.lease_expires_at as Date | null)
+          ? (row.lease_expires_at as Date).toISOString()
+          : null;
+        // `available_at` is deliberately left untouched: it already points at
+        // (or before) the original submission time, so a recovered run keeps
+        // its queue priority instead of jumping to the back of the backlog.
         const updated = await execute(
           connection,
           nextStatus === 'dead'
             ? `UPDATE dist_task_runs
-                  SET status = ?, available_at = NOW(3), lease_token = lease_token + 1,
+                  SET status = ?, lease_token = lease_token + 1,
                       lease_owner = NULL, lease_expires_at = NULL,
                       finished_at = NOW(3), updated_at = NOW(3)
                 WHERE id = ? AND lease_token = ?`
             : `UPDATE dist_task_runs
-                  SET status = ?, available_at = NOW(3), lease_token = lease_token + 1,
+                  SET status = ?, lease_token = lease_token + 1,
                       lease_owner = NULL, lease_expires_at = NULL,
                       updated_at = NOW(3)
                 WHERE id = ? AND lease_token = ?`,
@@ -568,6 +642,7 @@ export class RunRepository {
             previousOwner,
             previousToken,
             nextToken,
+            previousLeaseExpiresAt,
             nextStatus,
             attempt,
             maxAttempts,

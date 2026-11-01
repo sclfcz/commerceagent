@@ -9,11 +9,19 @@ import type {
 export type { Pool, PoolConnection, ResultSetHeader, RowDataPacket };
 export type Queryable = Pool | PoolConnection;
 
+/**
+ * Create the shared pool.
+ *
+ * `timezone: 'Z'` only tells the *client* how to parse DATETIME values; the
+ * server session decides what `NOW(3)` writes into them. Every pooled
+ * connection therefore pins its session to UTC so a server configured for a
+ * local time zone cannot shift stored timestamps by hours.
+ */
 export function createPool(
   url: string,
   overrides: Partial<mysql.PoolOptions> = {},
 ): Pool {
-  return mysql.createPool({
+  const pool = mysql.createPool({
     uri: url,
     waitForConnections: true,
     connectionLimit: 10,
@@ -23,6 +31,18 @@ export function createPool(
     bigNumberStrings: false,
     ...overrides,
   });
+  // mysql2 forwards the *core* (callback-style) connection here, and emits it
+  // before the connection is handed out, so the SET is queued first.
+  pool.on('connection', (connection) => {
+    (
+      connection as unknown as {
+        query: (sql: string, callback: (error?: unknown) => void) => unknown;
+      }
+    ).query("SET time_zone = '+00:00'", () => {
+      /* a failed SET surfaces on the first real query using this connection */
+    });
+  });
+  return pool;
 }
 
 export async function queryRows(
@@ -61,7 +81,7 @@ const sleep = (ms: number) =>
 export async function withTransaction<T>(
   pool: Pool,
   fn: (connection: PoolConnection) => Promise<T>,
-  options: { retries?: number } = {},
+  options: { retries?: number; onRetry?: () => void } = {},
 ): Promise<T> {
   const retries = options.retries ?? 2;
   for (let attempt = 0; ; attempt++) {
@@ -78,6 +98,7 @@ export async function withTransaction<T>(
         /* the connection may already be gone; the original error wins */
       }
       if (attempt < retries && isRetryableTransactionError(error)) {
+        options.onRetry?.();
         await sleep(10 + Math.floor(Math.random() * 40));
         continue;
       }

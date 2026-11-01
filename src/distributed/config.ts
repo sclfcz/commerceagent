@@ -27,6 +27,8 @@ export interface DistributedConfig {
   heartbeatMs: number;
   /** Maximum number of runs executed concurrently by this worker. */
   concurrency: number;
+  /** How many runs one claim transaction asks for (defaults to concurrency). */
+  claimBatch: number;
   /** Base poll interval when no run is available; jittered by 0-30%. */
   pollMs: number;
   /** How often the reaper looks for expired leases. */
@@ -96,15 +98,20 @@ export function loadDistributedConfig(
       'DIST_HEARTBEAT_MS must be <= DIST_LEASE_MS / 3',
     );
 
+  const concurrency = readInt(env, 'DIST_WORKER_CONCURRENCY', 4, {
+    min: 1,
+    max: 256,
+  });
   const config: DistributedConfig = {
     mysqlUrl,
     workerId: readWorkerId(env),
     leaseMs,
     heartbeatMs,
-    concurrency: readInt(env, 'DIST_WORKER_CONCURRENCY', 4, {
-      min: 1,
-      max: 256,
-    }),
+    concurrency,
+    claimBatch: Math.min(
+      readInt(env, 'DIST_CLAIM_BATCH', concurrency, { min: 1, max: 256 }),
+      concurrency,
+    ),
     pollMs: readInt(env, 'DIST_POLL_MS', 1_000, { min: 10, max: 600_000 }),
     reaperIntervalMs: readInt(env, 'DIST_REAPER_INTERVAL_MS', 5_000, {
       min: 100,

@@ -18,6 +18,7 @@ export interface WorkerLogger {
 }
 
 interface RunState {
+  claim: ClaimedRun;
   controller: AbortController;
   done: Promise<void>;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
@@ -85,7 +86,10 @@ export class Worker {
       }
       let claimed: ClaimedRun[] = [];
       try {
-        claimed = await this.repository.claim(this.config.workerId, free);
+        claimed = await this.repository.claim(
+          this.config.workerId,
+          Math.min(free, this.config.claimBatch || free),
+        );
       } catch (error) {
         this.logger({
           event: 'claim_failed',
@@ -133,6 +137,7 @@ export class Worker {
   private execute(claim: ClaimedRun): void {
     const controller = new AbortController();
     const state: RunState = {
+      claim,
       controller,
       done: Promise.resolve(),
       heartbeatTimer: null,
@@ -285,8 +290,34 @@ export class Worker {
         sleep(this.config.leaseMs),
       ]);
     }
-    for (const state of this.runs.values()) {
+    // Runs that outlived the grace window are handed back *before* aborting:
+    // a graceful stop must not burn an attempt, and another worker can pick
+    // them up immediately with their original queue position.
+    for (const state of [...this.runs.values()]) {
+      if (state.heartbeatTimer) {
+        clearInterval(state.heartbeatTimer);
+        state.heartbeatTimer = null;
+      }
       state.leaseLost = true;
+      try {
+        const released = await this.repository.release({
+          runId: state.claim.runId,
+          workerId: this.config.workerId,
+          leaseToken: state.claim.leaseToken,
+        });
+        this.logger({
+          event: released ? 'run_released' : 'release_rejected',
+          workerId: this.config.workerId,
+          runId: state.claim.runId,
+        });
+      } catch (error) {
+        this.logger({
+          event: 'release_failed',
+          workerId: this.config.workerId,
+          runId: state.claim.runId,
+          error: errorMessage(error),
+        });
+      }
       state.controller.abort(new LeaseLostError('worker stopping'));
     }
     // Give abort-aware executors a moment to unwind, but never hang shutdown.

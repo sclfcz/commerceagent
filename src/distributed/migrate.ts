@@ -24,9 +24,23 @@ export class SchemaTooNewError extends Error {
   }
 }
 
-export const DEFAULT_MIGRATIONS_DIR = fileURLToPath(
-  new URL('../../migrations/', import.meta.url),
-);
+/**
+ * Migrations live next to the subsystem sources. `tsc` does not copy `.sql`
+ * files into `dist/`, so a compiled build falls back to the source tree.
+ */
+function resolveMigrationsDirectory(): string {
+  const candidates = [
+    new URL('./migrations/', import.meta.url),
+    new URL('../../../src/distributed/migrations/', import.meta.url),
+  ];
+  for (const candidate of candidates) {
+    const directory = fileURLToPath(candidate);
+    if (fs.existsSync(directory)) return directory;
+  }
+  return fileURLToPath(candidates[0]);
+}
+
+export const DEFAULT_MIGRATIONS_DIR = resolveMigrationsDirectory();
 
 export interface MigrationFile {
   version: number;

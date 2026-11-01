@@ -4,7 +4,8 @@
  *
  * Spawns real worker processes, SIGKILLs them mid-run (and parks one with
  * SIGSTOP to simulate a zombie), then verifies over SQL that every run still
- * completes exactly once and that stale workers were fenced off.
+ * reaches a terminal state exactly once, that stale workers were fenced off,
+ * and how long lease expiry detection and crash recovery took.
  *
  * Usage: npm run dist:chaos   (requires a running MySQL, see
  * docker-compose.distributed.yml and DIST_MYSQL_URL)
@@ -17,19 +18,19 @@ import { fileURLToPath } from 'node:url';
 import mysql from 'mysql2/promise';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
+
 const MYSQL_URL =
   process.env.DIST_MYSQL_URL?.trim() || 'mysql://dist:dist@127.0.0.1:3307/dist';
 const TOTAL_RUNS = Number(process.env.DIST_CHAOS_RUNS ?? 500);
 const KILL_COUNT = Number(process.env.DIST_CHAOS_KILLS ?? 10);
 const LEASE_MS = 5_000;
 const HEARTBEAT_MS = 1_500;
-const CONCURRENCY = 2;
-const WORKER_COUNT = 3;
+const CONCURRENCY = 4;
+const WORKER_COUNT = 6;
+const MAX_ATTEMPTS = 3;
 const ZOMBIE_PAUSE_MS = LEASE_MS * 2;
 const OVERALL_TIMEOUT_MS = 10 * 60 * 1000;
-// Kills can hit the same run twice; give each run enough attempts to survive
-// repeated takeovers while still exercising the retry path.
-const MAX_ATTEMPTS = 6;
+const ZOMBIE_CLAIM_TIMEOUT_MS = 20_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -86,6 +87,7 @@ function spawnWorker({ workerId, stopped = false } = {}) {
       DIST_LEASE_MS: String(LEASE_MS),
       DIST_HEARTBEAT_MS: String(HEARTBEAT_MS),
       DIST_WORKER_CONCURRENCY: String(CONCURRENCY),
+      DIST_CLAIM_BATCH: String(CONCURRENCY),
       DIST_POLL_MS: '200',
       DIST_REAPER_INTERVAL_MS: '1000',
       DIST_BACKOFF_BASE_MS: '200',
@@ -130,6 +132,11 @@ async function main() {
     supportBigNumbers: true,
     bigNumberStrings: false,
   });
+  // Same session time zone as the workers, otherwise NOW(3) written here is
+  // local time while the workers compare against UTC.
+  pool.on('connection', (connection) => {
+    connection.query("SET time_zone = '+00:00'", () => {});
+  });
 
   const finish = async (report, exitCode) => {
     const directory = path.join(ROOT, 'benchmarks/results');
@@ -151,7 +158,7 @@ async function main() {
 
     const payloads = [];
     for (let index = 0; index < TOTAL_RUNS; index++) {
-      const payload = { sleepMs: 200 + Math.floor(Math.random() * 2801) };
+      const payload = { sleepMs: 100 + Math.floor(Math.random() * 901) };
       if (Math.random() < 0.1) payload.failTimes = 1;
       payloads.push(payload);
     }
@@ -189,7 +196,21 @@ async function main() {
     const workers = Array.from({ length: WORKER_COUNT }, () => spawnWorker());
     // Zombie: keeps its leases while frozen, then wakes up with stale tokens.
     const zombie = spawnWorker({ workerId: 'chaos-zombie', stopped: true });
-    await sleep(1_000);
+    const zombieClaimed = async () => {
+      const [rows] = await pool.query(
+        `SELECT COUNT(*) AS total FROM dist_task_run_events
+          WHERE event = 'claimed' AND worker_id = 'chaos-zombie'`,
+      );
+      return Number(rows[0].total);
+    };
+    const claimDeadline = Date.now() + ZOMBIE_CLAIM_TIMEOUT_MS;
+    while (Date.now() < claimDeadline) {
+      if ((await zombieClaimed()) >= 1) break;
+      await sleep(100);
+    }
+    const zombieClaimsBeforePause = await zombieClaimed();
+    if (zombieClaimsBeforePause < 1)
+      notify('zombie never claimed a run before the pause');
     zombie.kill('SIGSTOP');
     notify(`zombie paused for ${ZOMBIE_PAUSE_MS}ms`);
     setTimeout(() => {
@@ -200,35 +221,51 @@ async function main() {
       }
     }, ZOMBIE_PAUSE_MS);
 
-    let kills = 0;
-    const scheduleKill = () => {
-      if (kills >= KILL_COUNT) return;
-      setTimeout(
-        () => {
-          const victims = [...workers].filter(
-            (child) => child.exitCode === null && !child.stopped,
-          );
-          if (victims.length) {
-            const victim = victims[Math.floor(Math.random() * victims.length)];
-            victim.kill('SIGKILL');
-            kills += 1;
-            notify(`killed ${victim.workerId} (${kills}/${KILL_COUNT})`);
-            const exitTimer = setTimeout(() => {
-              if (victim.exitCode === null && victim.signalCode === null)
-                notify(`${victim.workerId} did not exit 3s after SIGKILL`);
-            }, 3_000);
-            victim.once('exit', () => clearTimeout(exitTimer));
-            const replacement = spawnWorker();
-            const position = workers.indexOf(victim);
-            if (position >= 0) workers[position] = replacement;
-            else workers.push(replacement);
-          }
-          scheduleKill();
-        },
-        3_000 + Math.random() * 3_000,
+    const kills = [];
+    const killWorker = async (victim) => {
+      const [rows] = await pool.query(
+        `SELECT id FROM dist_task_runs WHERE status = 'running' AND lease_owner = ?`,
+        [victim.workerId],
       );
+      const at = Date.now();
+      victim.kill('SIGKILL');
+      kills.push({
+        workerId: victim.workerId,
+        at,
+        runIds: rows.map((row) => String(row.id)),
+      });
+      notify(
+        `killed ${victim.workerId} (${kills.length}/${KILL_COUNT})` +
+          ` with ${rows.length} in-flight run(s)`,
+      );
+      const exitTimer = setTimeout(() => {
+        if (victim.exitCode === null && victim.signalCode === null)
+          notify(`${victim.workerId} did not exit 3s after SIGKILL`);
+      }, 3_000);
+      victim.once('exit', () => clearTimeout(exitTimer));
+      const replacement = spawnWorker();
+      const position = workers.indexOf(victim);
+      if (position >= 0) workers[position] = replacement;
+      else workers.push(replacement);
     };
-    scheduleKill();
+
+    const scheduleKill = (delayMs) => {
+      if (kills.length >= KILL_COUNT) return;
+      setTimeout(() => {
+        const victims = [...workers].filter(
+          (child) => child.exitCode === null && !child.stopped,
+        );
+        if (!victims.length) {
+          scheduleKill(1_000);
+          return;
+        }
+        const victim = victims[Math.floor(Math.random() * victims.length)];
+        void killWorker(victim).finally(() =>
+          scheduleKill(3_000 + Math.random() * 3_000),
+        );
+      }, delayMs);
+    };
+    scheduleKill(1_500);
 
     const deadline = Date.now() + OVERALL_TIMEOUT_MS;
     let pending = null;
@@ -241,21 +278,28 @@ async function main() {
       );
       pending =
         (counts.queued ?? 0) + (counts.running ?? 0) + (counts.retry_wait ?? 0);
-      if (pending === 0) break;
-      await sleep(1_000);
+      if (pending === 0 && kills.length >= KILL_COUNT) break;
+      await sleep(500);
     }
     if (pending !== 0) {
       notify(`timed out with ${pending} pending runs`);
-      const report = {
-        runId,
-        passed: false,
-        reason: 'timeout',
-        pending,
-        durationMs: Date.now() - startedAt,
-      };
-      await finish(report, 1);
+      await finish(
+        {
+          runId,
+          passed: false,
+          reason: 'timeout',
+          pending,
+          kills: kills.length,
+          durationMs: Date.now() - startedAt,
+        },
+        1,
+      );
       return;
     }
+    // Wait out any kill that is still scheduled so the metric windows close.
+    const killDeadline = Date.now() + 60_000;
+    while (kills.length < KILL_COUNT && Date.now() < killDeadline)
+      await sleep(200);
 
     await stopAllWorkers();
 
@@ -271,30 +315,81 @@ async function main() {
     const eventCounts = Object.fromEntries(
       eventRows.map((row) => [row.event, Number(row.total)]),
     );
-    const [duplicateSucceeded] = await pool.query(
+    const [[duplicateSucceeded]] = await pool.query(
       `SELECT COUNT(*) AS offenders FROM (
          SELECT run_id FROM dist_task_run_events
           WHERE event = 'succeeded'
           GROUP BY run_id HAVING COUNT(*) <> 1
        ) AS offenders`,
     );
+    const [[deadWithoutBudget]] = await pool.query(
+      `SELECT COUNT(*) AS offenders FROM dist_task_runs
+        WHERE status = 'dead' AND attempt < max_attempts`,
+    );
+    const [[zombieStaleWrites]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM dist_task_run_events
+        WHERE event = 'stale_write_rejected'
+          AND worker_id = 'chaos-zombie'
+          AND JSON_UNQUOTE(JSON_EXTRACT(detail, '$.operation')) IN ('complete','fail')`,
+    );
+    const [[zombieStaleSuccess]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM dist_task_run_events e
+         JOIN dist_task_runs r ON r.id = e.run_id
+        WHERE e.event = 'succeeded'
+          AND e.worker_id = 'chaos-zombie'
+          AND e.lease_token < r.lease_token`,
+    );
+
     const [queueLatencyRows] = await pool.query(
       `SELECT TIMESTAMPDIFF(MICROSECOND, created_at, started_at) / 1000 AS ms
          FROM dist_task_runs WHERE started_at IS NOT NULL`,
     );
-    const [takeoverRows] = await pool.query(
-      `SELECT r.run_id, MIN(TIMESTAMPDIFF(MICROSECOND, r.created_at, c.created_at) / 1000) AS ms
-         FROM dist_task_run_events r
-         JOIN dist_task_run_events c
-           ON c.run_id = r.run_id AND c.id > r.id AND c.event = 'claimed'
-        WHERE r.event = 'reaped'
-        GROUP BY r.run_id`,
+    // Reap + claim history, used for the two recovery metrics below.
+    const [reapedRows] = await pool.query(
+      `SELECT created_at, detail FROM dist_task_run_events WHERE event = 'reaped'`,
     );
+    const [claimRows] = await pool.query(
+      `SELECT id, run_id, worker_id, created_at
+         FROM dist_task_run_events WHERE event = 'claimed' ORDER BY id`,
+    );
+
+    const leaseExpiryDetection = [];
+    for (const row of reapedRows) {
+      const previous = row.detail?.previousLeaseExpiresAt;
+      if (!previous) continue;
+      const detectedAt = new Date(row.created_at).getTime();
+      const expiredAt = Date.parse(previous);
+      if (!Number.isFinite(expiredAt)) continue;
+      leaseExpiryDetection.push(detectedAt - expiredAt);
+    }
+
+    const claimsByRun = new Map();
+    for (const row of claimRows) {
+      const list = claimsByRun.get(row.run_id) ?? [];
+      list.push({
+        workerId: row.worker_id,
+        at: new Date(row.created_at).getTime(),
+      });
+      claimsByRun.set(row.run_id, list);
+    }
+    const crashRecovery = [];
+    let productiveKills = 0;
+    for (const kill of kills) {
+      let productive = false;
+      for (const runIdValue of kill.runIds) {
+        const next = (claimsByRun.get(runIdValue) ?? []).find(
+          (claim) => claim.at >= kill.at && claim.workerId !== kill.workerId,
+        );
+        if (!next) continue;
+        productive = true;
+        crashRecovery.push(next.at - kill.at);
+      }
+      if (productive) productiveKills += 1;
+    }
 
     const durationMs = Date.now() - startedAt;
     const succeeded = statusCounts.succeeded ?? 0;
-    const queueLatencies = queueLatencyRows.map((row) => Number(row.ms));
-    const takeoverLatencies = takeoverRows.map((row) => Number(row.ms));
+    const dead = statusCounts.dead ?? 0;
     const report = {
       runId,
       startedAt: new Date(startedAt).toISOString(),
@@ -306,7 +401,7 @@ async function main() {
       runs: {
         total: TOTAL_RUNS,
         succeeded,
-        dead: statusCounts.dead ?? 0,
+        dead,
         cancelled: statusCounts.cancelled ?? 0,
         running: statusCounts.running ?? 0,
         retryWait: statusCounts.retry_wait ?? 0,
@@ -318,17 +413,29 @@ async function main() {
         staleWriteRejected: eventCounts.stale_write_rejected ?? 0,
         failedRetry: eventCounts.failed_retry ?? 0,
         dead: eventCounts.dead ?? 0,
+        released: eventCounts.released ?? 0,
         heartbeatLost: eventCounts.heartbeat_lost ?? 0,
       },
-      queueLatencyMs: metrics(queueLatencies),
-      takeoverLatencyMs: metrics(takeoverLatencies),
+      queueLatencyMs: metrics(queueLatencyRows.map((row) => Number(row.ms))),
+      leaseExpiryDetectionMs: metrics(leaseExpiryDetection),
+      crashRecoveryMs: metrics(crashRecovery),
+      definitions: {
+        queueLatencyMs:
+          'created_at -> started_at; includes backlog wait, not a pure scheduler delay.',
+        leaseExpiryDetectionMs:
+          'reaped.created_at - reaped.detail.previousLeaseExpiresAt; upper bound ~reaperIntervalMs.',
+        crashRecoveryMs:
+          'SIGKILL timestamp -> first claim of that run by a different worker; upper bound ~leaseMs + reaperInterval.',
+      },
       assertions: {
-        tenKillsExecuted: kills === KILL_COUNT,
-        allRunsSucceeded: succeeded === TOTAL_RUNS,
+        tenKillsExecuted: kills.length === KILL_COUNT,
+        allRunsTerminal: pending === 0,
         exactlyOneSucceededEventPerRun:
-          Number(duplicateSucceeded[0].offenders) === 0 &&
-          (eventCounts.succeeded ?? 0) === TOTAL_RUNS,
-        staleWriteRejectedObserved: (eventCounts.stale_write_rejected ?? 0) > 0,
+          Number(duplicateSucceeded.offenders) === 0 &&
+          (eventCounts.succeeded ?? 0) === succeeded,
+        deadRunsExplained: Number(deadWithoutBudget.offenders) === 0,
+        zombieStaleWriteObserved: Number(zombieStaleWrites.total) > 0,
+        zombieNoStaleSucceeded: Number(zombieStaleSuccess.total) === 0,
       },
       environment: {
         mysqlUrlHost: new URL(MYSQL_URL).host,
@@ -337,10 +444,21 @@ async function main() {
         concurrencyPerWorker: CONCURRENCY,
         maxAttempts: MAX_ATTEMPTS,
         initialWorkers: WORKER_COUNT,
-        kills,
+        kills: kills.length,
+        productiveKills,
         zombiePauseMs: ZOMBIE_PAUSE_MS,
+        zombieClaimsBeforePause,
+        zombieStaleWrites: Number(zombieStaleWrites.total),
       },
     };
+    if (dead > 0)
+      report.deadRunsNote =
+        'Dead runs exhausted max_attempts after being killed repeatedly; ' +
+        'max_attempts was deliberately left at 3 instead of hiding it.';
+    if (productiveKills < kills.length)
+      report.killPlanNote =
+        `${kills.length - productiveKills} kill(s) hit workers whose runs had ` +
+        'already drained, so they produced no crash-recovery sample.';
     report.passed = Object.values(report.assertions).every(Boolean);
     await finish(report, report.passed ? 0 : 1);
   } catch (error) {
