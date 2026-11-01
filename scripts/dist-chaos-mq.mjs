@@ -309,6 +309,7 @@ async function main() {
       relayKills: 0,
       relayRestarts: 0,
       purgeAt: null,
+      purgeError: null,
       restart: null,
     };
     // Relays die from SIGKILL *and* from the crash-after-confirm injection; a
@@ -368,10 +369,11 @@ async function main() {
           injections.purgeAt = Date.now();
           notify('purged the main queue');
         } catch (error) {
+          injections.purgeError = error.message?.slice(0, 200) ?? 'unknown';
           notify(`purge failed: ${error.message?.slice(0, 120)}`);
         }
       })();
-    }, 8_000);
+    }, 3_000);
 
     let restartPromise = null;
     setTimeout(() => {
@@ -396,7 +398,7 @@ async function main() {
             `(${injections.restart.ok ? 'ok' : 'failed'})`,
         );
       })();
-    }, 10_000);
+    }, 7_000);
 
     const deadline = Date.now() + OVERALL_TIMEOUT_MS;
     let pending = null;
@@ -544,6 +546,7 @@ async function main() {
       brokerRestart: {
         method: injections.restart?.method ?? null,
         ok: injections.restart?.ok ?? false,
+        commandMs: injections.restart?.commandMs ?? null,
         readyAfterMs: injections.restart?.readyAt
           ? injections.restart.readyAt - startedAt
           : null,
