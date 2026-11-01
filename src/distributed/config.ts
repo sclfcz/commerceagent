@@ -37,6 +37,20 @@ export interface DistributedConfig {
   backoffBaseMs: number;
   /** Upper bound for a single retry delay. */
   backoffMaxMs: number;
+  /** `poll`: claim directly from MySQL. `mq`: consume run.ready messages. */
+  dispatch: 'poll' | 'mq';
+  /** RabbitMQ connection string (only used when dispatch = mq / by the relay). */
+  amqpUrl: string;
+  /** Safety-net poll interval when dispatch = mq (messages can be lost). */
+  fallbackPollMs: number;
+  /** Relay: rows per publish batch. */
+  relayBatchSize: number;
+  /** Relay: idle sleep between batches. */
+  relayPollMs: number;
+  /** Relay fault injection: exit between confirm and commit. */
+  relayCrashAfterConfirmRate: number;
+  /** Relay fault injection: publish the same message twice. */
+  relayDuplicateRate: number;
 }
 
 function readInt(
@@ -55,6 +69,26 @@ function readInt(
   )
     throw new DistributedConfigError(field);
   return value;
+}
+
+/** Probability in [0,1]; used only by the relay's fault injection. */
+function readRate(env: NodeJS.ProcessEnv, field: string): number {
+  const raw = env[field];
+  if (raw === undefined || raw.trim() === '') return 0;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 1)
+    throw new DistributedConfigError(field, `${field} must be within [0,1]`);
+  return value;
+}
+
+function readDispatch(env: NodeJS.ProcessEnv): 'poll' | 'mq' {
+  const raw = (env.DIST_DISPATCH ?? 'poll').trim().toLowerCase();
+  if (raw !== 'poll' && raw !== 'mq')
+    throw new DistributedConfigError(
+      'DIST_DISPATCH',
+      "DIST_DISPATCH must be 'poll' or 'mq'",
+    );
+  return raw;
 }
 
 function readWorkerId(env: NodeJS.ProcessEnv): string {
@@ -125,6 +159,25 @@ export function loadDistributedConfig(
       min: 1,
       max: 86_400_000,
     }),
+    dispatch: readDispatch(env),
+    amqpUrl: env.DIST_AMQP_URL?.trim() || 'amqp://dist:dist@127.0.0.1:5672',
+    fallbackPollMs: readInt(env, 'DIST_FALLBACK_POLL_MS', 30_000, {
+      min: 50,
+      max: 3_600_000,
+    }),
+    relayBatchSize: readInt(env, 'DIST_RELAY_BATCH_SIZE', 100, {
+      min: 1,
+      max: 1000,
+    }),
+    relayPollMs: readInt(env, 'DIST_RELAY_POLL_MS', 200, {
+      min: 10,
+      max: 60_000,
+    }),
+    relayCrashAfterConfirmRate: readRate(
+      env,
+      'DIST_RELAY_CRASH_AFTER_CONFIRM_RATE',
+    ),
+    relayDuplicateRate: readRate(env, 'DIST_RELAY_DUPLICATE_RATE'),
   };
   if (config.backoffBaseMs > config.backoffMaxMs)
     throw new DistributedConfigError(

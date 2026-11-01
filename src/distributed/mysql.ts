@@ -78,15 +78,38 @@ const sleep = (ms: number) =>
  * Deadlocks and lock-wait timeouts are retried a bounded number of times,
  * which keeps `FOR UPDATE SKIP LOCKED` claim batches from failing spuriously.
  */
+export type TransactionIsolation =
+  | 'READ UNCOMMITTED'
+  | 'READ COMMITTED'
+  | 'REPEATABLE READ'
+  | 'SERIALIZABLE';
+
+export interface TransactionOptions {
+  retries?: number;
+  onRetry?: () => void;
+  /**
+   * Applies to the next transaction only (`SET TRANSACTION ...`), so it is
+   * issued before `BEGIN` and does not leak into later statements.
+   * Claim/reap use READ COMMITTED: their `FOR UPDATE SKIP LOCKED` scans only
+   * need to skip rows another transaction already locked, and repeatable-read
+   * gap locks make concurrent claimers deadlock far more often.
+   */
+  isolation?: TransactionIsolation;
+}
+
 export async function withTransaction<T>(
   pool: Pool,
   fn: (connection: PoolConnection) => Promise<T>,
-  options: { retries?: number; onRetry?: () => void } = {},
+  options: TransactionOptions = {},
 ): Promise<T> {
   const retries = options.retries ?? 2;
   for (let attempt = 0; ; attempt++) {
     const connection = await pool.getConnection();
     try {
+      if (options.isolation)
+        await connection.query(
+          `SET TRANSACTION ISOLATION LEVEL ${options.isolation}`,
+        );
       await connection.beginTransaction();
       const result = await fn(connection);
       await connection.commit();

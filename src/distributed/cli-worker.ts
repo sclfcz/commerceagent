@@ -13,6 +13,7 @@ import { RuntimeStats } from './runtime-stats.js';
 import { SleepExecutor } from './executors.js';
 import { Worker } from './worker.js';
 import { Reaper } from './reaper.js';
+import { MqConsumer } from './mq-consumer.js';
 
 const log = (event: Record<string, unknown>) => {
   process.stdout.write(
@@ -28,6 +29,7 @@ async function main(): Promise<void> {
   });
   let worker: Worker | null = null;
   let reaper: Reaper | null = null;
+  let consumer: MqConsumer | null = null;
   let shuttingDown = false;
 
   const shutdown = async (signal: string) => {
@@ -35,6 +37,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     log({ event: 'shutdown_started', signal, workerId: config.workerId });
     try {
+      await consumer?.stop();
       await reaper?.stop();
       await worker?.stop();
       // Last stdout line: `dist:bench` parses this to aggregate claim latency
@@ -42,6 +45,8 @@ async function main(): Promise<void> {
       log({
         event: 'worker_stats',
         workerId: config.workerId,
+        dispatch: config.dispatch,
+        consumer: consumer?.stats() ?? null,
         ...stats.snapshot(),
       });
       await pool.end();
@@ -78,6 +83,22 @@ async function main(): Promise<void> {
   });
   reaper.start();
   worker.start();
+  if (config.dispatch === 'mq') {
+    consumer = new MqConsumer({
+      amqpUrl: config.amqpUrl,
+      repository,
+      worker,
+      concurrency: config.concurrency,
+      consumerId: config.workerId,
+      logger: log,
+    });
+    await consumer.start();
+    log({
+      event: 'consumer_started',
+      queue: consumer.queueTopology.mainQueue,
+      prefetch: config.concurrency,
+    });
+  }
   log({
     event: 'worker_started',
     workerId: config.workerId,
@@ -85,6 +106,7 @@ async function main(): Promise<void> {
     heartbeatMs: config.heartbeatMs,
     concurrency: config.concurrency,
     claimBatch: config.claimBatch,
+    dispatch: config.dispatch,
     migrationsApplied: migrations.applied,
   });
 }

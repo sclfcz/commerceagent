@@ -14,8 +14,12 @@ import { RunRepository } from '../../src/distributed/run-repository.js';
  * depends on a database being available.
  */
 export const TEST_MYSQL_URL = process.env.DIST_MYSQL_TEST_URL?.trim() ?? '';
+export const TEST_AMQP_URL = process.env.DIST_AMQP_TEST_URL?.trim() ?? '';
 export const hasMysql = TEST_MYSQL_URL.length > 0;
+export const hasAmqp = TEST_AMQP_URL.length > 0;
 export const describeMysql = hasMysql ? describe : describe.skip;
+/** Suites that need both MySQL and RabbitMQ. */
+export const describeDist = hasMysql && hasAmqp ? describe : describe.skip;
 
 export const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -27,6 +31,8 @@ export async function createTestPool(connectionLimit = 16): Promise<Pool> {
 
 /** Drop everything and re-apply migrations, giving the file a clean schema. */
 export async function resetSchema(pool: Pool): Promise<void> {
+  await pool.query('DROP TABLE IF EXISTS dist_consumed_messages');
+  await pool.query('DROP TABLE IF EXISTS dist_outbox');
   await pool.query('DROP TABLE IF EXISTS dist_task_run_events');
   await pool.query('DROP TABLE IF EXISTS dist_task_runs');
   await pool.query('DROP TABLE IF EXISTS dist_schema_migrations');
@@ -34,8 +40,15 @@ export async function resetSchema(pool: Pool): Promise<void> {
 }
 
 export async function clearRuns(pool: Pool): Promise<void> {
+  await pool.query('DELETE FROM dist_consumed_messages');
+  await pool.query('DELETE FROM dist_outbox');
   await pool.query('DELETE FROM dist_task_run_events');
   await pool.query('DELETE FROM dist_task_runs');
+}
+
+/** Unique queue prefix so parallel files never share broker state. */
+export function uniqueQueuePrefix(tag: string): string {
+  return `dist-test-${tag}-${randomUUID().slice(0, 8)}`;
 }
 
 export function uniqueTenant(prefix = 'tenant'): string {
@@ -73,6 +86,13 @@ export function testConfig(
     reaperIntervalMs: 100,
     backoffBaseMs: 20,
     backoffMaxMs: 60,
+    dispatch: 'poll',
+    amqpUrl: TEST_AMQP_URL || 'amqp://unused',
+    fallbackPollMs: 30_000,
+    relayBatchSize: 100,
+    relayPollMs: 200,
+    relayCrashAfterConfirmRate: 0,
+    relayDuplicateRate: 0,
     ...overrides,
     ...(overrides.claimBatch === undefined
       ? { claimBatch: overrides.concurrency ?? 1 }

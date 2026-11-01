@@ -204,6 +204,26 @@ export class RunRepository {
     });
   }
 
+  /**
+   * Enqueue `run.ready` in the same transaction as the state change that made
+   * the run executable. `available_at` is copied from the run row so a relay
+   * can never publish a retry before its backoff has elapsed.
+   */
+  private async enqueueOutbox(
+    connection: Queryable,
+    runId: string,
+    tenantId: string,
+  ): Promise<void> {
+    await execute(
+      connection,
+      `INSERT INTO dist_outbox
+         (run_id, event_type, payload, status, publish_attempts, available_at, created_at)
+       SELECT ?, 'run.ready', ?, 'pending', 0, available_at, NOW(3)
+         FROM dist_task_runs WHERE id = ?`,
+      [runId, JSON.stringify({ runId, tenantId }), runId],
+    );
+  }
+
   async submit(
     input: SubmitInput,
   ): Promise<{ run: TaskRun; created: boolean }> {
@@ -241,6 +261,7 @@ export class RunRepository {
           event: 'submitted',
           detail: { taskId: input.taskId, maxAttempts },
         });
+        await this.enqueueOutbox(connection, id, input.tenantId);
         const rows = await queryRows(
           connection,
           'SELECT * FROM dist_task_runs WHERE id = ?',
@@ -335,6 +356,97 @@ export class RunRepository {
       claimed.length,
     );
     return claimed;
+  }
+
+  /**
+   * Claim exactly one run by id (MQ dispatch path).
+   *
+   * The `dist_consumed_messages` insert makes the whole operation idempotent
+   * per (consumer, messageId): a duplicate delivery returns `duplicate`
+   * without touching the run. A non-claimable run (already running, finished,
+   * or not yet due) returns `skipped`, which is the correct outcome for a
+   * wake-up message that arrived late.
+   */
+  async claimById(input: {
+    workerId: string;
+    runId: string;
+    messageId: string;
+  }): Promise<{
+    outcome: 'claimed' | 'skipped' | 'duplicate';
+    claim?: ClaimedRun;
+  }> {
+    return withTransaction(
+      this.pool,
+      async (connection) => {
+        try {
+          await execute(
+            connection,
+            `INSERT INTO dist_consumed_messages
+               (consumer, message_id, run_id, outcome, consumed_at)
+             VALUES (?, ?, ?, 'claimed', NOW(3))`,
+            [input.workerId, input.messageId, input.runId],
+          );
+        } catch (error) {
+          if (isDuplicateKeyError(error))
+            return { outcome: 'duplicate' as const };
+          throw error;
+        }
+
+        const updated = await execute(
+          connection,
+          `UPDATE dist_task_runs
+              SET status = 'running',
+                  attempt = attempt + 1,
+                  lease_owner = ?,
+                  lease_token = lease_token + 1,
+                  lease_expires_at = NOW(3) + INTERVAL ? MICROSECOND,
+                  started_at = COALESCE(started_at, NOW(3)),
+                  updated_at = NOW(3)
+            WHERE id = ?
+              AND status IN ('queued','retry_wait')
+              AND available_at <= NOW(3)`,
+          [input.workerId, this.leaseMicros, input.runId],
+        );
+        if (updated.affectedRows === 0) {
+          await execute(
+            connection,
+            `UPDATE dist_consumed_messages SET outcome = 'skipped'
+              WHERE consumer = ? AND message_id = ?`,
+            [input.workerId, input.messageId],
+          );
+          return { outcome: 'skipped' as const };
+        }
+
+        const rows = await queryRows(
+          connection,
+          `SELECT id, tenant_id, task_id, payload, attempt, max_attempts, lease_token
+             FROM dist_task_runs WHERE id = ?`,
+          [input.runId],
+        );
+        const row = rows[0];
+        const leaseToken = toNumber(row.lease_token);
+        await this.insertEvent(connection, {
+          runId: input.runId,
+          leaseToken,
+          workerId: input.workerId,
+          event: 'claimed',
+          detail: { attempt: toNumber(row.attempt), via: 'mq' },
+        });
+        return {
+          outcome: 'claimed' as const,
+          claim: {
+            runId: String(row.id),
+            tenantId: String(row.tenant_id),
+            taskId: String(row.task_id),
+            payload: (row.payload ?? {}) as Record<string, unknown>,
+            attempt: toNumber(row.attempt),
+            maxAttempts: toNumber(row.max_attempts),
+            leaseToken,
+          },
+        };
+      },
+      { isolation: 'READ COMMITTED' },
+    );
   }
 
   /**
@@ -440,7 +552,7 @@ export class RunRepository {
     const outcome = await withTransaction(this.pool, async (connection) => {
       const rows = await queryRows(
         connection,
-        `SELECT attempt, max_attempts FROM dist_task_runs
+        `SELECT attempt, max_attempts, tenant_id FROM dist_task_runs
           WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?
           FOR UPDATE`,
         [input.runId, input.workerId, input.leaseToken],
@@ -482,6 +594,11 @@ export class RunRepository {
           event: 'failed_retry',
           detail: { attempt, maxAttempts, retryDelayMs: delay, error: message },
         });
+        await this.enqueueOutbox(
+          connection,
+          input.runId,
+          (rows[0].tenant_id as string) ?? '',
+        );
         return {
           applied: true,
           status: 'retry_wait' as RunStatus,
@@ -538,7 +655,7 @@ export class RunRepository {
     const applied = await withTransaction(this.pool, async (connection) => {
       const rows = await queryRows(
         connection,
-        `SELECT attempt FROM dist_task_runs
+        `SELECT attempt, tenant_id FROM dist_task_runs
           WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?
           FOR UPDATE`,
         [input.runId, input.workerId, input.leaseToken],
@@ -565,6 +682,11 @@ export class RunRepository {
         event: 'released',
         detail: { attempt, nextAttempt: Math.max(attempt - 1, 0) },
       });
+      await this.enqueueOutbox(
+        connection,
+        input.runId,
+        (rows[0].tenant_id as string) ?? '',
+      );
       return true;
     });
     if (!applied)
@@ -585,78 +707,88 @@ export class RunRepository {
     }>
   > {
     if (!Number.isSafeInteger(limit) || limit < 1) return [];
-    return withTransaction(this.pool, async (connection) => {
-      const rows = await queryRows(
-        connection,
-        `SELECT id, lease_owner, lease_token, lease_expires_at, attempt, max_attempts
+    return withTransaction(
+      this.pool,
+      async (connection) => {
+        const rows = await queryRows(
+          connection,
+          `SELECT id, tenant_id, lease_owner, lease_token, lease_expires_at, attempt, max_attempts
            FROM dist_task_runs
           WHERE status = 'running' AND lease_expires_at < NOW(3)
           ORDER BY lease_expires_at
           LIMIT ?
           FOR UPDATE SKIP LOCKED`,
-        [limit],
-      );
-      const reaped: Array<{
-        runId: string;
-        previousOwner: string | null;
-        previousToken: number;
-        nextStatus: RunStatus;
-      }> = [];
-      for (const row of rows) {
-        const attempt = toNumber(row.attempt);
-        const maxAttempts = toNumber(row.max_attempts);
-        const nextStatus: RunStatus =
-          attempt >= maxAttempts ? 'dead' : 'retry_wait';
-        const previousToken = toNumber(row.lease_token);
-        const previousOwner = (row.lease_owner as string | null) ?? null;
-        const previousLeaseExpiresAt = (row.lease_expires_at as Date | null)
-          ? (row.lease_expires_at as Date).toISOString()
-          : null;
-        // `available_at` is deliberately left untouched: it already points at
-        // (or before) the original submission time, so a recovered run keeps
-        // its queue priority instead of jumping to the back of the backlog.
-        const updated = await execute(
-          connection,
-          nextStatus === 'dead'
-            ? `UPDATE dist_task_runs
+          [limit],
+        );
+        const reaped: Array<{
+          runId: string;
+          previousOwner: string | null;
+          previousToken: number;
+          nextStatus: RunStatus;
+        }> = [];
+        for (const row of rows) {
+          const attempt = toNumber(row.attempt);
+          const maxAttempts = toNumber(row.max_attempts);
+          const nextStatus: RunStatus =
+            attempt >= maxAttempts ? 'dead' : 'retry_wait';
+          const previousToken = toNumber(row.lease_token);
+          const previousOwner = (row.lease_owner as string | null) ?? null;
+          const previousLeaseExpiresAt = (row.lease_expires_at as Date | null)
+            ? (row.lease_expires_at as Date).toISOString()
+            : null;
+          // `available_at` is deliberately left untouched: it already points at
+          // (or before) the original submission time, so a recovered run keeps
+          // its queue priority instead of jumping to the back of the backlog.
+          const updated = await execute(
+            connection,
+            nextStatus === 'dead'
+              ? `UPDATE dist_task_runs
                   SET status = ?, lease_token = lease_token + 1,
                       lease_owner = NULL, lease_expires_at = NULL,
                       finished_at = NOW(3), updated_at = NOW(3)
                 WHERE id = ? AND lease_token = ?`
-            : `UPDATE dist_task_runs
+              : `UPDATE dist_task_runs
                   SET status = ?, lease_token = lease_token + 1,
                       lease_owner = NULL, lease_expires_at = NULL,
                       updated_at = NOW(3)
                 WHERE id = ? AND lease_token = ?`,
-          [nextStatus, String(row.id), previousToken],
-        );
-        // Another reaper won the row between SELECT and UPDATE; leave its event.
-        if (updated.affectedRows !== 1) continue;
-        const nextToken = previousToken + 1;
-        await this.insertEvent(connection, {
-          runId: String(row.id),
-          leaseToken: nextToken,
-          workerId: previousOwner,
-          event: 'reaped',
-          detail: {
+            [nextStatus, String(row.id), previousToken],
+          );
+          // Another reaper won the row between SELECT and UPDATE; leave its event.
+          if (updated.affectedRows !== 1) continue;
+          const nextToken = previousToken + 1;
+          if (nextStatus === 'retry_wait')
+            await this.enqueueOutbox(
+              connection,
+              String(row.id),
+              (row.tenant_id as string) ?? '',
+            );
+          await this.insertEvent(connection, {
+            runId: String(row.id),
+            leaseToken: nextToken,
+            workerId: previousOwner,
+            event: 'reaped',
+            detail: {
+              previousOwner,
+              previousToken,
+              nextToken,
+              previousLeaseExpiresAt,
+              nextStatus,
+              attempt,
+              maxAttempts,
+            },
+          });
+          reaped.push({
+            runId: String(row.id),
             previousOwner,
             previousToken,
-            nextToken,
-            previousLeaseExpiresAt,
             nextStatus,
-            attempt,
-            maxAttempts,
-          },
-        });
-        reaped.push({
-          runId: String(row.id),
-          previousOwner,
-          previousToken,
-          nextStatus,
-        });
-      }
-      return reaped;
-    });
+          });
+        }
+        return reaped;
+      },
+      { isolation: 'READ COMMITTED' },
+    );
   }
 
   async cancel(runId: string): Promise<boolean> {

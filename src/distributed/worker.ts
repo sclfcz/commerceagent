@@ -70,6 +70,15 @@ export class Worker {
     return this.config.workerId;
   }
 
+  /**
+   * Start executing a run that was claimed elsewhere (MQ dispatch). The lease
+   * is already held, so the run goes through the same execute/heartbeat/fencing
+   * path as a polled claim.
+   */
+  adopt(claim: ClaimedRun): void {
+    this.execute(claim);
+  }
+
   start(): void {
     if (this.started) return;
     this.started = true;
@@ -78,6 +87,12 @@ export class Worker {
   }
 
   private async loop(): Promise<void> {
+    if (this.config.dispatch === 'mq') {
+      // MQ is the primary path; do not race it with a claim at t=0. The first
+      // fallback poll only runs after one full interval.
+      await this.sleep(this.config.fallbackPollMs);
+      if (this.stopping) return;
+    }
     while (!this.stopping) {
       const free = this.config.concurrency - this.runs.size;
       if (free <= 0) {
@@ -105,7 +120,13 @@ export class Worker {
         break;
       }
       if (!claimed.length) {
-        await this.sleep(this.pollDelayMs());
+        // In MQ mode the poll loop is only a safety net for lost messages, so
+        // it backs off to DIST_FALLBACK_POLL_MS instead of busy-claiming.
+        await this.sleep(
+          this.config.dispatch === 'mq'
+            ? this.config.fallbackPollMs
+            : this.pollDelayMs(),
+        );
         continue;
       }
       for (const claim of claimed) this.execute(claim);

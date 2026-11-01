@@ -31,13 +31,24 @@ const RUNS_PER_ROUND = Number(process.env.DIST_BENCH_RUNS ?? 20_000);
 const CONCURRENCY = 8;
 const ROUND_TIMEOUT_MS = 10 * 60 * 1000;
 
-const ROUNDS = [
+const ALL_ROUNDS = [
   { id: 'workers-1', workers: 1, claimBatch: CONCURRENCY },
   { id: 'workers-2', workers: 2, claimBatch: CONCURRENCY },
   { id: 'workers-4', workers: 4, claimBatch: CONCURRENCY },
   { id: 'workers-8', workers: 8, claimBatch: CONCURRENCY },
   { id: 'workers-8-claim-batch-1', workers: 8, claimBatch: 1 },
 ];
+
+// `DIST_BENCH_ROUNDS=workers-8,workers-8-claim-batch-1` narrows the run;
+// `DIST_BENCH_REPEAT=3` repeats each round and reports medians.
+const ROUND_FILTER = (process.env.DIST_BENCH_ROUNDS ?? '')
+  .split(',')
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+const REPEATS = Math.max(1, Number(process.env.DIST_BENCH_REPEAT ?? 1) || 1);
+const ROUNDS = ALL_ROUNDS.filter(
+  (round) => !ROUND_FILTER.length || ROUND_FILTER.includes(round.id),
+);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -53,6 +64,16 @@ function stableStringify(value) {
   return `{${entries
     .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
     .join(',')}}`;
+}
+
+function median(values) {
+  const present = values.filter((value) => typeof value === 'number');
+  if (!present.length) return null;
+  const sorted = [...present].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[middle]
+    : Number(((sorted[middle - 1] + sorted[middle]) / 2).toFixed(2));
 }
 
 function percentile(sorted, quantile) {
@@ -308,13 +329,40 @@ async function main() {
     };
     const rounds = [];
     for (const round of ROUNDS) {
-      const result = await runRound(pool, round);
-      rounds.push(result);
-      notify(
-        `${round.id}: ${result.throughputRunsPerSecond ?? 'n/a'} run/s, ` +
-          `p95 claim ${result.claims.latencyMs.p95 ?? 'n/a'} ms, ` +
-          `duplicates ${result.duplicateSucceededRuns}`,
-      );
+      const repeats = [];
+      for (let attempt = 0; attempt < REPEATS; attempt++) {
+        const result = await runRound(pool, round);
+        repeats.push(result);
+        notify(
+          `${round.id} [${attempt + 1}/${REPEATS}]: ` +
+            `${result.throughputRunsPerSecond ?? 'n/a'} run/s, ` +
+            `p95 claim ${result.claims.latencyMs.p95 ?? 'n/a'} ms, ` +
+            `duplicates ${result.duplicateSucceededRuns}`,
+        );
+      }
+      rounds.push({
+        id: round.id,
+        workers: round.workers,
+        concurrencyPerWorker: CONCURRENCY,
+        claimBatch: round.claimBatch,
+        repeats,
+        median: {
+          throughputRunsPerSecond: median(
+            repeats.map((entry) => entry.throughputRunsPerSecond),
+          ),
+          wallClockMs: median(repeats.map((entry) => entry.wallClockMs)),
+          processingMs: median(repeats.map((entry) => entry.processingMs)),
+          deadlockRetries: median(
+            repeats.map((entry) => entry.deadlockRetries),
+          ),
+          claimP50: median(repeats.map((entry) => entry.claims.latencyMs.p50)),
+          claimP95: median(repeats.map((entry) => entry.claims.latencyMs.p95)),
+          claimP99: median(repeats.map((entry) => entry.claims.latencyMs.p99)),
+          duplicateSucceededRuns: median(
+            repeats.map((entry) => entry.duplicateSucceededRuns),
+          ),
+        },
+      });
     }
 
     const batch8 = rounds.find((round) => round.id === 'workers-8');
@@ -332,6 +380,8 @@ async function main() {
       finishedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
       runsPerRound: RUNS_PER_ROUND,
+      repeatsPerRound: REPEATS,
+      roundFilter: ROUND_FILTER,
       machine,
       mysql: {
         host: new URL(MYSQL_URL).host,
@@ -345,21 +395,22 @@ async function main() {
             batch8?.throughputRunsPerSecond,
             batch1?.throughputRunsPerSecond,
           ),
-          claimP95DeltaPct: deltaPct(
-            batch8?.claims.latencyMs.p95,
-            batch1?.claims.latencyMs.p95,
-          ),
+          claimP95DeltaPct: deltaPct(batch8?.claimP95, batch1?.claimP95),
         },
       },
       assertions: {
-        everyRoundSucceeded: rounds.every(
-          (round) => round.runs.succeeded === RUNS_PER_ROUND,
+        everyRoundSucceeded: rounds.every((round) =>
+          round.repeats.every(
+            (entry) => entry.runs.succeeded === RUNS_PER_ROUND,
+          ),
         ),
-        noDuplicateSucceededEvents: rounds.every(
-          (round) => round.duplicateSucceededRuns === 0,
+        noDuplicateSucceededEvents: rounds.every((round) =>
+          round.repeats.every((entry) => entry.duplicateSucceededRuns === 0),
         ),
-        everyWorkerReportedStats: rounds.every(
-          (round) => round.workersReportingStats === round.workers,
+        everyWorkerReportedStats: rounds.every((round) =>
+          round.repeats.every(
+            (entry) => entry.workersReportingStats === entry.workers,
+          ),
         ),
       },
     };
