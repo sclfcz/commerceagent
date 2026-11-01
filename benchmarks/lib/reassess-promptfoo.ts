@@ -203,7 +203,10 @@ function deriveExpectedContext(
   }
 }
 
-export function reassessPromptfoo(runDirectory: string) {
+export function reassessPromptfoo(
+  runDirectory: string,
+  options: { persist?: boolean } = {},
+) {
   const executionFile = path.join(runDirectory, 'execution-sequence.jsonl');
   const execution = fs
     .readFileSync(executionFile, 'utf8')
@@ -802,6 +805,7 @@ export function reassessPromptfoo(runDirectory: string) {
       reassessed.length !== savedOrder.expectedAttempts,
     results: reassessed,
   };
-  privateJson(path.join(runDirectory, 'reassessed.json'), report);
+  if (options.persist !== false)
+    privateJson(path.join(runDirectory, 'reassessed.json'), report);
   return report;
 }

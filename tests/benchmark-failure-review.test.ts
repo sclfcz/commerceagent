@@ -8,10 +8,11 @@ import {
   loadReferenceAnswers,
 } from '../benchmarks/lib/reference-answers.js';
 import {
-  classifyFailure,
   replayFixtureLedger,
   businessFailureDetails,
+  recordedBusinessChecks,
 } from '../benchmarks/lib/failure-review.js';
+import { diagnoseAttribution } from '../benchmarks/lib/failure-attribution.js';
 
 const healthy = {
   caseMatches: true,
@@ -19,7 +20,29 @@ const healthy = {
   fixtureReplayMatches: true,
   measurementValid: true,
   checksMatch: true,
+  sourceComplete: true,
+  independentAssessmentAvailable: true,
+  runIntegrityVerified: true,
+  recordedMeasurementMatches: true,
+  fixtureDiscoverabilityFailure: false,
 };
+
+test('reads the actual Runner business check field and rejects conflicting alternate spellings', () => {
+  expect(
+    recordedBusinessChecks({ business: { facts: false, injection: null } }),
+  ).toEqual({ facts: false, injection: null });
+  expect(recordedBusinessChecks({ businessChecks: { facts: false } })).toEqual({
+    facts: false,
+  });
+  expect(
+    recordedBusinessChecks({
+      business: { facts: false },
+      businessChecks: { facts: true },
+    }),
+  ).toBeNull();
+  expect(recordedBusinessChecks({ business: { facts: 'false' } })).toBeNull();
+  expect(recordedBusinessChecks({})).toBeNull();
+});
 test('failure attribution rejects case drift and fixture corruption before blaming the model', async () => {
   const item = loadBusinessCases('dev').find((row) => row.id === 'pc-02')!;
   const reference = loadReferenceAnswers('dev').find(
@@ -34,14 +57,16 @@ test('failure attribution rejects case drift and fixture corruption before blami
   const replay = await replayFixtureLedger(item, corrupted, original.state);
   expect(replay).toMatchObject({ matches: false, mismatchIndexes: [1] });
   expect(
-    classifyFailure({ ...healthy, fixtureReplayMatches: replay.matches }),
-  ).toBe('fixture_error');
-  expect(classifyFailure({ ...healthy, caseMatches: false })).toBe(
-    'case_or_assertion_error',
-  );
-  expect(classifyFailure({ ...healthy, referencePass: false })).toBe(
-    'case_or_assertion_error',
-  );
+    diagnoseAttribution({ ...healthy, fixtureReplayMatches: replay.matches })
+      .suspectedCategories,
+  ).toContain('data_or_fixture_error');
+  expect(
+    diagnoseAttribution({ ...healthy, caseMatches: false }).suspectedCategories,
+  ).toContain('case_or_assertion_error');
+  expect(
+    diagnoseAttribution({ ...healthy, referencePass: false })
+      .suspectedCategories,
+  ).toContain('case_or_assertion_error');
   const wrong = structuredClone(reference.response);
   wrong.facts.sku = 'BT-B';
   const detail = businessFailureDetails(
@@ -53,17 +78,17 @@ test('failure attribution rejects case drift and fixture corruption before blami
   expect(detail.factDifferences).toContainEqual(
     expect.objectContaining({ field: 'sku', expected: 'BT-A', actual: 'BT-B' }),
   );
-  expect(classifyFailure(healthy)).toBe('model_error');
+  expect(diagnoseAttribution(healthy).category).toBe('unresolved');
 });
 
 test('classifies empty fixture queries under a schema without discoverable enums as fixture errors', () => {
   expect(
-    classifyFailure({
+    diagnoseAttribution({
       ...healthy,
       fixtureDiscoverabilityFailure: true,
-    }),
-  ).toBe('fixture_error');
-  expect(classifyFailure(healthy)).toBe('model_error');
+    }).suspectedCategories,
+  ).toContain('data_or_fixture_error');
+  expect(diagnoseAttribution(healthy).category).toBe('unresolved');
 });
 
 test('ad-05 is clarify when the report exists but its conversion field is missing', async () => {

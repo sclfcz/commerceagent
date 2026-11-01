@@ -1254,6 +1254,16 @@ describe('Promptfoo benchmark adapter', () => {
           },
         },
       ]);
+      const readOnly = reassessPromptfoo(runDirectory, { persist: false });
+      const reassessmentFile = path.join(runDirectory, 'reassessed.json');
+      expect(fs.existsSync(reassessmentFile)).toBe(false);
+      fs.writeFileSync(reassessmentFile, 'historical reassessment');
+      expect(reassessPromptfoo(runDirectory, { persist: false })).toEqual(
+        readOnly,
+      );
+      expect(fs.readFileSync(reassessmentFile, 'utf8')).toBe(
+        'historical reassessment',
+      );
       const report = reassessPromptfoo(runDirectory);
       expect(report).toMatchObject({
         evidenceComplete: true,

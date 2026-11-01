@@ -298,7 +298,33 @@ fixture MCP 的 `search_policy.market/topic` 和 `list_products.category` 在 `t
 
 `CLAUDE.md` 的“Agent 工具权限保持开放；不要虚构只读或受限工具模式”仍适用于产品工作区。用户明确授权的独立 benchmark 是实验例外：仅由宿主机 `COMMERCEAGENT_BENCHMARK_MODE=1` 开启，禁用 SDK 内建工具，并移除包括产品记忆 MCP 在内的非 fixture MCP；普通工作区没有这种产品模式。
 
-失败复核命令为 `npm run bench:review -- RUN_DIRECTORY`。它重新验证固定参考答案，逐条在隔离 fixture 中复放原始调用并比较结果/最终状态，再写入不可覆盖的私有 `failure-review.<hash>.json`。分类为 `model_error`、`case_or_assertion_error`、`fixture_error`；参考答案失败、源码契约漂移、fixture 响应无法复放、测量证据无效，或旧工具 schema 无法让模型发现正确查询值而产生空结果时，都不能归因于模型。该复核不调用真实模型，不修改评分或原始结果。
+失败复核命令为 `npm run bench:review -- RUN_DIRECTORY`。schema v2 明确区分观察到的失败、评测证据风险与人工确认的根因：标准答案通过、fixture 重放一致，并不证明失败一定来自 Agent。机器默认归因为 `unresolved`，同时列出可能的问题层；不会自动输出 `agent_error`。
+
+复核使用原始 trace、fixture 台账、数据库、上下文和新鲜状态证据调用独立 reassess 路径，关闭其持久写入；再验证参考答案、当前/原始契约、工具 schema、原始调用与最终状态。原始 summary/result/trace/账本及已有 `reassessed.json` 不变。summary 若遗漏独立证据里的尝试，也会被纳入复核；缺失、损坏、身份错配或复核期间变化的证据不能用于确认 Agent 原因。
+
+输出包括不可覆盖的私有 `failure-review.<hash>.json`、人工模板 `failure-adjudications.<evidence-hash>.template.json` 和匿名汇总 `failure-review.<hash>.public.md`。私有报告保留所有确定性检查的 passed/failed/not_applicable/not_evaluable 状态、安全检查、具体差异和来源 hash；`firstObservedFailureLayer` 只是固定展示顺序下的首个失败症状，不是因果判断，不短路其他检查。null 检查不记为失败，也不因此自动判通过。该诊断层不改变原有 `businessPass`、质量分母或排名。
+
+人工确认流程：
+
+```bash
+npm run bench:review -- RUN_DIRECTORY
+# 在同一私有 run 目录内复制模板为 completed.json 后填写，保留模板原件。
+npm run bench:review -- RUN_DIRECTORY --adjudications completed.json
+```
+
+每条人工结论必须填写 reviewer、rationale、category，以及证据引用 `{artifact, sha256, pointer}`。artifact 是该 run 内的相对路径，pointer 是指向实际 JSON 字段的 JSON Pointer（JSONL 视为行对象数组）；禁止路径逃逸、符号链接、holdout 路径、跨尝试引用和旧 hash。整份标签绑定 `evidenceRevision`，证据或评测源码变化后旧标签失效。模板中的未填写项保留 null，不可将缺省值当作已复核。
+
+人工看过证据后仍无法归因时，可以填写 `category: unresolved` 并保留复核者、理由与引用；状态为 `human_reviewed_unresolved`。它计入已人工查看数，但不计为确认根因，也不会使归因完成门槛通过。
+
+根因分类为 `measurement_error`、`data_or_fixture_error`、`case_or_assertion_error`、`judge_input_or_prompt_error`、`rubric_error`、`agent_error` 和 `unresolved`。前六类只有人工复核后才能成为确认结论；机器只给风险信号。确认 Agent 原因要求原始/独立测量、契约、断言和重放均可核验，并引用本次尝试的原始输出、工具记录或最终状态；Judge 输入问题须引用绑定该尝试的已保存 Judge 输入对象，Rubric 问题须引用该用例的 rubric。`agent_error` 表示被测系统行为问题，也可能来自 Profile 或工具策略，不能直接等同于某个模型能力差。人工确认仍是可审计的判断，不代表程序证明了全部因果关系。
+
+`causalReviewComplete` 表示没有待归因尝试且 summary 覆盖已核对；兼容字段 `stage4ReviewPassed` 还要求独立测量门槛通过、所有失败均有人工确认的 Agent 原因。它不是整个阶段的自动验收，也不使 Judge 获得排名资格。当前复核入口只处理 dev 中的确定性失败及测量/记录分歧，不自动读取 Judge 评分生成另一套失败分母。历史 schema v1 的 `model_error` 是旧排除法标签，不能追认为人工确认；历史文件和数字保留，需要时另行离线复核。本归因入口无真实模型调用，不读取 holdout 用例或参考答案，也不更新其运行 ledger。
+
+复核中的 `reviewedAttempts` 包含业务失败、测量问题和记录分歧，不能当作业务失败分母；报告分别列出当前业务失败、不可评估、测量无效/未知与记录分歧数。`bench:regrade` 的新 schema v3 同样只记录判定变化（转通过、转失败、仍失败），不把“转通过”自动认定为断言修正，也不把“仍失败”直接标为模型错误。任务评分沿用原来的确定性断言，因果确认仍走独立人工复核。
+
+主诊断使用独立复评的当前契约（`diagnosticsBasis` 明示来源），并另外保存按归档 cases/fixture 重建的 `savedContractDiagnostics` 与差异。两种契约不一致时不混成同一个“业务失败数”，也不自动认定哪套规则正确；原 `result.json` 的 `business` 与 summary 的 `businessChecks` 明确适配，同时存在且矛盾的字段会使证据核验失败。
+
+第一步升级的对抗性自审、故障注入矩阵、验证结果与保留限制见 [归因升级审查](BENCHMARK-ATTRIBUTION-REVIEW.md)。
 
 `benchmarks/cases/dev/` 与 `benchmarks/cases/holdout/` 中按业务域拆分 YAML。客户政策域 28 条（dev 22、holdout 6），
 商品对比和广告复盘各 20 条（dev 14、holdout 6），合计 68 条。三个域均覆盖 normal、boundary、empty、conflict、injection、clarify、refuse、distractor；

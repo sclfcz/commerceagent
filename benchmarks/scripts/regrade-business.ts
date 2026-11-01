@@ -19,6 +19,7 @@ import {
   validatePublicSummary,
 } from '../lib/public-report.js';
 import { hash } from '../lib/contracts.js';
+import { summarizeRegradeTransitions } from '../lib/failure-attribution.js';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const benchmarkDirectory = path.join(repository, 'benchmarks');
@@ -53,6 +54,7 @@ const codeFiles = [
   '../lib/date-range.ts',
   '../lib/contracts.ts',
   '../lib/interruption-evidence.ts',
+  '../lib/failure-attribution.ts',
   './regrade-business.ts',
 ];
 const codeHash = hash(
@@ -171,12 +173,7 @@ const costByCandidate = Object.fromEntries(
     ];
   }),
 );
-const falsePositiveCorrections = rows.filter(
-  (row) => row.oldBusinessPass === false && row.newBusinessPass === true,
-).length;
-const remainingModelFailures = rows.filter(
-  (row) => row.oldBusinessPass === false && row.newBusinessPass === false,
-).length;
+const verdictTransitions = summarizeRegradeTransitions(rows as any);
 const publicSummary = renderPublicSummary({
   runId: `${path.basename(directory)}-offline-regrade`,
   metrics,
@@ -191,7 +188,7 @@ const leakageCheck = validatePublicSummary(publicSummary.markdown, candidates);
 if (!leakageCheck.valid) throw new Error('regraded_public_summary_leak');
 
 const report = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   runId: path.basename(directory),
   scope:
     'offline assertion correction using preserved traces, ledgers and fixture snapshots; no new model calls; not a fresh run',
@@ -207,12 +204,8 @@ const report = {
   regradedBusinessPassedAttempts: regradedAttempts.filter(
     (row) => row.measurementValid && row.qualityEligible && row.businessPass,
   ).length,
-  falsePositiveCorrections,
-  remainingModelFailures,
-  categories: {
-    model_error: remainingModelFailures,
-    case_or_assertion_error: falsePositiveCorrections,
-  },
+  verdictTransitions,
+  attribution: { category: 'unresolved', humanReviewRequired: true },
   measurementValidAttempts: summary.measurementValidAttempts,
   measurementValidityGate: summary.measurementValidityGate,
   identityByCandidate: summary.identityByCandidate,
@@ -244,12 +237,12 @@ if (!fs.existsSync(publicFile))
   });
 console.log(
   JSON.stringify({
-    runId: report.runId,
     originalBusinessPassedAttempts: report.originalBusinessPassedAttempts,
     regradedBusinessPassedAttempts: report.regradedBusinessPassedAttempts,
-    falsePositiveCorrections,
-    remainingModelFailures,
-    costByCandidate,
+    verdictTransitions,
+    allCandidateCostsKnown: Object.values(costByCandidate).every(
+      (cost) => cost.known,
+    ),
     modelCalls: 0,
     diagnosticOnly: true,
     artifact: path.basename(out),

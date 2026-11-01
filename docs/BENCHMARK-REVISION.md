@@ -433,3 +433,12 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 - 输出仅为 `benchmarks/results/langfuse-drafts/` 下 0700/0600 的空白结构草稿；Prompt、业务分类、风险等级、split、期望状态/事实/证据、工具计划和 rubric 均留空。脚本不读取或写入 cases/dev、cases/holdout，不触碰 holdout ledger，不提供自动提升或提交功能。草稿必须由人补全、通过 reference/oracle 自检和变异测试并确认后，才能手动进入回归用例。
 - 本机 Langfuse Compose 的 Web 端口改映射到 `127.0.0.1:3100`，CommerceAgent 保持默认 3000；主系统设置地址同步到 3100，正文上报关闭。所有 Compose 宿主端口保持 loopback 绑定，历史联调 trace 仍为 0。
 - 验证：Langfuse 草稿与 OTel 生命周期专项测试 16 项通过；benchmark typecheck、`make typecheck`、`make build`、`docs:check`、格式检查通过。全量测试沿用 4 workers 和临时权限镜像，358 个测试文件、3197 项通过。先以真实本机 Langfuse 空项目验证 CLI 为 0 observations/0 drafts；随后创建 1 条无正文合成失败 trace 和 1 条数值低分，CLI 产出 1 份骨架草稿，run/turn、终态、低分计数均匹配，traceId 和正文均未落盘。检查到兼容 API 在 `statusMessage`/`comment` 上可返回 null 占位；脚本允许 null/空值并仍拒绝非空内容。合成 trace、score 与输出目录已删除，查询确认剩余合成 observations/scores 均为 0。没有读取真实会话、写入 cases、读取 holdout 或调用外部模型。阶段 4 及之后未开始。
+
+### 评测升级第一步：证据化分层归因（2026-11-01）
+
+- 从第一性原则区分“观察到了什么”和“为什么发生”：固定参考答案与 fixture 重放只能验证已有契约，不能以排除法自动判定 Agent 错误。新 schema v2 默认 `unresolved`，机器保留多项评测风险信号，确认根因必须人工复核。
+- 测量判断复用原始证据的独立 reassess 路径（只读模式），不采信 summary 的运行时标签。缺失、损坏、summary 遗漏、跨尝试、断言/契约漂移或复核期间证据变化均拒绝自动确认；所有检查及安全结果保留，首个失败层仅作症状展示。
+- 新增带 evidenceRevision、内容 hash、JSON Pointer、复核者和理由的人工 sidecar；不覆盖历史结果，公开汇总只输出固定分类与计数并复用身份泄漏检查。Judge 与 Rubric 归因需要对应的已保存证据；归因入口拒绝 holdout，不改变断言、预期答案、重试次数、质量分母或排名。人工可记录已复核但仍未确定，不强迫确认根因。
+- 离线重判 schema v3 同样移除了自动的模型错误/断言修正归因，只记录判定转移。原始 result 的 `business` 字段、当前/归档契约和不可评估检查分别处理，任务变化与检查项变化不混算。
+- 验证：独立工作树锁定依赖安装，格式、文档、全项目及 benchmark 类型检查、构建、diff 检查通过；4 workers 加临时权限 helper 镜像的最终全量测试为 360 个文件、3,243 项通过。中间一轮 3 项原有 Docker 测试超过 5 秒，保留日志，在无并发复评时以相同阈值重跑通过。既有 50 条 dev 离线复评仍为当前契约 43/50 通过，3 条任务判定变化、47 条检查项差异、7 条当前业务失败；没有自动确认 Agent 根因。1,250 个原始文件 hash 保持不变，真实模型调用为 0。
+- 对抗性自审的攻击矩阵、修复证据和保留限制见 [归因升级审查](BENCHMARK-ATTRIBUTION-REVIEW.md)。逐轮证据和 Judge 独立校准仍属后续步骤，没有开始正式模型排名或留出集模型运行。
