@@ -1,0 +1,29 @@
+# Isolated MySQL instance for the distributed run-claiming subsystem.
+# Not wired into the main application: it exists only for `dist:*` scripts
+# and the integration tests under tests/distributed/.
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: commerceagent-dist-mysql
+    command:
+      - --max_connections=200
+      - --innodb_lock_wait_timeout=10
+    environment:
+      MYSQL_ROOT_PASSWORD: dist-root
+      MYSQL_DATABASE: dist
+      MYSQL_USER: dist
+      MYSQL_PASSWORD: dist
+      TZ: UTC
+    ports:
+      - '3307:3306'
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-udist', '-pdist']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    volumes:
+      - dist-mysql-data:/var/lib/mysql
+
+volumes:
+  dist-mysql-data:

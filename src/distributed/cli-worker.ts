@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+/**
+ * Standalone worker process.
+ *
+ * Applies pending migrations, then runs a Worker (claims and executes) and a
+ * Reaper (recovers expired leases) until SIGTERM/SIGINT.
+ */
+import { loadDistributedConfig } from './config.js';
+import { createPool } from './mysql.js';
+import { runMigrations } from './migrate.js';
+import { RunRepository } from './run-repository.js';
+import { SleepExecutor } from './executors.js';
+import { Worker } from './worker.js';
+import { Reaper } from './reaper.js';
+
+const log = (event: Record<string, unknown>) => {
+  process.stdout.write(
+    JSON.stringify({ ts: new Date().toISOString(), ...event }) + '\n',
+  );
+};
+
+async function main(): Promise<void> {
+  const config = loadDistributedConfig();
+  const pool = createPool(config.mysqlUrl, {
+    connectionLimit: Math.min(64, Math.max(6, config.concurrency * 2 + 2)),
+  });
+  let worker: Worker | null = null;
+  let reaper: Reaper | null = null;
+  let shuttingDown = false;
+
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log({ event: 'shutdown_started', signal, workerId: config.workerId });
+    try {
+      await reaper?.stop();
+      await worker?.stop();
+      await pool.end();
+      log({ event: 'shutdown_complete', workerId: config.workerId });
+      process.exit(0);
+    } catch (error) {
+      log({
+        event: 'shutdown_failed',
+        workerId: config.workerId,
+        error: error instanceof Error ? error.message.slice(0, 300) : 'unknown',
+      });
+      process.exit(1);
+    }
+  };
+
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
+
+  const migrations = await runMigrations(pool);
+  const repository = new RunRepository(pool, {
+    leaseMs: config.leaseMs,
+    backoffBaseMs: config.backoffBaseMs,
+    backoffMaxMs: config.backoffMaxMs,
+  });
+  reaper = new Reaper(repository, {
+    intervalMs: config.reaperIntervalMs,
+    logger: log,
+  });
+  worker = new Worker({
+    repository,
+    executor: new SleepExecutor(),
+    config,
+    logger: log,
+  });
+  reaper.start();
+  worker.start();
+  log({
+    event: 'worker_started',
+    workerId: config.workerId,
+    concurrency: config.concurrency,
+    leaseMs: config.leaseMs,
+    heartbeatMs: config.heartbeatMs,
+    migrationsApplied: migrations.applied,
+  });
+}
+
+main().catch((error) => {
+  log({
+    event: 'worker_failed',
+    error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+  });
+  process.exit(1);
+});
