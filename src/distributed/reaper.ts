@@ -1,10 +1,13 @@
 import type { RunRepository } from './run-repository.js';
+import { sweepUnknownSteps } from './durable.js';
 
 export interface ReaperOptions {
   /** How often to look for expired leases. */
   intervalMs: number;
   /** Maximum rows returned by one reap transaction. */
   batchSize?: number;
+  /** Low-frequency monitoring scan for stale `unknown` effect steps. */
+  unknownSweepMs?: number;
   logger?: (event: Record<string, unknown>) => void;
 }
 
@@ -17,6 +20,7 @@ export class Reaper {
   private timer: ReturnType<typeof setInterval> | null = null;
   private inFlight: Promise<void> = Promise.resolve();
   private closed = false;
+  private lastUnknownSweepAt = 0;
 
   constructor(
     private readonly repository: RunRepository,
@@ -44,6 +48,16 @@ export class Reaper {
             count: reaped.length,
             statuses: reaped.map((item) => item.nextStatus),
           });
+        const sweepMs = this.options.unknownSweepMs ?? 60_000;
+        if (Date.now() - this.lastUnknownSweepAt >= sweepMs) {
+          this.lastUnknownSweepAt = Date.now();
+          // Monitoring only: this never changes step or run state.
+          const sweep = await sweepUnknownSteps(this.repository.pool);
+          this.options.logger?.({
+            event: 'unknown_steps_sweep',
+            count: sweep.staleUnknownSteps,
+          });
+        }
       } catch (error) {
         this.options.logger?.({
           event: 'reap_failed',

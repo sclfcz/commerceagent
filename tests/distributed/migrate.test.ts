@@ -35,17 +35,17 @@ describeMysql('migrations', () => {
     await pool.query('DROP TABLE IF EXISTS dist_task_runs');
     await pool.query('DROP TABLE IF EXISTS dist_schema_migrations');
     const first = await runMigrations(pool);
-    expect(first.applied).toEqual([1, 2, 3]);
+    expect(first.applied).toEqual([1, 2, 3, 4]);
     const second = await runMigrations(pool);
     expect(second.applied).toEqual([]);
-    expect(second.known).toEqual([1, 2, 3]);
+    expect(second.known).toEqual([1, 2, 3, 4]);
 
     const rows = (
       await pool.query(
         'SELECT version FROM dist_schema_migrations ORDER BY version',
       )
     )[0] as Array<{ version: number }>;
-    expect(rows.map((row) => Number(row.version))).toEqual([1, 2, 3]);
+    expect(rows.map((row) => Number(row.version))).toEqual([1, 2, 3, 4]);
   });
 
   test('refuses to run when the database is newer than the code', async () => {

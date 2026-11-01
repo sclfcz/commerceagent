@@ -59,6 +59,43 @@ await callModel();
 that should fail fast (e.g. a batch fan-out). The bucket uses the same
 `DIST_ADMISSION_FAIL_MODE` switch as the slots.
 
+## Effect protocol
+
+Steps and external side effects are recorded in `dist_run_steps` and replayed
+from that ledger:
+
+```
+compute step:                     effect step:
+  read (run_id, step_key)            INSERT intent (fenced, request_hash)
+    ├─ committed -> return output      ├─ already committed -> return provider_ref
+    └─ else -> run fn, fenced          ├─ request_hash differs -> EffectRequestMismatchError
+               write committed         └─ intent/unknown (previous attempt):
+                                          ├─ supportsLookup + lookup() found  -> committed (reconciled)
+                                          ├─ supportsLookup + not found       -> send
+                                          └─ no lookup                        -> run = needs_review
+                                       send (fenced pre-check, DIST_EFFECT_TIMEOUT_MS)
+                                          ├─ ok        -> committed + provider_ref
+                                          ├─ timeout / network / 5xx -> unknown + RetryableError
+                                          └─ 4xx       -> failed (run goes dead)
+```
+
+`step()` and every ledger write run in a transaction that first does
+`SELECT 1 FROM dist_task_runs WHERE id=? AND status='running' AND lease_owner=?
+AND lease_token=? FOR UPDATE`; a miss raises `LeaseLostError` and nothing is
+written. A run parked in `needs_review` is not claimable and needs a human.
+
+**Fencing limitation:** the fence stops a zombie worker from _writing the
+database_, but it cannot stop it from sending an outbound request between the
+fence check and the send. If the provider honours the idempotency key, the
+duplicate is removed downstream. If it neither honours the key nor supports
+lookup, the only guarantee is "at most once, then human review"
+(`needs_review`). This is why every effect row carries
+`idempotency_key = ${runId}:${stepKey}` — it is the only handle the outside
+world may deduplicate on.
+
+`Reaper` additionally scans for `unknown` steps older than 5 minutes whose run
+is already terminal (`DIST_UNKNOWN_SWEEP_MS`, monitoring only).
+
 ## Failure modes
 
 `DIST_ADMISSION_FAIL_MODE=open` (default): a Redis error admits the work and

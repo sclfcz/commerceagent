@@ -6,6 +6,12 @@ import {
 } from './executors.js';
 import type { ClaimedRun, RunRepository } from './run-repository.js';
 import type { TenantSlots } from './tenant-slots.js';
+import {
+  DurableContext,
+  NeedsReviewError,
+  emptyDurableStats,
+  type DurableStats,
+} from './durable.js';
 
 export class LeaseLostError extends Error {
   constructor(message = 'lease lost') {
@@ -55,8 +61,10 @@ export class Worker {
   private readonly logger: WorkerLogger;
   private readonly tenantSlots: TenantSlots | undefined;
   private readonly runs = new Map<string, RunState>();
+  private readonly durableTotals: DurableStats = emptyDurableStats();
   private readonly counters = {
     claimed: 0,
+    needsReview: 0,
     admissionRejects: 0,
     // Runs whose claim had to be handed back because admission said "no":
     // each one is an extra claim that produced no execution.
@@ -85,7 +93,10 @@ export class Worker {
   }
 
   stats() {
-    return { ...this.counters };
+    return {
+      ...this.counters,
+      durable: { ...this.durableTotals },
+    };
   }
 
   /**
@@ -273,21 +284,38 @@ export class Worker {
       lastHeartbeatAt: Date.now(),
       leaseLost: false,
     };
+    const durableStats = emptyDurableStats();
+    const durable = new DurableContext({
+      pool: this.repository.pool,
+      hooks: this.repository,
+      identity: {
+        runId: claim.runId,
+        workerId: this.config.workerId,
+        leaseToken: claim.leaseToken,
+      },
+      signal: controller.signal,
+      effectTimeoutMs: this.config.effectTimeoutMs,
+      stats: durableStats,
+      logger: this.logger,
+    });
     const done = (async () => {
       state.heartbeatTimer = setInterval(() => {
         void this.heartbeat(claim, state);
       }, this.config.heartbeatMs);
       try {
-        const result = await this.executor.execute({
-          runId: claim.runId,
-          tenantId: claim.tenantId,
-          taskId: claim.taskId,
-          attempt: claim.attempt,
-          maxAttempts: claim.maxAttempts,
-          payload: claim.payload,
-          workerId: this.config.workerId,
-          signal: controller.signal,
-        });
+        const result = await this.executor.execute(
+          {
+            runId: claim.runId,
+            tenantId: claim.tenantId,
+            taskId: claim.taskId,
+            attempt: claim.attempt,
+            maxAttempts: claim.maxAttempts,
+            payload: claim.payload,
+            workerId: this.config.workerId,
+            signal: controller.signal,
+          },
+          durable,
+        );
         if (state.leaseLost || controller.signal.aborted) return;
         const applied = await this.repository.complete({
           runId: claim.runId,
@@ -302,6 +330,18 @@ export class Worker {
             runId: claim.runId,
           });
       } catch (error) {
+        // The effect ledger already moved the run to needs_review (fenced);
+        // the worker must not overwrite that with complete/fail.
+        if (error instanceof NeedsReviewError) {
+          this.counters.needsReview += 1;
+          this.logger({
+            event: 'run_needs_review',
+            workerId: this.config.workerId,
+            runId: claim.runId,
+            stepKey: error.stepKey,
+          });
+          return;
+        }
         // A lost lease or a cancellation means the outcome belongs to someone
         // else (or to nobody); never report a result in that case.
         if (state.leaseLost || controller.signal.aborted) return;
@@ -338,6 +378,10 @@ export class Worker {
           });
         }
       } finally {
+        for (const key of Object.keys(durableStats) as Array<
+          keyof DurableStats
+        >)
+          this.durableTotals[key] += durableStats[key];
         if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
         // A worker that lost its lease must NOT free the slot: the new owner may
         // already hold it under the same runId. Expiry cleans it up instead.

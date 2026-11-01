@@ -130,6 +130,8 @@ export function testConfig(
     relayPollMs: 200,
     relayCrashAfterConfirmRate: 0,
     relayDuplicateRate: 0,
+    effectTimeoutMs: 5_000,
+    unknownSweepMs: 60_000,
     ...overrides,
     ...(overrides.claimBatch === undefined
       ? { claimBatch: overrides.concurrency ?? 1 }

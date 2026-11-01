@@ -10,7 +10,7 @@ import { createPool } from './mysql.js';
 import { runMigrations } from './migrate.js';
 import { RunRepository } from './run-repository.js';
 import { RuntimeStats } from './runtime-stats.js';
-import { SleepExecutor } from './executors.js';
+import { EffectDemoExecutor, SleepExecutor } from './executors.js';
 import { Worker } from './worker.js';
 import { Reaper } from './reaper.js';
 import { MqConsumer } from './mq-consumer.js';
@@ -98,9 +98,14 @@ async function main(): Promise<void> {
     intervalMs: config.reaperIntervalMs,
     logger: log,
   });
+  // `DIST_EXECUTOR=effect` runs the benchmark executor (dist:chaos:effects).
+  const executor =
+    (process.env.DIST_EXECUTOR ?? 'sleep').trim() === 'effect'
+      ? new EffectDemoExecutor()
+      : new SleepExecutor();
   worker = new Worker({
     repository,
-    executor: new SleepExecutor(),
+    executor,
     config,
     logger: log,
     ...(tenantSlots ? { tenantSlots } : {}),

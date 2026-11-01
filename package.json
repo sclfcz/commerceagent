@@ -26,6 +26,8 @@
     "dist:chaos:mq": "node scripts/dist-chaos-mq.mjs",
     "dist:bench:dispatch": "node scripts/dist-bench-dispatch.mjs",
     "dist:chaos:tenant": "node scripts/dist-chaos-tenant.mjs",
+    "dist:chaos:effects": "node scripts/dist-chaos-effects.mjs",
+    "dist:mock:effect": "node scripts/mock-effect-provider.mjs",
     "dist:bench:fairness": "node scripts/dist-bench-fairness.mjs",
     "dist:dlq": "node scripts/dist-dlq.mjs",
     "bench:spike": "tsx benchmarks/scripts/spike.ts",

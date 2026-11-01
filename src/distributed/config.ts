@@ -57,6 +57,10 @@ export interface DistributedConfig {
   tenantConcurrency: number;
   /** Behaviour when Redis admission calls fail. */
   admissionFailMode: 'open' | 'closed';
+  /** Per-effect send timeout; on expiry the step becomes unknown. */
+  effectTimeoutMs: number;
+  /** Monitoring scan for stale `unknown` steps. */
+  unknownSweepMs: number;
 }
 
 function readInt(
@@ -200,6 +204,14 @@ export function loadDistributedConfig(
       max: 10_000,
     }),
     admissionFailMode: readFailMode(env),
+    effectTimeoutMs: readInt(env, 'DIST_EFFECT_TIMEOUT_MS', 5_000, {
+      min: 100,
+      max: 600_000,
+    }),
+    unknownSweepMs: readInt(env, 'DIST_UNKNOWN_SWEEP_MS', 60_000, {
+      min: 1_000,
+      max: 3_600_000,
+    }),
   };
   if (config.backoffBaseMs > config.backoffMaxMs)
     throw new DistributedConfigError(

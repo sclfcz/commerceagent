@@ -29,7 +29,12 @@ export type RunEventName =
   | 'reaped'
   | 'released'
   | 'stale_write_rejected'
-  | 'cancelled';
+  | 'cancelled'
+  | 'needs_review'
+  | 'step_skipped'
+  | 'step_executed'
+  | 'effect_sent'
+  | 'effect_reconciled';
 
 export interface TaskRun {
   id: string;
@@ -150,7 +155,7 @@ export class RunRepository {
   private readonly random: () => number;
 
   constructor(
-    private readonly pool: Pool,
+    readonly pool: Pool,
     private readonly options: RunRepositoryOptions,
   ) {
     if (!Number.isSafeInteger(options.leaseMs) || options.leaseMs < 1)
@@ -469,6 +474,70 @@ export class RunRepository {
       });
     }
     return claimed;
+  }
+
+  /** Best-effort metrics/lifecycle event; never participates in a state change. */
+  async recordEvent(input: {
+    runId: string;
+    leaseToken: number;
+    workerId: string | null;
+    event: string;
+    detail?: Record<string, unknown> | null;
+  }): Promise<void> {
+    await this.insertEvent(this.pool, {
+      runId: input.runId,
+      leaseToken: input.leaseToken,
+      workerId: input.workerId,
+      event: input.event as RunEventName,
+      detail: input.detail ?? null,
+    });
+  }
+
+  /**
+   * Park a run for human review (unknown external effect without lookup).
+   * Fenced: only the current lease owner can do it.
+   */
+  async markNeedsReview(input: {
+    runId: string;
+    workerId: string;
+    leaseToken: number;
+    stepKey: string;
+  }): Promise<boolean> {
+    return withTransaction(this.pool, async (connection) => {
+      const rows = await queryRows(
+        connection,
+        `SELECT 1 AS ok FROM dist_task_runs
+          WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?
+          FOR UPDATE`,
+        [input.runId, input.workerId, input.leaseToken],
+      );
+      if (!rows.length) return false;
+      await execute(
+        connection,
+        `UPDATE dist_task_runs
+            SET status = 'needs_review',
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                finished_at = NOW(3),
+                updated_at = NOW(3),
+                error = ?
+          WHERE id = ? AND status = 'running' AND lease_owner = ? AND lease_token = ?`,
+        [
+          `needs_review:${input.stepKey}`,
+          input.runId,
+          input.workerId,
+          input.leaseToken,
+        ],
+      );
+      await this.insertEvent(connection, {
+        runId: input.runId,
+        leaseToken: input.leaseToken,
+        workerId: input.workerId,
+        event: 'needs_review',
+        detail: { stepKey: input.stepKey },
+      });
+      return true;
+    });
   }
 
   /**
@@ -1000,7 +1069,7 @@ export class RunRepository {
     await execute(
       this.pool,
       `UPDATE dist_task_runs
-          SET lease_expires_at = NOW(3) - INTERVAL 1 MILLISECOND, updated_at = NOW(3)
+          SET lease_expires_at = NOW(3) - INTERVAL 1 SECOND, updated_at = NOW(3)
         WHERE id = ? AND status = 'running'`,
       [runId],
     );
