@@ -8,6 +8,7 @@ export function assessAttempt(input: {
   contextVerified: boolean;
   freshState: boolean;
   auditMatched: boolean;
+  turnEvidenceMatched?: boolean;
   mcpRuntimeReady?: boolean;
   toolUnavailable?: boolean;
   fixtureBypass?: boolean;
@@ -29,9 +30,11 @@ export function assessAttempt(input: {
               ? 'context_mismatch'
               : !input.auditMatched
                 ? 'audit_mismatch'
-                : !input.sdkModelMatches
-                  ? 'model_identity'
-                  : null);
+                : input.turnEvidenceMatched === false
+                  ? 'turn_evidence_mismatch'
+                  : !input.sdkModelMatches
+                    ? 'model_identity'
+                    : null);
   const businessFailure: Failure | null = !input.onlyAllowedTools
     ? 'tool_policy_violation'
     : !input.businessPass

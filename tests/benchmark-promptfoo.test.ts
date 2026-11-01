@@ -994,9 +994,12 @@ describe('Promptfoo benchmark adapter', () => {
       output,
       failure: null,
       reason: 'completed',
+      runId: 'run-1',
       turnId: 'turn-1',
+      messageTurnId: 'message-turn-1',
       tools: [
         {
+          id: 'tool-use-1',
           name: 'mcp__commerce_fixture__list_products',
           resultObserved: true,
           failed: false,
@@ -1241,6 +1244,7 @@ describe('Promptfoo benchmark adapter', () => {
               gates: {
                 modelIdentity: true,
                 independentFixture: true,
+                perTurnFixtureEvidence: true,
                 fixtureStateReconciled: true,
                 freshState: true,
                 terminalClassified: true,

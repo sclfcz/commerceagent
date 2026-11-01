@@ -31,6 +31,7 @@ import {
 import {
   hash,
   privateJson,
+  renderCasePrompts,
   type Failure,
   type SpikeCase,
   type ToolCall,
@@ -42,6 +43,11 @@ import {
 } from './context.js';
 import { loadProfileVariant } from './profile-variants.js';
 import { verifyInterruptionEvidence } from './interruption-evidence.js';
+import { verifyTraceTurnEvidence } from './turn-evidence.js';
+import {
+  buildCapabilityCoverageAttempt,
+  summarizeCapabilityCoverage,
+} from './capability-coverage.js';
 import {
   validateAssessmentParity,
   validateExecutionOrder,
@@ -60,6 +66,7 @@ function assessFromEvidence(input: {
   contextVerified: boolean;
   freshState: boolean;
   auditMatched: boolean;
+  turnEvidenceMatched?: boolean;
   mcpRuntimeReady?: boolean;
   toolUnavailable?: boolean;
   fixtureBypass?: boolean;
@@ -81,9 +88,11 @@ function assessFromEvidence(input: {
               ? 'context_mismatch'
               : !input.auditMatched
                 ? 'audit_mismatch'
-                : !input.sdkModelMatches
-                  ? 'model_identity'
-                  : null);
+                : input.turnEvidenceMatched === false
+                  ? 'turn_evidence_mismatch'
+                  : !input.sdkModelMatches
+                    ? 'model_identity'
+                    : null);
   const businessFailure: Failure | null = !input.onlyAllowedTools
     ? 'tool_policy_violation'
     : !input.businessPass
@@ -602,6 +611,21 @@ export function reassessPromptfoo(
         )
       : assertSpike(trace.output, test as SpikeCase, ledger, trace.tools);
     const audit = auditFixtureCalls(ledger, trace.tools);
+    const expectedTurnCount =
+      'fixture_variant' in test
+        ? renderCasePrompts(test as BusinessCase).length
+        : 1;
+    // Old single-turn traces have an unambiguous whole-attempt boundary; old
+    // multi-turn traces do not, so they remain ineligible for turn-level proof.
+    const turnEvidenceCheck = verifyTraceTurnEvidence({
+      trace,
+      ledger,
+      expectedTurnCount,
+    });
+    const perTurnFixtureEvidence = turnEvidenceCheck.evidence;
+    const turnEvidenceLegacySingleTurn =
+      turnEvidenceCheck.mode === 'legacy_single_turn_interval';
+    const turnEvidenceMatched = turnEvidenceCheck.matched;
     const mcpEvidence = readMcpRuntimeEvidence(mcpLogDirectory);
     const mcpRuntime = fixtureVariant
       ? assessMcpRuntime(mcpEvidence, test as BusinessCase)
@@ -627,6 +651,7 @@ export function reassessPromptfoo(
       contextVerified: context.verified,
       freshState,
       auditMatched: audit.matched && fixtureStateReconciled,
+      turnEvidenceMatched,
       mcpRuntimeReady: mcpRuntime.ready,
       toolUnavailable: audit.toolUnavailableCalls.length > 0,
       fixtureBypass: audit.bypassedFixtureCalls.length > 0,
@@ -645,6 +670,28 @@ export function reassessPromptfoo(
       ...assessment,
       businessPass: business.pass,
       businessChecks: business.checks,
+      perTurnFixtureEvidence,
+      turnEvidenceLegacySingleTurn,
+      turnEvidenceMatched,
+      capabilityCoverage: buildCapabilityCoverageAttempt({
+        category: 'fixture_variant' in test ? test.category : 'spike',
+        selectedSkillIds: contextEvidence.actual?.skills.selectedSkillIds ?? [],
+        selectedMcpServers: contextEvidence.actual?.mcp.serverIds ?? [],
+        availableFixtureTools: mcpEvidence?.fixtureTools ?? [],
+        fixtureRuntimeStatus:
+          mcpEvidence?.mcpServers.find(
+            (server) => server.name === 'commerce_fixture',
+          )?.status ?? 'missing',
+        requiredTools:
+          'fixture_variant' in test
+            ? test.tools.required
+            : ((test as SpikeCase)
+                .requiredTools as unknown as BusinessCase['tools']['required']),
+        calls: ledger,
+        turns: perTurnFixtureEvidence.turns,
+        turnEvidenceComplete: turnEvidenceMatched,
+        routingOracleDeclared: false,
+      }),
       fixtureStateReconciled,
       caseDefinitionVerified: casesMatchSource,
       fixtureDefinitionVerified,
@@ -657,6 +704,7 @@ export function reassessPromptfoo(
       gates: {
         modelIdentity: folderRows.identityVerified && !gateway,
         independentFixture: audit.matched && fixtureStateReconciled,
+        perTurnFixtureEvidence: turnEvidenceMatched,
         mcpRuntimeReady: mcpRuntime.ready,
         toolUnavailable: audit.toolUnavailableCalls.length > 0,
         fixtureBypass: audit.bypassedFixtureCalls.length > 0,
@@ -685,12 +733,19 @@ export function reassessPromptfoo(
       .map(([, result]) => result),
   );
   const successfulFixtureCalls = countSuccessfulFixtureCalls(reassessed as any);
+  const capabilityCoverage = summarizeCapabilityCoverage(reassessed as any);
   const revisionHash = hash([
     fs.readFileSync(new URL('../assertions/spike.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('../assertions/audit.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('./assessment.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('./attempt.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(
+      new URL('./capability-coverage.ts', import.meta.url),
+      'utf8',
+    ),
     fs.readFileSync(new URL('./fresh-state.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('./usage.ts', import.meta.url), 'utf8'),
+    fs.readFileSync(new URL('./turn-evidence.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('./context.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('./metrics.ts', import.meta.url), 'utf8'),
     fs.readFileSync(new URL('./public-report.ts', import.meta.url), 'utf8'),
@@ -773,6 +828,13 @@ export function reassessPromptfoo(
     providerParityMismatchIndex: independentParity.mismatchIndex,
     providerParityMismatchFields: independentParity.mismatchFields ?? [],
     successfulFixtureCalls,
+    turnEvidenceCompleteAttempts: reassessed.filter(
+      (row) => row.turnEvidenceMatched,
+    ).length,
+    turnEvidenceIncompleteAttempts: reassessed.filter(
+      (row) => row.turnEvidenceMatched === false,
+    ).length,
+    capabilityCoverage,
     attempts: reassessed.length,
     measurementValidAttempts: reassessed.filter((row) => row.measurementValid)
       .length,

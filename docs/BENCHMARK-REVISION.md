@@ -442,3 +442,11 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 - 离线重判 schema v3 同样移除了自动的模型错误/断言修正归因，只记录判定转移。原始 result 的 `business` 字段、当前/归档契约和不可评估检查分别处理，任务变化与检查项变化不混算。
 - 验证：独立工作树锁定依赖安装，格式、文档、全项目及 benchmark 类型检查、构建、diff 检查通过；4 workers 加临时权限 helper 镜像的最终全量测试为 360 个文件、3,243 项通过。中间一轮 3 项原有 Docker 测试超过 5 秒，保留日志，在无并发复评时以相同阈值重跑通过。既有 50 条 dev 离线复评仍为当前契约 43/50 通过，3 条任务判定变化、47 条检查项差异、7 条当前业务失败；没有自动确认 Agent 根因。1,250 个原始文件 hash 保持不变，真实模型调用为 0。
 - 对抗性自审的攻击矩阵、修复证据和保留限制见 [归因升级审查](BENCHMARK-ATTRIBUTION-REVIEW.md)。逐轮证据和 Judge 独立校准仍属后续步骤，没有开始正式模型排名或留出集模型运行。
+
+### 逐轮证据与能力覆盖（2026-11-01）
+
+- 以每轮用户消息前后的 append-only fixture ledger sequence 区间建立 fixture 调用的轮次归属，并独立核对 fixture StreamEvent 的 toolUseId、工具名、调用数量、结果状态、runId 和 turnId；重复工具名不会被错误地逐条猜配。新增测量失败分类 `turn_evidence_mismatch`。旧单轮轨迹可用整次账本作为明确边界；旧多轮轨迹没有已保存轮次区间时拒绝纳入逐轮证据和 Judge 抽样。
+- 重评结果新增私有能力覆盖摘要，报告 Profile 选择的 Skill/MCP 拓扑、fixture MCP 状态、模型可见工具、必需工具组可用性和参数匹配的实际调用数，并区分各轮调用。当前用例没有 Skill/MCP 路由 oracle，因此明确标注未评分；摘要不进入公开报告。
+- Judge 读取 dev 用例且拒绝 holdout case；对多轮样本以最终用户问题/最终回答作为评分对象，同时提供此前固定轮次上下文及逐轮标记的真实工具返回。本轮证据优先于旧轮次状态。私有报告记录因 case 契约或逐轮证据不足而排除的数量。
+- 对抗性自审发现并修复了几项会导致误判的边界：损坏的新格式单轮轨迹曾可能降级走兼容旧格式路径；损坏的超大 ledger 区间可能导致长循环；非 fixture 子 Agent 的工具结果事件可能误伤 fixture 测量门槛；fixture 事件还需要同时绑定本轮 runId 与 turnId。现在损坏/缺失的轮次对象与边界都会拒绝，序号范围受 ledger 长度限制，fixture 事件按 runId/turnId 交叉核对，非 fixture 事件留给工具策略断言。并发同名 MCP 调用不能映射到具体 ledger 行，因此仍只核对轮次区间、名称/次数/状态；可见能力拓扑不等于工具被调用，也不等于有路由 oracle。未执行真实模型或 Judge 请求，未读取、修改或运行 holdout。
+- 验证：`npm run format:changed`、`npm run docs:check`、`make typecheck`、`npm run bench:typecheck`、`make build`、`git diff --check` 通过；逐轮证据、能力覆盖、assessment、Judge 与独立复评相关 5 个测试文件 52 项通过；全量 `make test` 为 363 个文件、3,257 项通过。`bench:selftest` 用当前 checkout 构建的临时 Runner 镜像通过：fixture MCP 已连接、2 次工具调用完成账本复核、独立重评与公开泄漏检查通过；代码围栏判为测量有效但格式失败、上游 503 判为测量失败、注入断言通过且无写操作。第一次自检误用了旧镜像并因身份 helper 缺失失败，已保留诊断后改用当前源码镜像重跑通过；临时镜像标签和失败 artifacts 已清理并恢复原本默认镜像标签。没有真实模型/Judge 调用，也没有读取、修改或运行 holdout。

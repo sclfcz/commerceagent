@@ -5,6 +5,7 @@ import path from 'node:path';
 
 export type Failure =
   | 'audit_mismatch'
+  | 'turn_evidence_mismatch'
   | 'tool_unavailable'
   | 'fixture_bypass'
   | 'state_not_fresh'

@@ -3,6 +3,7 @@ import { assertSpike } from '../assertions/spike.js';
 import {
   assertBusinessCase,
   fixtureStateMatchesLedger,
+  type ToolRequirement,
   parseFixtureVariant,
   type BusinessCase,
 } from './cases.js';
@@ -23,7 +24,15 @@ import {
   type SpikeCase,
 } from './contracts.js';
 import { startFixtureServer } from '../mcp-fixture-server/server.js';
-import { observeTurn } from '../providers/commerceagent-provider.js';
+import {
+  observeTurn,
+  type TurnObservation,
+} from '../providers/commerceagent-provider.js';
+import {
+  buildFixtureTurnEvidence,
+  verifyTraceTurnEvidence,
+} from './turn-evidence.js';
+import { buildCapabilityCoverageAttempt } from './capability-coverage.js';
 import { readUsage } from './usage.js';
 import {
   profilePromptHashes,
@@ -241,9 +250,14 @@ export async function attempt(
       runtime_session_id: runtime.sessionId,
     });
     const turnPrompts = renderCasePrompts(test);
-    const turnObservations = [];
+    const turnObservations: Array<{
+      observation: TurnObservation;
+      fixtureSequenceStart: number;
+      fixtureSequenceEnd: number;
+    }> = [];
     stage = 'turn_observation';
     for (const prompt of turnPrompts) {
+      const fixtureSequenceStart = (fixture.ledger.at(-1)?.sequence ?? 0) + 1;
       const turn = await observeTurn({
         baseUrl: service.baseUrl,
         cookie: api.cookie,
@@ -253,37 +267,76 @@ export async function attempt(
         timeoutMs,
       });
       turnObserved = true;
-      turnObservations.push(turn);
+      turnObservations.push({
+        observation: turn,
+        fixtureSequenceStart,
+        fixtureSequenceEnd:
+          fixture.ledger.at(-1)?.sequence ?? fixtureSequenceStart - 1,
+      });
       if (turn.failure) break;
     }
-    const finalTurn = turnObservations.at(-1)!;
-    const observation = {
-      ...finalTurn,
-      output: finalTurn.output,
-      tools: turnObservations.flatMap((turn) => turn.tools),
-      apiRequests: turnObservations.flatMap((turn) => turn.apiRequests),
-      trace: turnObservations.flatMap((turn, index) =>
-        turn.trace.map((event) => ({ ...event, turnIndex: index + 1 })),
-      ),
-      elapsedMs: turnObservations.reduce(
-        (total, turn) => total + turn.elapsedMs,
-        0,
-      ),
-      logicalRunMs: turnObservations.every((turn) => turn.logicalRunMs !== null)
-        ? turnObservations.reduce(
-            (total, turn) => total + turn.logicalRunMs!,
-            0,
-          )
-        : null,
-      failure: turnObservations.find((turn) => turn.failure)?.failure ?? null,
-      turns: turnObservations.map((turn) => ({
-        output: turn.output,
+    const finalTurn = turnObservations.at(-1)!.observation;
+    const capturedTurns = turnObservations.map(
+      (
+        { observation: turn, fixtureSequenceStart, fixtureSequenceEnd },
+        index,
+      ) => ({
+        turnIndex: index + 1,
+        runId: turn.runId,
         turnId: turn.turnId,
         messageTurnId: turn.messageTurnId,
         reason: turn.reason,
         failure: turn.failure,
-      })),
+        fixtureSequenceStart,
+        fixtureSequenceEnd,
+        streamTools: turn.tools,
+        output: turn.output,
+      }),
+    );
+    const perTurnFixtureEvidence = buildFixtureTurnEvidence({
+      turns: capturedTurns,
+      ledger: fixture.ledger,
+      expectedTurnCount: turnPrompts.length,
+    });
+    const observation = {
+      ...finalTurn,
+      output: finalTurn.output,
+      tools: turnObservations.flatMap((entry) => entry.observation.tools),
+      apiRequests: turnObservations.flatMap(
+        (entry) => entry.observation.apiRequests,
+      ),
+      trace: turnObservations.flatMap((entry, index) =>
+        entry.observation.trace.map((event) => ({
+          ...event,
+          turnIndex: index + 1,
+        })),
+      ),
+      elapsedMs: turnObservations.reduce(
+        (total, entry) => total + entry.observation.elapsedMs,
+        0,
+      ),
+      logicalRunMs: turnObservations.every(
+        (entry) => entry.observation.logicalRunMs !== null,
+      )
+        ? turnObservations.reduce(
+            (total, entry) => total + entry.observation.logicalRunMs!,
+            0,
+          )
+        : null,
+      failure:
+        turnObservations.find((entry) => entry.observation.failure)?.observation
+          .failure ?? null,
+      expectedTurnCount: turnPrompts.length,
+      turns: capturedTurns,
+      perTurnFixtureEvidence,
     };
+    const turnEvidenceCheck = verifyTraceTurnEvidence({
+      trace: observation,
+      ledger: fixture.ledger,
+      expectedTurnCount: turnPrompts.length,
+    });
+    observation.perTurnFixtureEvidence = turnEvidenceCheck.evidence;
+    const turnEvidenceMatched = turnEvidenceCheck.matched;
     stage = 'trace_persist';
     privateJson(path.join(directory, 'trace.json'), observation);
     stage = 'post_turn_context';
@@ -391,6 +444,7 @@ export async function attempt(
       contextVerified: contextEvidence.verified,
       freshState,
       auditMatched,
+      turnEvidenceMatched,
       mcpRuntimeReady: mcpRuntime.ready,
       toolUnavailable: audit.toolUnavailableCalls.length > 0,
       fixtureBypass: audit.bypassedFixtureCalls.length > 0,
@@ -421,6 +475,7 @@ export async function attempt(
       gates: {
         modelIdentity: usage.identityVerified && !candidate.gateway,
         independentFixture: auditMatched,
+        perTurnFixtureEvidence: turnEvidenceMatched,
         mcpRuntimeReady: mcpRuntime.ready,
         toolUnavailable: audit.toolUnavailableCalls.length > 0,
         fixtureBypass: audit.bypassedFixtureCalls.length > 0,
@@ -454,6 +509,27 @@ export async function attempt(
       fixtureStateHash: hash(fixture.state),
       fixtureStateReconciled,
       fixtureAudit: audit,
+      perTurnFixtureEvidence: turnEvidenceCheck.evidence,
+      capabilityEvidence: buildCapabilityCoverageAttempt({
+        category: isBusinessCase ? (test as BusinessCase).category : 'spike',
+        selectedSkillIds: actualContext?.skills.selectedSkillIds ?? [],
+        selectedMcpServers: actualContext?.mcp.serverIds ?? [],
+        availableFixtureTools: mcpRuntimeEvidence?.fixtureTools ?? [],
+        fixtureRuntimeStatus:
+          mcpRuntimeEvidence?.mcpServers.find(
+            (server) => server.name === 'commerce_fixture',
+          )?.status ?? 'missing',
+        requiredTools: isBusinessCase
+          ? (test as BusinessCase).tools.required
+          : ((test as SpikeCase).requiredTools.map((requirement) => ({
+              name: requirement.name,
+              arguments: requirement.arguments,
+            })) as ToolRequirement[]),
+        calls: fixture.ledger,
+        turns: perTurnFixtureEvidence.turns,
+        turnEvidenceComplete: turnEvidenceMatched,
+        routingOracleDeclared: false,
+      }),
       fixtureLedgerSummary: fixture.ledger.map((call) => ({
         name: call.name,
         arguments: call.arguments,

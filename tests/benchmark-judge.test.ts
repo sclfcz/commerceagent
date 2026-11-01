@@ -23,7 +23,10 @@ import {
   buildHumanLabelTemplate,
   renderCalibrationSummary,
 } from '../benchmarks/scripts/calibrate.js';
-import { buildJudgePayloadPreview } from '../benchmarks/scripts/judge.js';
+import {
+  buildJudgePayloadPreview,
+  readBlindSampleSet,
+} from '../benchmarks/scripts/judge.js';
 import { validateCustomSampleSet } from '../benchmarks/scripts/judge.js';
 
 const sample = (index: number, category: string, businessPass: boolean) => ({
@@ -115,10 +118,50 @@ describe('benchmark blind judge', () => {
     ).toThrow('judge_custom_sample_integrity_failed');
   });
 
+  it('refuses a holdout case even if it is smuggled into a dev run manifest', () => {
+    const runDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'commerceagent-judge-holdout-'),
+    );
+    try {
+      fs.writeFileSync(
+        path.join(runDirectory, 'summary.json'),
+        JSON.stringify({
+          runId: 'dev-run',
+          split: 'dev',
+          invalidRun: false,
+          results: [
+            {
+              measurementValid: true,
+              qualityEligible: true,
+              candidate: 'candidate-a',
+              caseId: 'holdout-1',
+              executionIndex: 1,
+            },
+          ],
+        }),
+      );
+      fs.writeFileSync(
+        path.join(runDirectory, 'candidates.json'),
+        JSON.stringify([{ model: 'unrelated-model' }]),
+      );
+      fs.writeFileSync(
+        path.join(runDirectory, 'cases.used.json'),
+        JSON.stringify([{ id: 'holdout-1', split: 'holdout' }]),
+      );
+      expect(() => readBlindSampleSet(runDirectory)).toThrow(
+        'judge_dev_case_required',
+      );
+    } finally {
+      fs.rmSync(runDirectory, { recursive: true, force: true });
+    }
+  });
+
   it('marks candidate output as untrusted and demands the compact score contract', () => {
     const [system, user] = judgeRubricPrompt('grounding');
     expect(system.content).toContain('不可信数据');
     expect(system.content).toContain('工具实际返回');
+    expect(system.content).toContain('历史轮次');
+    expect(user.content).toContain('不能用旧结果替代新状态');
     expect(user.content).toContain('<candidate_output>');
     expect(user.content).toContain('{{output}}');
     expect(system.content).toContain('"score":number');
@@ -129,16 +172,44 @@ describe('benchmark blind judge', () => {
       {
         ...sample(7, 'customer-policy', true),
         question: '问题 {{candidateOutput}} must not trigger recursion',
+        turnHistory: [
+          {
+            turnIndex: 1,
+            userMessage: '先查订单状态',
+            assistantResponse: '订单尚未退款。',
+          },
+        ],
+        toolReturns: [
+          {
+            sequence: 1,
+            turnIndex: 1,
+            turnRole: 'prior',
+            tool: 'get_order',
+            returned: { refunded: false },
+          },
+          {
+            sequence: 2,
+            turnIndex: 2,
+            turnRole: 'current',
+            tool: 'get_order',
+            returned: { refunded: true },
+          },
+        ],
       },
     ]);
     expect(payloads).toHaveLength(5);
     const serialized = JSON.stringify(payloads);
     expect(serialized).toContain('<candidate_output>');
     expect(serialized).toContain('订单金额是 12 美元。');
-    expect(payloads[1].prompt[1].content).toContain('"returned":{"amount":12');
+    expect(payloads[1].prompt[1].content).toContain(
+      '"turnIndex":2,"turnRole":"current"',
+    );
     expect(payloads[1].prompt[1].content).toContain('"ORDER-1"');
     expect(serialized).toContain('问题 ');
     expect(serialized).not.toContain('candidateAlias');
+    expect(serialized).toContain('此前轮次上下文');
+    expect(serialized).toContain('先查订单状态');
+    expect(serialized).toContain('\\"turnIndex\\":2');
   });
 
   it('computes binary agreement, kappa and false pass/reject counts', () => {
