@@ -167,6 +167,7 @@ export class MqConsumer {
           !(await this.options.tenantSlots.acquire(
             result.claim.tenantId,
             result.claim.runId,
+            result.claim.leaseToken,
           ))
         ) {
           this.counters.admissionRejected += 1;
@@ -176,6 +177,7 @@ export class MqConsumer {
               workerId: this.options.consumerId,
               leaseToken: result.claim.leaseToken,
               retryDelayMs: 200 + Math.floor(Math.random() * 200),
+              reason: 'admission',
             });
           } catch (releaseError) {
             this.options.logger?.({

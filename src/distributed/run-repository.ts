@@ -304,57 +304,170 @@ export class RunRepository {
           [limit],
         );
         if (!due.length) return [];
-        const ids = due.map((row) => String(row.id));
-        const placeholders = ids.map(() => '?').join(',');
-        await execute(
+        return this.claimRows(
           connection,
-          `UPDATE dist_task_runs
-            SET status = 'running',
-                attempt = attempt + 1,
-                lease_owner = ?,
-                lease_token = lease_token + 1,
-                lease_expires_at = NOW(3) + INTERVAL ? MICROSECOND,
-                started_at = COALESCE(started_at, NOW(3)),
-                updated_at = NOW(3)
-          WHERE id IN (${placeholders})
-            AND status IN ('queued','retry_wait')`,
-          [workerId, this.leaseMicros, ...ids],
+          workerId,
+          due.map((row) => String(row.id)),
         );
-        const rows = await queryRows(
-          connection,
-          `SELECT id, tenant_id, task_id, payload, attempt, max_attempts, lease_token
-           FROM dist_task_runs
-          WHERE id IN (${placeholders}) AND status = 'running' AND lease_owner = ?`,
-          [...ids, workerId],
-        );
-        const claimed: ClaimedRun[] = [];
-        for (const row of rows) {
-          const leaseToken = toNumber(row.lease_token);
-          await this.insertEvent(connection, {
-            runId: String(row.id),
-            leaseToken,
-            workerId,
-            event: 'claimed',
-            detail: { attempt: toNumber(row.attempt) },
-          });
-          claimed.push({
-            runId: String(row.id),
-            tenantId: String(row.tenant_id),
-            taskId: String(row.task_id),
-            payload: (row.payload ?? {}) as Record<string, unknown>,
-            attempt: toNumber(row.attempt),
-            maxAttempts: toNumber(row.max_attempts),
-            leaseToken,
-          });
-        }
-        return claimed;
       },
-      { onRetry: () => this.options.stats?.recordTransactionRetry() },
+      {
+        isolation: 'READ COMMITTED',
+        onRetry: () => this.options.stats?.recordTransactionRetry(),
+      },
     );
     this.options.stats?.recordClaim(
       performance.now() - startedAt,
       claimed.length,
     );
+    return claimed;
+  }
+
+  /**
+   * Tenant-aware claim: pick tenants with due work first (unlocked read), then
+   * claim per tenant within one transaction, skipping tenants that Redis says
+   * are already at their limit. This keeps an over-quota tenant's backlog from
+   * monopolising every claim batch.
+   */
+  async claimFair(
+    workerId: string,
+    limit: number,
+    saturatedTenants: string[],
+    perTenantRoom: Map<string, number>,
+  ): Promise<ClaimedRun[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1) return [];
+    const startedAt = performance.now();
+    const claimed = await withTransaction(
+      this.pool,
+      async (connection) => {
+        const saturated = [...new Set(saturatedTenants)].filter(Boolean);
+        const exclude =
+          saturated.length > 0
+            ? ` AND tenant_id NOT IN (${saturated.map(() => '?').join(',')})`
+            : '';
+        const candidates = await queryRows(
+          connection,
+          `SELECT tenant_id, MIN(available_at) AS oldest
+             FROM dist_task_runs
+            WHERE status IN ('queued','retry_wait') AND available_at <= NOW(3)${exclude}
+            GROUP BY tenant_id
+            ORDER BY oldest
+            LIMIT 32`,
+          saturated,
+        );
+        if (!candidates.length) return [];
+
+        const tenants = candidates.map((row) => String(row.tenant_id));
+        const room = new Map<string, number>(
+          tenants.map((tenant) => [
+            tenant,
+            Math.max(0, perTenantRoom.get(tenant) ?? limit),
+          ]),
+        );
+        const out: ClaimedRun[] = [];
+        let remaining = limit;
+        while (remaining > 0) {
+          const active = tenants.filter(
+            (tenant) => (room.get(tenant) ?? 0) > 0,
+          );
+          if (!active.length) break;
+          let progressed = false;
+          for (let index = 0; index < active.length && remaining > 0; index++) {
+            const tenant = active[index];
+            // Spread the remaining budget across the tenants still in play so
+            // one tenant with a big room does not take the whole batch.
+            const share = Math.ceil(remaining / (active.length - index));
+            const take = Math.min(remaining, room.get(tenant) ?? 0, share);
+            if (take <= 0) continue;
+            const due = await queryRows(
+              connection,
+              `SELECT id FROM dist_task_runs
+                WHERE status IN ('queued','retry_wait')
+                  AND available_at <= NOW(3)
+                  AND tenant_id = ?
+                ORDER BY available_at, id
+                LIMIT ?
+                FOR UPDATE SKIP LOCKED`,
+              [tenant, take],
+            );
+            if (!due.length) {
+              room.set(tenant, 0);
+              continue;
+            }
+            const rows = await this.claimRows(
+              connection,
+              workerId,
+              due.map((row) => String(row.id)),
+            );
+            out.push(...rows);
+            room.set(tenant, (room.get(tenant) ?? 0) - rows.length);
+            remaining -= rows.length;
+            if (rows.length > 0) progressed = true;
+          }
+          if (!progressed) break;
+        }
+        return out;
+      },
+      {
+        isolation: 'READ COMMITTED',
+        onRetry: () => this.options.stats?.recordTransactionRetry(),
+      },
+    );
+    this.options.stats?.recordClaim(
+      performance.now() - startedAt,
+      claimed.length,
+    );
+    return claimed;
+  }
+
+  /** Mark the given rows running under `workerId` and emit `claimed` events. */
+  private async claimRows(
+    connection: PoolConnection,
+    workerId: string,
+    ids: string[],
+  ): Promise<ClaimedRun[]> {
+    if (!ids.length) return [];
+    const placeholders = ids.map(() => '?').join(',');
+    await execute(
+      connection,
+      `UPDATE dist_task_runs
+          SET status = 'running',
+              attempt = attempt + 1,
+              lease_owner = ?,
+              lease_token = lease_token + 1,
+              lease_expires_at = NOW(3) + INTERVAL ? MICROSECOND,
+              started_at = COALESCE(started_at, NOW(3)),
+              updated_at = NOW(3)
+        WHERE id IN (${placeholders})
+          AND status IN ('queued','retry_wait')`,
+      [workerId, this.leaseMicros, ...ids],
+    );
+    const rows = await queryRows(
+      connection,
+      `SELECT id, tenant_id, task_id, payload, attempt, max_attempts, lease_token
+         FROM dist_task_runs
+        WHERE id IN (${placeholders}) AND status = 'running' AND lease_owner = ?`,
+      [...ids, workerId],
+    );
+    const claimed: ClaimedRun[] = [];
+    for (const row of rows) {
+      const leaseToken = toNumber(row.lease_token);
+      await this.insertEvent(connection, {
+        runId: String(row.id),
+        leaseToken,
+        workerId,
+        event: 'claimed',
+        detail: { attempt: toNumber(row.attempt) },
+      });
+      claimed.push({
+        runId: String(row.id),
+        tenantId: String(row.tenant_id),
+        taskId: String(row.task_id),
+        payload: (row.payload ?? {}) as Record<string, unknown>,
+        attempt: toNumber(row.attempt),
+        maxAttempts: toNumber(row.max_attempts),
+        leaseToken,
+      });
+    }
     return claimed;
   }
 
@@ -657,6 +770,8 @@ export class RunRepository {
      * global queue and can starve other tenants.
      */
     retryDelayMs?: number;
+    /** Recorded on the `released` event so rejections are countable in SQL. */
+    reason?: 'shutdown' | 'admission';
   }): Promise<boolean> {
     const applied = await withTransaction(this.pool, async (connection) => {
       const rows = await queryRows(
@@ -703,7 +818,11 @@ export class RunRepository {
         leaseToken: input.leaseToken + 1,
         workerId: input.workerId,
         event: 'released',
-        detail: { attempt, nextAttempt: Math.max(attempt - 1, 0) },
+        detail: {
+          attempt,
+          nextAttempt: Math.max(attempt - 1, 0),
+          reason: input.reason ?? 'shutdown',
+        },
       });
       await this.enqueueOutbox(
         connection,

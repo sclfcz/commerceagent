@@ -31,8 +31,8 @@ describeRedis('admission fail mode', () => {
       failMode: 'open',
       logger: (event) => events.push(event),
     });
-    expect(await slots.acquire('tenant-open', 'run-1')).toBe(true);
-    expect(await slots.renew('tenant-open', 'run-1')).toBe(true);
+    expect(await slots.acquire('tenant-open', 'run-1', 1)).toBe(true);
+    expect(await slots.renew('tenant-open', 'run-1', 1)).toBe(true);
     expect(events.some((event) => event.event === 'admission_degraded')).toBe(
       true,
     );
@@ -52,8 +52,8 @@ describeRedis('admission fail mode', () => {
       failMode: 'closed',
       logger: (event) => events.push(event),
     });
-    expect(await slots.acquire('tenant-closed', 'run-2')).toBe(false);
-    expect(await slots.renew('tenant-closed', 'run-2')).toBe(false);
+    expect(await slots.acquire('tenant-closed', 'run-2', 1)).toBe(false);
+    expect(await slots.renew('tenant-closed', 'run-2', 1)).toBe(false);
     expect(events.some((event) => event.event === 'admission_degraded')).toBe(
       true,
     );

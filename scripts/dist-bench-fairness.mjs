@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 /**
- * Fairness benchmark: does a tenant-flooding workload delay a small tenant?
+ * Fairness benchmark: does a tenant-flooding workload delay a small tenant,
+ * and what does isolation cost in cluster capacity?
  *
- * BIG submits 5000 runs, SMALL submits 200, both sleepMs=50. The same run is
- * measured twice: baseline (DIST_TENANT_CONCURRENCY=0, no isolation) and
- * isolated (=10). 3 repeats each, medians reported.
+ * Order matters and is enforced here: BIG's 5000 runs are fully inserted first,
+ * only then SMALL's 200. Three configurations are measured, 3 repeats each:
+ *   baseline    DIST_TENANT_CONCURRENCY=0  (no isolation)
+ *   isolated-10 DIST_TENANT_CONCURRENCY=10
+ *   isolated-32 DIST_TENANT_CONCURRENCY=32
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -26,11 +29,18 @@ const SMALL_TENANT = 'tenant-small';
 const BIG_RUNS = Number(process.env.DIST_FAIR_BIG ?? 5_000);
 const SMALL_RUNS = Number(process.env.DIST_FAIR_SMALL ?? 200);
 const SLEEP_MS = 50;
-const TENANT_CONCURRENCY = 10;
 const WORKERS = 8;
 const CONCURRENCY = 8;
+const CLUSTER_SLOTS = WORKERS * CONCURRENCY;
 const REPEATS = Math.max(1, Number(process.env.DIST_FAIR_REPEAT ?? 3) || 3);
 const PHASE_TIMEOUT_MS = 10 * 60 * 1000;
+const UTILIZATION_SAMPLE_MS = 100;
+
+const CONFIGS = [
+  { id: 'baseline', tenantConcurrency: 0 },
+  { id: 'isolated-10', tenantConcurrency: 10 },
+  { id: 'isolated-32', tenantConcurrency: 32 },
+];
 
 const WORKER_ENTRY = path.join(ROOT, 'src/distributed/cli-worker.ts');
 const children = new Set();
@@ -81,7 +91,7 @@ function stableStringify(value) {
     .join(',')}}`;
 }
 
-function spawnWorkers(tenantConcurrency) {
+function spawnWorkers(tenantConcurrency, tag) {
   return Array.from({ length: WORKERS }, (_, index) => {
     const child = spawn(process.execPath, ['--import', 'tsx', WORKER_ENTRY], {
       cwd: ROOT,
@@ -89,10 +99,11 @@ function spawnWorkers(tenantConcurrency) {
         ...process.env,
         DIST_MYSQL_URL: MYSQL_URL,
         DIST_REDIS_URL: REDIS_URL,
-        DIST_WORKER_ID: `fair-${tenantConcurrency}-w${index}`,
+        DIST_WORKER_ID: `${tag}-w${index}`,
         DIST_DISPATCH: 'poll',
         DIST_WORKER_CONCURRENCY: String(CONCURRENCY),
-        DIST_CLAIM_BATCH: String(CONCURRENCY),
+        // Small batches keep the admission plan close to the claim.
+        DIST_CLAIM_BATCH: '8',
         DIST_TENANT_CONCURRENCY: String(tenantConcurrency),
         DIST_ADMISSION_FAIL_MODE: 'open',
         DIST_LEASE_MS: '30000',
@@ -167,12 +178,12 @@ async function waitForTerminal(pool, timeoutMs = PHASE_TIMEOUT_MS) {
         WHERE status IN ('queued','running','retry_wait')`,
     );
     if (Number(row.total) === 0) return true;
-    await sleep(100);
+    await sleep(50);
   }
   return false;
 }
 
-async function measure(pool, tenant, mode, tenantConcurrency) {
+async function measure(pool, config, repeat) {
   for (const table of [
     'dist_consumed_messages',
     'dist_outbox',
@@ -181,47 +192,104 @@ async function measure(pool, tenant, mode, tenantConcurrency) {
   ])
     await pool.query(`DELETE FROM ${table}`);
 
-  // BIG first: SMALL arrives behind a large backlog on purpose.
+  // Enforced order: BIG's runs are all committed before SMALL is inserted.
   await seed(pool, BIG_TENANT, BIG_RUNS);
+  const bigSeededAt = Date.now();
   await seed(pool, SMALL_TENANT, SMALL_RUNS);
-  const workers = spawnWorkers(tenantConcurrency);
+  const smallSeededAt = Date.now();
+
+  const workers = spawnWorkers(
+    config.tenantConcurrency,
+    `fair-${config.id}-${repeat}`,
+  );
   const startedAt = Date.now();
+  const runningSamples = [];
+  const sampler = setInterval(() => {
+    void (async () => {
+      try {
+        const [[row]] = await pool.query(
+          `SELECT COUNT(*) AS total FROM dist_task_runs WHERE status = 'running'`,
+        );
+        runningSamples.push(Number(row.total));
+      } catch {
+        /* best effort */
+      }
+    })();
+  }, UTILIZATION_SAMPLE_MS);
+
   try {
     if (!(await waitForTerminal(pool)))
-      throw new Error(`${mode}: runs never drained`);
+      throw new Error(`${config.id}: runs never drained`);
     const finishedAt = Date.now();
+    clearInterval(sampler);
+
     const [rows] = await pool.query(
       `SELECT
          TIMESTAMPDIFF(MICROSECOND, created_at, finished_at) / 1000 AS completion_ms,
          TIMESTAMPDIFF(MICROSECOND, created_at, started_at) / 1000 AS queue_ms
        FROM dist_task_runs
        WHERE tenant_id = ? AND status = 'succeeded'`,
-      [tenant],
+      [SMALL_TENANT],
     );
-    const completion = rows.map((row) => Number(row.completion_ms));
-    const queue = rows.map((row) => Number(row.queue_ms));
-    const [[span]] = await pool.query(
-      `SELECT
-         TIMESTAMPDIFF(MICROSECOND, MIN(created_at), MAX(finished_at)) / 1000 AS span_ms
-       FROM dist_task_runs WHERE tenant_id = ?`,
-      [tenant],
+    const [[smallSpan]] = await pool.query(
+      `SELECT TIMESTAMPDIFF(MICROSECOND, MIN(created_at), MAX(finished_at)) / 1000 AS span_ms
+         FROM dist_task_runs WHERE tenant_id = ?`,
+      [SMALL_TENANT],
     );
-    const [[big]] = await pool.query(
-      `SELECT COUNT(*) AS total FROM dist_task_runs
-        WHERE tenant_id = ? AND status = 'succeeded'`,
+    const [[bigSpan]] = await pool.query(
+      `SELECT TIMESTAMPDIFF(MICROSECOND, MIN(created_at), MAX(finished_at)) / 1000 AS span_ms
+         FROM dist_task_runs WHERE tenant_id = ?`,
       [BIG_TENANT],
     );
+    const [[wasted]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM dist_task_run_events
+        WHERE event = 'released'
+          AND JSON_UNQUOTE(JSON_EXTRACT(detail, '$.reason')) = 'admission'`,
+    );
+    const [[counts]] = await pool.query(
+      `SELECT SUM(tenant_id = ?) AS small, SUM(tenant_id = ?) AS big
+         FROM dist_task_runs WHERE status = 'succeeded'`,
+      [SMALL_TENANT, BIG_TENANT],
+    );
+    const avgRunning =
+      runningSamples.length > 0
+        ? runningSamples.reduce((sum, value) => sum + value, 0) /
+          runningSamples.length
+        : null;
     return {
-      mode,
-      tenantConcurrency,
+      config: config.id,
+      tenantConcurrency: config.tenantConcurrency,
       workers: WORKERS,
-      runs: { small: completion.length, big: Number(big.total) },
-      smallCompletionMs: summarize(completion),
-      smallQueueMs: summarize(queue),
-      smallSpanMs: Number(span.span_ms),
+      concurrencyPerWorker: CONCURRENCY,
+      submissionOrder: {
+        bigFirst: true,
+        bigSeededAt,
+        smallSeededAt,
+        orderHeld: smallSeededAt >= bigSeededAt,
+        bigRuns: BIG_RUNS,
+        smallRuns: SMALL_RUNS,
+      },
+      runs: { small: Number(counts.small), big: Number(counts.big) },
+      smallCompletionMs: summarize(
+        rows.map((row) => Number(row.completion_ms)),
+      ),
+      smallQueueMs: summarize(rows.map((row) => Number(row.queue_ms))),
+      smallSpanMs: Number(smallSpan.span_ms),
+      bigSpanMs: Number(bigSpan.span_ms),
       wallClockMs: finishedAt - startedAt,
+      utilization: {
+        samples: runningSamples.length,
+        avgRunning: avgRunning === null ? null : Number(avgRunning.toFixed(2)),
+        clusterSlots: CLUSTER_SLOTS,
+        pct:
+          avgRunning === null
+            ? null
+            : Number(((avgRunning / CLUSTER_SLOTS) * 100).toFixed(2)),
+      },
+      wastedClaims: Number(wasted.total),
     };
   } finally {
+    clearInterval(sampler);
     for (const child of workers) child.kill('SIGTERM');
     await stopAll();
   }
@@ -272,18 +340,18 @@ async function main() {
     const [[version]] = await pool.query(
       'SELECT VERSION() AS version, @@version_comment AS comment',
     );
-    const version_redis = await redisVersion(redis);
-    const samples = { baseline: [], isolated: [] };
+    const redisVersionValue = await redisVersion(redis);
+    const samples = Object.fromEntries(
+      CONFIGS.map((config) => [config.id, []]),
+    );
     for (let repeat = 0; repeat < REPEATS; repeat++) {
-      notify(`repeat ${repeat + 1}/${REPEATS}: baseline`);
-      samples.baseline.push(await measure(pool, SMALL_TENANT, 'baseline', 0));
-      notify(`repeat ${repeat + 1}/${REPEATS}: isolated`);
-      samples.isolated.push(
-        await measure(pool, SMALL_TENANT, 'isolated', TENANT_CONCURRENCY),
-      );
+      for (const config of CONFIGS) {
+        notify(`repeat ${repeat + 1}/${REPEATS}: ${config.id}`);
+        samples[config.id].push(await measure(pool, config, repeat));
+      }
     }
 
-    const summarizeMode = (rows) => ({
+    const summarizeConfig = (rows) => ({
       repeats: rows.length,
       smallCompletionMs: {
         p50: median(rows.map((row) => row.smallCompletionMs.p50)),
@@ -293,18 +361,23 @@ async function main() {
       smallQueueMs: {
         p50: median(rows.map((row) => row.smallQueueMs.p50)),
         p95: median(rows.map((row) => row.smallQueueMs.p95)),
-        p99: median(rows.map((row) => row.smallQueueMs.p99)),
       },
       smallSpanMs: median(rows.map((row) => row.smallSpanMs)),
+      bigSpanMs: median(rows.map((row) => row.bigSpanMs)),
       wallClockMs: median(rows.map((row) => row.wallClockMs)),
+      utilizationPct: median(rows.map((row) => row.utilization.pct)),
+      wastedClaims: median(rows.map((row) => row.wastedClaims)),
       succeededPerRepeat: rows.map((row) => row.runs.small),
+      orderHeldPerRepeat: rows.map((row) => row.submissionOrder.orderHeld),
     });
-    const baseline = summarizeMode(samples.baseline);
-    const isolated = summarizeMode(samples.isolated);
+    const summary = Object.fromEntries(
+      CONFIGS.map((config) => [config.id, summarizeConfig(samples[config.id])]),
+    );
     const deltaPct = (left, right) =>
       typeof left === 'number' && typeof right === 'number' && right !== 0
         ? Number((((left - right) / right) * 100).toFixed(1))
         : null;
+    const baseline = summary.baseline;
 
     const report = {
       runId,
@@ -325,7 +398,7 @@ async function main() {
         version: version.version,
         versionComment: version.comment,
       },
-      redis: { host: new URL(REDIS_URL).host, version: version_redis },
+      redis: { host: new URL(REDIS_URL).host, version: redisVersionValue },
       config: {
         bigTenant: BIG_TENANT,
         bigRuns: BIG_RUNS,
@@ -334,32 +407,68 @@ async function main() {
         sleepMs: SLEEP_MS,
         workers: WORKERS,
         concurrencyPerWorker: CONCURRENCY,
-        tenantConcurrency: TENANT_CONCURRENCY,
+        clusterSlots: CLUSTER_SLOTS,
         repeats: REPEATS,
+        submissionOrder:
+          'BIG fully submitted first, then SMALL (sequential, awaited)',
+        utilizationSampleMs: UTILIZATION_SAMPLE_MS,
       },
       baseline,
-      isolated,
+      'isolated-10': summary['isolated-10'],
+      'isolated-32': summary['isolated-32'],
       comparison: {
-        smallCompletionP50DeltaPct: deltaPct(
-          isolated.smallCompletionMs.p50,
-          baseline.smallCompletionMs.p50,
-        ),
-        smallCompletionP95DeltaPct: deltaPct(
-          isolated.smallCompletionMs.p95,
-          baseline.smallCompletionMs.p95,
-        ),
-        smallQueueP95DeltaPct: deltaPct(
-          isolated.smallQueueMs.p95,
-          baseline.smallQueueMs.p95,
-        ),
-        smallSpanDeltaPct: deltaPct(isolated.smallSpanMs, baseline.smallSpanMs),
-        note: 'negative = isolated is faster for the SMALL tenant.',
+        smallLatencyProtected: {
+          p50DeltaPct: deltaPct(
+            summary['isolated-10'].smallCompletionMs.p50,
+            baseline.smallCompletionMs.p50,
+          ),
+          p95DeltaPct: deltaPct(
+            summary['isolated-10'].smallCompletionMs.p95,
+            baseline.smallCompletionMs.p95,
+          ),
+          p99DeltaPct: deltaPct(
+            summary['isolated-10'].smallCompletionMs.p99,
+            baseline.smallCompletionMs.p99,
+          ),
+          spanDeltaPct: deltaPct(
+            summary['isolated-10'].smallSpanMs,
+            baseline.smallSpanMs,
+          ),
+          answer:
+            'negative = isolated-10 delivers SMALL faster; see the per-metric values.',
+        },
+        capacityCost: {
+          bigSpanDeltaPct: deltaPct(
+            summary['isolated-10'].bigSpanMs,
+            baseline.bigSpanMs,
+          ),
+          wallClockDeltaPct: deltaPct(
+            summary['isolated-10'].wallClockMs,
+            baseline.wallClockMs,
+          ),
+          utilizationPctDelta: deltaPct(
+            summary['isolated-10'].utilizationPct,
+            baseline.utilizationPct,
+          ),
+          wastedClaims: {
+            baseline: baseline.wastedClaims,
+            'isolated-10': summary['isolated-10'].wastedClaims,
+            'isolated-32': summary['isolated-32'].wastedClaims,
+          },
+          answer:
+            'isolation caps the flooding tenant, so BIG/whole-run spans grow; utilization shows how much of the 64 slots stays busy.',
+        },
       },
       samples,
       assertions: {
-        everyRepeatSucceeded: samples.baseline
-          .concat(samples.isolated)
-          .every((row) => row.runs.small === SMALL_RUNS),
+        everyRepeatSucceeded: Object.values(samples)
+          .flat()
+          .every(
+            (row) => row.runs.small === SMALL_RUNS && row.runs.big === BIG_RUNS,
+          ),
+        submissionOrderHeld: Object.values(samples)
+          .flat()
+          .every((row) => row.submissionOrder.orderHeld),
       },
     };
     report.passed = Object.values(report.assertions).every(Boolean);

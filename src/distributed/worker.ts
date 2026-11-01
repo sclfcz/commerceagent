@@ -55,6 +55,13 @@ export class Worker {
   private readonly logger: WorkerLogger;
   private readonly tenantSlots: TenantSlots | undefined;
   private readonly runs = new Map<string, RunState>();
+  private readonly counters = {
+    claimed: 0,
+    admissionRejects: 0,
+    // Runs whose claim had to be handed back because admission said "no":
+    // each one is an extra claim that produced no execution.
+    wastedClaims: 0,
+  };
   private stopping = false;
   private started = false;
   private loopPromise: Promise<void> | null = null;
@@ -75,6 +82,10 @@ export class Worker {
 
   get workerId(): string {
     return this.config.workerId;
+  }
+
+  stats() {
+    return { ...this.counters };
   }
 
   /**
@@ -107,11 +118,21 @@ export class Worker {
         continue;
       }
       let claimed: ClaimedRun[] = [];
+      const batch = Math.min(free, this.config.claimBatch || free);
       try {
-        claimed = await this.repository.claim(
-          this.config.workerId,
-          Math.min(free, this.config.claimBatch || free),
-        );
+        if (this.tenantSlots?.enabled) {
+          // Exclude saturated tenants from the batch instead of claiming and
+          // releasing them: that churn is what starved other tenants before.
+          const plan = await this.tenantSlots.admissionPlan();
+          claimed = await this.repository.claimFair(
+            this.config.workerId,
+            batch,
+            plan.saturated,
+            plan.room,
+          );
+        } else {
+          claimed = await this.repository.claim(this.config.workerId, batch);
+        }
       } catch (error) {
         this.logger({
           event: 'claim_failed',
@@ -140,6 +161,7 @@ export class Worker {
       for (const claim of claimed) {
         if (!(await this.admit(claim))) continue;
         admitted += 1;
+        this.counters.claimed += 1;
         this.execute(claim);
       }
       if (!admitted && claimed.length) {
@@ -179,8 +201,14 @@ export class Worker {
    */
   private async admit(claim: ClaimedRun): Promise<boolean> {
     if (!this.tenantSlots) return true;
-    const granted = await this.tenantSlots.acquire(claim.tenantId, claim.runId);
+    const granted = await this.tenantSlots.acquire(
+      claim.tenantId,
+      claim.runId,
+      claim.leaseToken,
+    );
     if (granted) return true;
+    this.counters.admissionRejects += 1;
+    this.counters.wastedClaims += 1;
     this.logger({
       event: 'admission_rejected',
       workerId: this.config.workerId,
@@ -195,6 +223,7 @@ export class Worker {
         // Short re-queue delay: a rejected run must not keep the head of the
         // global queue, otherwise one over-quota tenant starves the others.
         retryDelayMs: 200 + Math.floor(Math.random() * 200),
+        reason: 'admission',
       });
     } catch (error) {
       this.logger({
@@ -314,7 +343,11 @@ export class Worker {
         // already hold it under the same runId. Expiry cleans it up instead.
         if (this.tenantSlots && !state.slotReleased && !state.leaseLost) {
           state.slotReleased = true;
-          await this.tenantSlots.release(claim.tenantId, claim.runId);
+          await this.tenantSlots.release(
+            claim.tenantId,
+            claim.runId,
+            claim.leaseToken,
+          );
         }
         this.runs.delete(claim.runId);
       }
@@ -346,6 +379,7 @@ export class Worker {
           const renewed = await this.tenantSlots.renew(
             claim.tenantId,
             claim.runId,
+            claim.leaseToken,
           );
           if (!renewed) await this.loseLease(claim, state, 'slot_expired');
         }
@@ -406,7 +440,11 @@ export class Worker {
         // Free the slot while we still own the lease; the DB release below lets
         // another worker pick the run up immediately.
         state.slotReleased = true;
-        await this.tenantSlots.release(state.claim.tenantId, state.claim.runId);
+        await this.tenantSlots.release(
+          state.claim.tenantId,
+          state.claim.runId,
+          state.claim.leaseToken,
+        );
       }
       state.leaseLost = true;
       try {

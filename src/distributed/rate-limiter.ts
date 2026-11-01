@@ -4,20 +4,23 @@ import type { AdmissionFailMode } from './tenant-slots.js';
 /**
  * Classic token bucket, atomic in Lua.
  *
- * KEYS[1] = bucket key, stored as a hash {tokens, lastRefillMs}.
- * Refill uses the caller-supplied clock (`nowMs`) so tests can advance time
- * deterministically instead of sleeping.
+ * Time comes from the Redis clock (`TIME`), so every worker refills against the
+ * same clock and client skew cannot over- or under-issue tokens.
  *
- * Returns {allowed, tokens, retryAfterMs} with the numbers encoded as strings
- * so Lua's integer conversion cannot truncate fractional tokens.
+ * KEYS[1] = bucket key (hash: tokens, lastRefillMs)
+ * ARGV = ratePerSec, burst, cost, ttlMs
+ * Returns {allowed, tokens, retryAfterMs} with numbers encoded as strings so
+ * Lua's integer conversion cannot truncate fractional tokens.
  */
 const TRY_ACQUIRE_LUA = `
 local key = KEYS[1]
 local rate = tonumber(ARGV[1])
 local burst = tonumber(ARGV[2])
-local nowMs = tonumber(ARGV[3])
-local cost = tonumber(ARGV[4])
-local ttlMs = tonumber(ARGV[5])
+local cost = tonumber(ARGV[3])
+local ttlMs = tonumber(ARGV[4])
+
+local t = redis.call('TIME')
+local nowMs = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 
 local state = redis.call('HMGET', key, 'tokens', 'lastRefillMs')
 local tokens = tonumber(state[1])
@@ -54,8 +57,9 @@ export interface TokenBucketOptions {
   redis: Redis;
   failMode: AdmissionFailMode;
   logger?: (event: Record<string, unknown>) => void;
+  /** Used only for log throttling and wait deadlines, never for refill math. */
   now?: () => number;
-  /** Injectable so tests can advance a fake clock while "sleeping". */
+  /** Injectable sleep for tests; defaults to a real timer. */
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -115,7 +119,6 @@ export class TokenBucket {
         key,
         String(ratePerSec),
         String(burst),
-        String(this.now()),
         String(cost),
         String(ttlMs),
       )) as [number | string, string, string];
@@ -135,8 +138,8 @@ export class TokenBucket {
 
   /**
    * Retry until a token is available or `maxWaitMs` elapses.
-   * Uses the injected clock for both the bucket and the deadline, so tests can
-   * drive time forward through the injected `sleep`.
+   * The wait budget uses the local clock (it is a client-side deadline); token
+   * refill always uses the Redis clock.
    */
   async acquireBlocking(
     key: string,

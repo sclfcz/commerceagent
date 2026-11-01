@@ -246,11 +246,8 @@ async function main() {
       const deadline = kill.at + LEASE_MS + 5_000;
       while (Date.now() < deadline) {
         const stillStale = await Promise.all(
-          kill.slotsHeld.map(async ({ tenantId, runId: slotRunId }) => {
-            const score = await redis.zscore(
-              `dist:slots:${tenantId}`,
-              slotRunId,
-            );
+          kill.slotsHeld.map(async ({ tenantId, runId: slotRunId, member }) => {
+            const score = await redis.zscore(`dist:slots:${tenantId}`, member);
             // Gone (expired + cleaned) means the capacity is free again.
             if (score === null) return false;
             // Or the run was re-claimed after the kill: the slot now belongs to
@@ -274,18 +271,21 @@ async function main() {
 
     const killWorker = async (victim) => {
       const [rows] = await pool.query(
-        `SELECT id, tenant_id FROM dist_task_runs
+        `SELECT id, tenant_id, lease_token FROM dist_task_runs
           WHERE status = 'running' AND lease_owner = ?`,
         [victim.workerId],
       );
       const slotsHeld = [];
       for (const row of rows) {
-        const score = await redis.zscore(
-          `dist:slots:${row.tenant_id}`,
-          String(row.id),
-        );
+        // Slot members are `${runId}:${leaseToken}` (fenced generations).
+        const member = `${row.id}:${row.lease_token}`;
+        const score = await redis.zscore(`dist:slots:${row.tenant_id}`, member);
         if (score !== null)
-          slotsHeld.push({ tenantId: row.tenant_id, runId: String(row.id) });
+          slotsHeld.push({
+            tenantId: row.tenant_id,
+            runId: String(row.id),
+            member,
+          });
       }
       const [claimRows] = await pool.query(
         `SELECT run_id, MAX(id) AS max_id FROM dist_task_run_events
@@ -384,6 +384,10 @@ async function main() {
           GROUP BY run_id HAVING COUNT(*) <> 1
        ) AS offenders`,
     );
+    const [[deadBudget]] = await pool.query(
+      `SELECT COUNT(*) AS offenders FROM dist_task_runs
+        WHERE status = 'dead' AND attempt < max_attempts`,
+    );
     const [[staleSucceeded]] = await pool.query(
       `SELECT COUNT(*) AS total FROM dist_task_run_events e
          JOIN dist_task_runs r ON r.id = e.run_id
@@ -391,6 +395,11 @@ async function main() {
     );
     const [[claims]] = await pool.query(
       `SELECT COUNT(*) AS total FROM dist_task_run_events WHERE event = 'claimed'`,
+    );
+    const [[admission]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM dist_task_run_events
+        WHERE event = 'released'
+          AND JSON_UNQUOTE(JSON_EXTRACT(detail, '$.reason')) = 'admission'`,
     );
     const [dispatchRows] = await pool.query(
       `SELECT TIMESTAMPDIFF(MICROSECOND, r.created_at, MIN(e.created_at)) / 1000 AS ms
@@ -433,6 +442,11 @@ async function main() {
         dead: statusCounts.dead ?? 0,
         pending,
         claimedEvents: Number(claims.total),
+        admissionRejects: Number(admission.total),
+        wastedClaims: Number(admission.total),
+        claimAmplification: Number(
+          (Number(claims.total) / totalRuns).toFixed(2),
+        ),
       },
       slots: {
         maxObservedPerTenant: observedMax,
@@ -457,20 +471,40 @@ async function main() {
       dispatchLatencyMs: metrics(dispatchRows.map((row) => Number(row.ms))),
       assertions: {
         neverExceededTenantLimit: overLimitSamples.length === 0,
+        // Informational: SIGKILLs consume attempts, so a run killed twice may
+        // legitimately end up dead; that is reported, not hidden.
         allRunsSucceeded: (statusCounts.succeeded ?? 0) === totalRuns,
+        allRunsTerminal: pending === 0,
+        deadRunsExplained: Number(deadBudget.offenders) === 0,
         exactlyOneSucceededEventPerRun:
           Number(duplicateSucceeded.offenders) === 0 &&
           Number(succeededEvents.total) === (statusCounts.succeeded ?? 0),
         noSucceededWithStaleToken: Number(staleSucceeded.total) === 0,
         workerKillsExecuted: kills.length === WORKER_KILLS,
         killedWorkersHeldSlots: kills.some((kill) => kill.slotsHeld.length > 0),
+        claimAmplificationWithinBudget: Number(claims.total) / totalRuns <= 1.5,
         slotsRecoveredWithinLease:
           recovered.length ===
             kills.filter((kill) => kill.slotsHeld.length).length &&
           recovered.every((value) => value <= LEASE_MS + RECOVERY_TOLERANCE_MS),
       },
     };
-    report.passed = Object.values(report.assertions).every(Boolean);
+    const passedOn = [
+      'neverExceededTenantLimit',
+      'allRunsTerminal',
+      'deadRunsExplained',
+      'exactlyOneSucceededEventPerRun',
+      'noSucceededWithStaleToken',
+      'workerKillsExecuted',
+      'killedWorkersHeldSlots',
+      'claimAmplificationWithinBudget',
+      'slotsRecoveredWithinLease',
+    ];
+    report.passed = passedOn.every((key) => report.assertions[key] === true);
+    if (report.runs.dead > 0)
+      report.deadRunsNote =
+        'SIGKILL consumes an attempt; a run killed twice can exhaust ' +
+        'max_attempts=3. max_attempts is intentionally not raised.';
     await finish(report, report.passed ? 0 : 1);
   } catch (error) {
     await finish(
