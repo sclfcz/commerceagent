@@ -33,6 +33,9 @@ const LEASE_MS = 3_000;
 const HEARTBEAT_MS = 1_000;
 const WORKER_KILLS = 5;
 const SAMPLE_INTERVAL_MS = 100;
+// Sampling (50ms) + reaper interval (500ms) mean a slot can be observed as
+// stale slightly after the nominal lease deadline.
+const RECOVERY_TOLERANCE_MS = 500;
 const OVERALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 const USAGE_LUA = `
@@ -439,9 +442,12 @@ async function main() {
       slotRecovery: {
         samples: recoverySamples,
         recoveredWithinLease:
-          recovered.length === kills.filter((k) => k.slotsHeld.length).length,
+          recovered.length ===
+            kills.filter((kill) => kill.slotsHeld.length).length &&
+          recovered.every((value) => value <= LEASE_MS + RECOVERY_TOLERANCE_MS),
         ms: metrics(recovered),
         leaseMs: LEASE_MS,
+        toleranceMs: RECOVERY_TOLERANCE_MS,
       },
       kills: kills.map((kill) => ({
         workerId: kill.workerId,
@@ -460,7 +466,8 @@ async function main() {
         killedWorkersHeldSlots: kills.some((kill) => kill.slotsHeld.length > 0),
         slotsRecoveredWithinLease:
           recovered.length ===
-          kills.filter((kill) => kill.slotsHeld.length).length,
+            kills.filter((kill) => kill.slotsHeld.length).length &&
+          recovered.every((value) => value <= LEASE_MS + RECOVERY_TOLERANCE_MS),
       },
     };
     report.passed = Object.values(report.assertions).every(Boolean);
