@@ -454,8 +454,7 @@ snake_case、camelCase 和省略输入字段测试全部失败。
 ### 独立 Judge 验证集前置检查（2026-11-01）
 
 - 新增 `bench:judge-validation-preflight`：只接受 dev 源 run，按 case 去重，排除历史 dev Judge 报告和人工盲标包已用 case，并统计仍可用的自然内容失败。目标是至少 20 个不同的合格 dev case、至少一个自然内容失败，实质性内容失败占至少 30%；合成错误最多占 30%，不能让合成样本替代所有自然失败。preflight 只写私有计数报告，不生成标签、不调用 Judge。
-- 本机 dev 历史去重显示，曾被 Judge 使用的 case 有 40 个。对 2026-10-13 的 50 尝试 dev run，50 条在旧 summary 中标为 eligible，但逐轮复核拒绝了 3 条缺少可验证边界的旧多轮轨迹；按 case 去重并排除历史 Judge case 后只有 9 个有效新 case，且没有自然实质性失败。20 条目标样本至少需要 20 个不同 fresh case 和 1 个自然内容失败，故 readiness=false；未生成盲标包，未调用模型或 Judge。
+- 本机 dev 历史去重显示，曾被 Judge 使用的 case 有 40 个。对 2026-10-13 的 50 尝试 dev run，50 条在旧 summary 中标为 eligible，但逐轮复核拒绝了 3 条缺少可验证边界的旧多轮轨迹；按 case 去重并排除历史 Judge case 后只有 9 个有效新 case，且没有自然实质性失败。20 条目标样本至少需要 20 个不同 fresh case 和 1 个自然内容失败，故当前还缺 11 个 fresh case 和 1 个自然失败，readiness=false；未生成盲标包，未调用模型或 Judge。
 - 先期目录盘点曾解析本地 summary 以辨别 split，但没有打开 holdout 的 cases、traces、fixture ledger 或回复。正式 preflight 已改为先读 run metadata：holdout 只检查 split 字段后跳过，不解析其 summary 或 Judge artifacts。回归测试以无效 JSON 作为 holdout 报告内容，证明脚本不会打开该文件。
 - preflight 测试覆盖 30% synthetic cap、自然失败最低数、fresh case 去重、跨 dev 执行历史排除及 holdout 文件跳过；实际旧 run 检查结果保存在被 Git 忽略的 `benchmarks/results/<run-id>/judge/validation-preflight.*.private.json`。此结果不能用于 Judge 校准或模型排名；下一步需要至少 20 个新的、测量有效的 dev case 和至少一个自然内容失败，之后再盲标并评估 Judge。
-- 验证：Judge preflight、旧单轮兼容与 holdout 防护相关 3 个测试文件 29 项通过；全量 `make test` 为 364 个文件、3,263 项通过；格式、文档、benchmark/全项目类型检查、构建与 diff 检查通过。preflight 实际扫描 0 次模型/Judge 网络请求；当前历史数据不满足准备盲标包的条件。
-- 验证：preflight/轮次/Judge 专项 3 个测试文件 29 项通过；全量 `make test` 为 364 个文件、3,263 项通过；benchmark 与全项目类型检查、格式、文档、构建和 diff 检查通过。preflight 写入的私有报告仅含运行编号、hash、历史 case 数和 readiness 计数，没有回答内容、候选身份或 endpoint。没有执行外部模型/Judge 调用。
+- 验证：preflight 初版的全量门槛为 364 个文件、3,263 项通过；最终缺口计数调整后，preflight 专项 6 项、benchmark 类型检查、格式、文档和 diff 检查通过。没有因用户“先不测试”的要求重跑全量构建/测试，也没有执行任何外部模型/Judge 调用。私有 preflight 报告只含运行编号、hash、case 计数和 readiness 计数，不含回答内容、候选身份或 endpoint。

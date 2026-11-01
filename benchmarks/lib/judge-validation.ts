@@ -53,6 +53,14 @@ export function assessJudgeValidationReadiness(
   // mutation replaces its source case in the validation set; it does not add a
   // second row for the same case.
   const freshCasesRequired = input.requestedSamples;
+  const additionalFreshCasesNeeded = Math.max(
+    0,
+    freshCasesRequired - input.freshEligibleCases,
+  );
+  const additionalNaturalContentFailuresNeeded = Math.max(
+    0,
+    naturalContentFailuresRequired - input.freshNaturalContentFailures,
+  );
   const reasons: string[] = [];
   if (input.freshNaturalContentFailures < naturalContentFailuresRequired)
     reasons.push('too_few_natural_content_failures');
@@ -71,7 +79,9 @@ export function assessJudgeValidationReadiness(
     syntheticSamplesNeeded,
     naturalSamplesRequired,
     freshCasesRequired,
+    additionalFreshCasesNeeded,
     naturalContentFailuresRequired,
+    additionalNaturalContentFailuresNeeded,
     reasons,
   };
 }

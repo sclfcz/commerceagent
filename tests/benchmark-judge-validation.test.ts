@@ -40,6 +40,8 @@ test('requires enough fresh natural cases while reserving at most 30% for synthe
     syntheticSamplesNeeded: 5,
     naturalSamplesRequired: 15,
     freshCasesRequired: 20,
+    additionalFreshCasesNeeded: 0,
+    additionalNaturalContentFailuresNeeded: 0,
   });
 });
 
