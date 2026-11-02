@@ -144,6 +144,29 @@ chaos run had 0 because the retry happened after the message was visible.
 崩溃语义沿用 legacy：**执行开始后进程崩溃不会重放**，`failExpiredStartedTaskRuns`
 把它记为 `failed`，下一次 dist 对账把这个终态镜像过去；dist 的 20 次派发额度绕不过它。
 
+**取消**
+
+派发记录的 `id` 就是 SQLite 的 `task_run.id`（`submit({ id })` 显式传入），所以
+`cancelTaskRunNow` 的 cancel hook 直接用这个 id 命中记录，把 queued/retry_wait/running
+的派发记录置为 `cancelled` 并 `lease_token + 1`：正在执行的 Worker 下一次回写会被围栏
+拒绝，但**不会**被 dist 侧中止执行——终止进程的是 legacy 的取消逻辑，dist 只管派发。
+取消之后再认领不到这条记录，也不会被对账复活。
+
+**MySQL 不可用时的回退**
+
+forwarder 连续失败 `DIST_FALLBACK_AFTER_FAILURES`（默认 3）次，或首次失败后持续时间超过
+`DIST_FALLBACK_AFTER_MS`（默认 10000ms），bridge 判定派发层不可用，卸载 hooks
+（`setDistSchedulerHooks({ wake: null, cancel: null })`）并记录 `scheduler_dist_degraded`，
+pump 立刻回到 legacy 的 `claimNextTaskRun` 循环；降级期间后台每 5s 执行一次 `SELECT 1`，
+连续 2 次成功后重新安装 hooks 并记录 `scheduler_dist_recovered`。
+
+回退是安全的，因为两条路径认领的是**同一行 SQLite 记录、同一组条件、同一个租约围栏**：
+`claimNextTaskRun` 与 `claimTaskRunById` 的 WHERE 子句逐字一致，`markTaskRunExecutionStarted`
+和 `completeTaskRun` 都按 owner + token 校验，所以同一个 run 不可能被执行两次。
+MySQL 恢复后，积压的派发记录按对账规则收敛：SQLite 已终态的镜像成终态，仍可认领的
+继续走 dist。降级期间由 legacy 直接执行完的 run 从来没有派发记录，也就没有东西需要收敛
+（SQLite 始终是结果权威）。
+
 **两个围栏，不要混用**
 
 - **MySQL 租约是派发围栏**：丢失后只是停止向 dist 回写，下一次认领会通过对账收敛；

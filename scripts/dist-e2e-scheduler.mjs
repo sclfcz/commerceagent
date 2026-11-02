@@ -8,6 +8,10 @@
  *   2. crash recovery: 50 script tasks (sleep 5 + append id), kill -9 the
  *      listener, restart, then verify no duplicate side effects and that the
  *      SQLite outcome is mirrored into the dist envelope.
+ *   3. mysql outage: 100 script tasks spread over 5-40s, `mysqladmin shutdown`
+ *      for 15s in the middle, restart, then verify every run reached a terminal
+ *      state exactly once and that the bridge degraded/recovered on its own.
+ *      Needs DIST_E2E_MYSQL_START_CMD (the exact command used is in the report).
  *
  * Usage: npm run dist:e2e:scheduler
  */
@@ -27,6 +31,8 @@ const REDIS_URL =
   process.env.DIST_REDIS_URL?.trim() || 'redis://127.0.0.1:6380';
 const LATENCY_RUNS = Number(process.env.DIST_E2E_LATENCY_RUNS ?? 200);
 const CRASH_RUNS = Number(process.env.DIST_E2E_CRASH_RUNS ?? 50);
+const OUTAGE_RUNS = Number(process.env.DIST_E2E_OUTAGE_RUNS ?? 100);
+const OUTAGE_SECONDS = Number(process.env.DIST_E2E_OUTAGE_SECONDS ?? 15);
 const SCRIPT_SLEEP_SECONDS = 5;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -82,8 +88,12 @@ function spawnService(dataDir, port, distEnabled) {
   });
   child.stderrTail = '';
   child.stdoutTail = '';
+  child.logs = [];
   child.stdout.on('data', (chunk) => {
-    child.stdoutTail = `${child.stdoutTail}${chunk}`.slice(-4000);
+    const text = String(chunk);
+    child.stdoutTail = `${child.stdoutTail}${text}`.slice(-4000);
+    child.logs.push({ at: Date.now(), text });
+    if (child.logs.length > 20_000) child.logs.splice(0, 10_000);
   });
   child.stderr.on('data', (chunk) => {
     child.stderrTail = `${child.stderrTail}${chunk}`.slice(-4000);
@@ -219,6 +229,49 @@ async function waitForTerminal(dataDir, expectedRuns, timeoutMs) {
 }
 
 const TERMINAL_DIST = new Set(['succeeded', 'dead', 'cancelled']);
+
+function mysqlStopCommand() {
+  if (process.env.DIST_E2E_MYSQL_STOP_CMD)
+    return process.env.DIST_E2E_MYSQL_STOP_CMD;
+  const url = new URL(MYSQL_URL);
+  const password = decodeURIComponent(url.password);
+  const port = url.port || '3306';
+  return [
+    'mysqladmin',
+    '-h',
+    url.hostname,
+    '-P',
+    port,
+    '-u',
+    decodeURIComponent(url.username),
+    password ? `-p${password}` : '--skip-password',
+    'shutdown',
+  ].join(' ');
+}
+
+async function waitForMysql(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const db = await mysql.createConnection({
+        uri: MYSQL_URL,
+        connectTimeout: 2_000,
+      });
+      await db.query('SELECT 1');
+      await db.end();
+      return true;
+    } catch {
+      await sleep(250);
+    }
+  }
+  return false;
+}
+
+/** First stdout chunk that mentioned a bridge lifecycle event. */
+function eventAt(child, name) {
+  const hit = child.logs?.find((entry) => entry.text.includes(name));
+  return hit ? hit.at : null;
+}
 
 async function latencyRound(distEnabled) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dist-e2e-lat-'));
@@ -472,6 +525,221 @@ async function crashRound() {
   }
 }
 
+async function outageRound() {
+  const startCmd = process.env.DIST_E2E_MYSQL_START_CMD?.trim() || '';
+  const stopCmd = mysqlStopCommand();
+  if (!startCmd)
+    return {
+      skipped: true,
+      reason: 'DIST_E2E_MYSQL_START_CMD is not set',
+      mysqlControl: { stopCmd, startCmd: null },
+    };
+
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dist-e2e-outage-'));
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const sideEffects = path.join(dataDir, 'side-effects.txt');
+  fs.writeFileSync(sideEffects, '');
+  const child = spawnService(dataDir, port, true);
+  try {
+    await waitForHttp(baseUrl);
+    const { cookie, jid, folder } = await setUp(baseUrl);
+    const created = await createTasks(
+      baseUrl,
+      cookie,
+      jid,
+      folder,
+      OUTAGE_RUNS,
+      {
+        // Spread over 5-40s so the outage lands in the middle of the batch.
+        delayMs: (index) => 5_000 + ((index * 397) % 35_000),
+        script: (index) => `echo task-${index} >> '${sideEffects}'`,
+      },
+    );
+
+    // Let the early runs go through the dist path, then take MySQL away.
+    await sleep(9_000);
+    const stoppedAt = Date.now();
+    execFileSync('/bin/sh', ['-c', stopCmd], { encoding: 'utf8' });
+    await sleep(1_000);
+    const mysqlDown = !(await waitForMysql(1_000));
+
+    await sleep(OUTAGE_SECONDS * 1000);
+    const restartAt = Date.now();
+    execFileSync('/bin/sh', ['-c', startCmd], { encoding: 'utf8' });
+    const mysqlBack = await waitForMysql(180_000);
+    const mysqlBackAt = Date.now();
+
+    const rows = await waitForTerminal(dataDir, OUTAGE_RUNS, 300_000);
+
+    // The bridge probes every 5s and needs two successes: wait for the event
+    // before reading the timestamps that split the phases.
+    const recoveryDeadline = Date.now() + 120_000;
+    while (
+      !eventAt(child, 'scheduler_dist_recovered') &&
+      Date.now() < recoveryDeadline
+    )
+      await sleep(250);
+
+    const lines = fs
+      .readFileSync(sideEffects, 'utf8')
+      .split('\n')
+      .filter(Boolean);
+    const counts = new Map();
+    for (const line of lines) counts.set(line, (counts.get(line) ?? 0) + 1);
+    const duplicated = [...counts.entries()].filter(([, count]) => count > 1);
+
+    const degradedAt = eventAt(child, 'scheduler_dist_degraded');
+    const recoveredAt = eventAt(child, 'scheduler_dist_recovered');
+
+    const phaseOf = (row) => {
+      if (!row.started_at) return 'never';
+      const at = new Date(row.started_at).getTime();
+      if (degradedAt && at < degradedAt) return 'before';
+      if (recoveredAt && at < recoveredAt) return 'during';
+      return 'after';
+    };
+    const byPhase = { before: [], during: [], after: [], never: [] };
+    for (const row of rows) {
+      if (!row.started_at) {
+        byPhase.never.push(row);
+        continue;
+      }
+      byPhase[phaseOf(row)].push(
+        new Date(row.started_at).getTime() -
+          new Date(row.scheduled_for).getTime(),
+      );
+    }
+
+    const db = await mysql.createPool({
+      uri: MYSQL_URL,
+      connectionLimit: 4,
+      timezone: 'Z',
+      supportBigNumbers: true,
+    });
+    db.on('connection', (connection) => {
+      connection.query("SET time_zone = '+00:00'", () => {});
+    });
+    let distRows = [];
+    try {
+      const keys = rows.map((row) => row.id);
+      const drainDeadline = Date.now() + 90_000;
+      while (keys.length && Date.now() < drainDeadline) {
+        const [[pending]] = await db.query(
+          `SELECT COUNT(*) AS total FROM dist_task_runs
+            WHERE idempotency_key IN (${keys.map(() => '?').join(',')})
+              AND status NOT IN ('succeeded','dead','cancelled')`,
+          keys,
+        );
+        if (Number(pending.total) === 0) break;
+        await sleep(500);
+      }
+      if (keys.length) {
+        [distRows] = await db.query(
+          `SELECT idempotency_key, status, result FROM dist_task_runs
+            WHERE idempotency_key IN (${keys.map(() => '?').join(',')})`,
+          keys,
+        );
+      }
+    } finally {
+      await db.end().catch(() => {});
+    }
+
+    const distByKey = new Map(
+      distRows.map((row) => [row.idempotency_key, row]),
+    );
+    const stateMismatches = [];
+    const runsWithoutDistRow = [];
+    for (const row of rows) {
+      const dist = distByKey.get(row.id);
+      if (!dist) {
+        // Executed by the legacy fallback while MySQL was down: no envelope was
+        // ever accepted, so there is nothing to reconcile (SQLite is the
+        // authority). Counted, not treated as a mismatch.
+        runsWithoutDistRow.push(row.id);
+        continue;
+      }
+      if (row.status === 'success' && dist.status !== 'succeeded')
+        stateMismatches.push({ runId: row.id, reason: 'dist_not_succeeded' });
+      if (row.status === 'failed' && !TERMINAL_DIST.has(dist.status))
+        stateMismatches.push({ runId: row.id, reason: 'dist_not_terminal' });
+    }
+
+    return {
+      tasks: created.length,
+      runs: rows.length,
+      statuses: rows.reduce((acc, row) => {
+        acc[row.status] = (acc[row.status] ?? 0) + 1;
+        return acc;
+      }, {}),
+      mysqlControl: { stopCmd, startCmd },
+      stoppedAtMs: stoppedAt,
+      mysqlDown,
+      degradedAtMs: degradedAt,
+      restartAtMs: restartAt,
+      recoveredAtMs: recoveredAt,
+      mysqlBackAtMs: mysqlBackAt,
+      mysqlBack,
+      outageMs: degradedAt && recoveredAt ? recoveredAt - degradedAt : null,
+      // What the *outage window* looked like from the outside.
+      requestedOutageMs: OUTAGE_SECONDS * 1000,
+      sideEffectLines: lines.length,
+      duplicateSideEffects: duplicated,
+      startLatencyMsByPhase: {
+        before: stats(byPhase.before),
+        during: stats(byPhase.during),
+        after: stats(byPhase.after),
+      },
+      runsNeverStarted: byPhase.never.length,
+      distRows: distRows.length,
+      stateMismatches: stateMismatches.slice(0, 5),
+      stateMismatchCount: stateMismatches.length,
+      stderrTail: child.stderrTail.slice(-500),
+      stdoutTail: child.stdoutTail.slice(-2000),
+      bridgeEvents: (child.logs ?? [])
+        .filter((entry) => /scheduler_(dist|forward|probe)/.test(entry.text))
+        .slice(-10)
+        .map((entry) => ({
+          at: entry.at,
+          text: entry.text
+            .replace(/\x1b\[[0-9;]*m/g, '')
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .join(' | ')
+            .slice(0, 220),
+        })),
+      assertions: {
+        allRunsTerminal: rows.every(
+          (row) => !['queued', 'running', 'retry_wait'].includes(row.status),
+        ),
+        sideEffectsAtMostOncePerTask: duplicated.length === 0,
+        sideEffectLinesMatchRuns: lines.length === rows.length,
+        degradedDetected: degradedAt !== null,
+        recoveredDetected: recoveredAt !== null,
+        mysqlActuallyWentDown: mysqlDown && mysqlBack,
+        sqliteMatchesDistMirror: stateMismatches.length === 0,
+        distRowsAllTerminal: distRows.every((row) =>
+          TERMINAL_DIST.has(row.status),
+        ),
+      },
+    };
+  } finally {
+    child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        resolve();
+      }, 20_000);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const startedAt = Date.now();
   const runId = `dist-e2e-scheduler-${new Date().toISOString().replace(/[:.]/g, '-')}`;
@@ -489,6 +757,8 @@ async function main() {
     config: {
       latencyRuns: LATENCY_RUNS,
       crashRuns: CRASH_RUNS,
+      outageRuns: OUTAGE_RUNS,
+      outageSeconds: OUTAGE_SECONDS,
       scriptSleepSeconds: SCRIPT_SLEEP_SECONDS,
     },
   };
@@ -500,7 +770,10 @@ async function main() {
       report.latencyOn = await latencyRound(true);
     }
     notify('crash recovery');
-    report.crash = await crashRound();
+    if (process.env.DIST_E2E_SKIP_CRASH !== '1')
+      report.crash = await crashRound();
+    notify('mysql outage');
+    report.outage = await outageRound();
     report.comparison =
       report.latencyOn && report.latencyOff
         ? {
@@ -530,7 +803,13 @@ async function main() {
                 : null,
           }
         : null;
-    report.passed = Object.values(report.crash.assertions).every(Boolean);
+    report.passed =
+      (report.crash
+        ? Object.values(report.crash.assertions).every(Boolean)
+        : true) &&
+      (report.outage.skipped !== true
+        ? Object.values(report.outage.assertions).every(Boolean)
+        : true);
   } catch (error) {
     report.passed = false;
     report.error = error instanceof Error ? error.message : String(error);

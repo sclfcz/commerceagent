@@ -829,6 +829,14 @@ const SCHEDULER_RUNNER_ID = `${process.pid}:${randomUUID()}`;
 let distSchedulerWake: (() => void) | null = null;
 let distSchedulerCancel: ((runId: string) => void) | null = null;
 
+/** Test/inspection seam: which dispatch hooks are currently installed. */
+export function getDistSchedulerHooks(): {
+  wake: boolean;
+  cancel: boolean;
+} {
+  return { wake: !!distSchedulerWake, cancel: !!distSchedulerCancel };
+}
+
 export function setDistSchedulerHooks(hooks: {
   wake?: (() => void) | null;
   cancel?: ((runId: string) => void) | null;
@@ -3253,7 +3261,11 @@ function pumpTaskNotificationRetries(deps: SchedulerDependencies): void {
   }
 }
 
-function pumpTaskScheduler(deps: SchedulerDependencies): void {
+/**
+ * One scheduler tick. Exported so the dispatch bridge can be tested by driving
+ * the pump exactly as the timer does.
+ */
+export function pumpTaskScheduler(deps: SchedulerDependencies): void {
   if (schedulerPumping) return;
   if (deps.queue.isShuttingDown?.()) {
     clearSchedulerTimer();

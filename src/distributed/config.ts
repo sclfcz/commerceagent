@@ -63,6 +63,13 @@ export interface DistributedConfig {
   unknownSweepMs: number;
   /** Grace window after a client timeout before declaring "not sent". */
   effectSettleMs: number;
+  /**
+   * Scheduler bridge: consecutive forwarder failures that force the pump back
+   * to the legacy claim loop (MySQL is down; SQLite must keep executing).
+   */
+  fallbackAfterFailures: number;
+  /** Scheduler bridge: outage duration that forces the same fallback. */
+  fallbackAfterMs: number;
 }
 
 function readInt(
@@ -217,6 +224,14 @@ export function loadDistributedConfig(
     effectSettleMs: readInt(env, 'DIST_EFFECT_SETTLE_MS', 2_000, {
       min: 0,
       max: 600_000,
+    }),
+    fallbackAfterFailures: readInt(env, 'DIST_FALLBACK_AFTER_FAILURES', 3, {
+      min: 1,
+      max: 1000,
+    }),
+    fallbackAfterMs: readInt(env, 'DIST_FALLBACK_AFTER_MS', 10_000, {
+      min: 100,
+      max: 3_600_000,
     }),
   };
   if (config.backoffBaseMs > config.backoffMaxMs)

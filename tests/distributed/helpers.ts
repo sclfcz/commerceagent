@@ -134,6 +134,8 @@ export function testConfig(
     effectTimeoutMs: 5_000,
     unknownSweepMs: 60_000,
     effectSettleMs: 2_000,
+    fallbackAfterFailures: 3,
+    fallbackAfterMs: 10_000,
     ...overrides,
     ...(overrides.claimBatch === undefined
       ? { claimBatch: overrides.concurrency ?? 1 }

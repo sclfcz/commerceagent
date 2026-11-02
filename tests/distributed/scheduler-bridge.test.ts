@@ -8,6 +8,7 @@ const tmpStoreDir = path.join(tmpDir, 'db');
 const tmpGroupsDir = path.join(tmpDir, 'groups');
 fs.mkdirSync(tmpStoreDir, { recursive: true });
 fs.mkdirSync(tmpGroupsDir, { recursive: true });
+fs.mkdirSync(path.join(tmpGroupsDir, 'bridge-test'), { recursive: true });
 
 vi.mock('../../src/config.js', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();
@@ -23,7 +24,7 @@ vi.mock('../../src/logger.js', () => ({
 }));
 
 const db = await import('../../src/db.js');
-const { ScheduledTaskExecutor, SchedulerForwarder } =
+const { ScheduledTaskExecutor, SchedulerForwarder, createSchedulerBridge } =
   await import('../../src/distributed/scheduled-bridge.js');
 const { makeRepository, createTestPool, describeMysql, acquireSuiteLock } =
   await import('./helpers.js');
@@ -34,6 +35,8 @@ const { testConfig } = await import('./helpers.js');
 import type { Pool } from '../../src/distributed/mysql.js';
 import type { RunRepository } from '../../src/distributed/run-repository.js';
 import type { SchedulerDependencies } from '../../src/task-scheduler.js';
+const { cancelTaskRunNow, executeClaimedTaskRun, getDistSchedulerHooks } =
+  await import('../../src/task-scheduler.js');
 import type { ClaimedTaskRun, TaskRun } from '../../src/types.js';
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 240_000 });
@@ -72,6 +75,20 @@ describeMysql('scheduled task bridge', () => {
 
   beforeAll(async () => {
     db.initDatabase();
+    // Host execution is gated on a *live* administrator owner.
+    const now = new Date().toISOString();
+    db.createUser({
+      id: 'user-1',
+      username: 'user-1',
+      password_hash: 'hash',
+      display_name: 'Bridge Owner',
+      role: 'admin',
+      status: 'active',
+      permissions: [],
+      must_change_password: false,
+      created_at: now,
+      updated_at: now,
+    } as never);
     sqlite = new Database(path.join(tmpStoreDir, 'messages.db'));
     pool = await createTestPool();
     release = await acquireSuiteLock();
@@ -85,12 +102,28 @@ describeMysql('scheduled task bridge', () => {
   });
 
   beforeEach(async () => {
+    // Leftovers from earlier tests would be picked up by claimNextTaskRun.
+    for (const run of db.getTaskRunsByStatus(
+      ['queued', 'retry_wait', 'running'],
+      500,
+    ))
+      db.cancelTaskRun(run.id, 'test cleanup');
     await pool.query('DELETE FROM dist_task_run_events');
     await pool.query('DELETE FROM dist_outbox');
     await pool.query('DELETE FROM dist_task_runs');
   });
 
   const deps = {
+    queue: {
+      isGroupMutationPaused: () => false,
+      // Legacy queue contract: accept the job and run it out-of-band.
+      enqueueTask: (_jid: string, _taskId: string, fn: () => unknown) => {
+        setTimeout(() => void fn(), 0);
+        return true;
+      },
+    },
+    sendMessage: async () => ({}),
+    broadcastStreamEvent: () => {},
     registeredGroups: () => ({
       [CHAT_JID]: {
         folder: GROUP_FOLDER,
@@ -456,5 +489,212 @@ describeMysql('scheduled task bridge', () => {
       await admit({ ...baseClaim, payload: { skipTenantAdmission: false } }),
     ).toBe(true);
     expect(acquire).toHaveBeenCalledTimes(1);
+  });
+  const waitForDistRow = async (
+    runId: string,
+  ): Promise<Record<string, any>> => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const rows = await distRows(runId);
+      if (rows.length) return rows[0];
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`no dist row for ${runId}`);
+  };
+
+  const waitForDistStatus = async (runId: string, status: string) => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const [row] = await distRows(runId);
+      if (row?.status === status) return row;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`dist row ${runId} never reached ${status}`);
+  };
+
+  test('cancel: a running task flips its dist envelope immediately', async () => {
+    const sqliteRun = seedRun();
+    // Long poll: the embedded worker must not race this test (we drive the
+    // envelope state by hand). Its first claim runs before the forwarder has
+    // submitted anything, so a 60s interval keeps it out of the way.
+    const { bridge } = createSchedulerBridge(
+      { scheduler: deps, logger: () => {} },
+      testConfig({ pollMs: 60_000 }),
+      { repository },
+    );
+    try {
+      bridge.start();
+      const dist = await waitForDistRow(sqliteRun.id);
+      // Legacy owns the SQLite lease: the dist cancel must address the
+      // envelope only, never the execution fence.
+      const legacy = db.claimTaskRunById(sqliteRun.id, 'legacy-owner', 60_000)!;
+      db.markTaskRunExecutionStarted(
+        legacy.id,
+        legacy.lease_owner,
+        legacy.lease_token,
+      );
+      // The envelope id is the SQLite run id, so id-keyed cancel matches.
+      expect(dist.id).toBe(sqliteRun.id);
+      await pool.query(
+        "UPDATE dist_task_runs SET status='running', lease_owner='bridge-worker', lease_token=lease_token+1, lease_expires_at=NOW(3)+INTERVAL 60 SECOND WHERE id=?",
+        [sqliteRun.id],
+      );
+      expect(getDistSchedulerHooks()).toEqual({ wake: true, cancel: true });
+
+      expect(cancelTaskRunNow(sqliteRun.id).success).toBe(true);
+
+      // Cancelled through the hook, not through a reconcile round-trip.
+      const cancelled = await waitForDistStatus(sqliteRun.id, 'cancelled');
+      expect(cancelled.finished_at).toBeTruthy();
+      expect(db.getTaskRunById(sqliteRun.id)?.status).toBe('cancelled');
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test('cancel: a queued task cancels its envelope and is never claimed', async () => {
+    const sqliteRun = seedRun();
+    const { bridge } = createSchedulerBridge(
+      { scheduler: deps, logger: () => {} },
+      testConfig({ pollMs: 60_000 }),
+      { repository },
+    );
+    try {
+      bridge.start();
+      // `flush()` is single-flight: the start-time flush may still be running.
+      await waitForDistRow(sqliteRun.id);
+
+      expect(cancelTaskRunNow(sqliteRun.id).success).toBe(true);
+      await waitForDistStatus(sqliteRun.id, 'cancelled');
+      expect(db.getTaskRunById(sqliteRun.id)?.status).toBe('cancelled');
+
+      // No worker can pick it up any more ...
+      const claimed = await repository.claim('other-worker', 10);
+      expect(claimed.map((row) => row.runId)).not.toContain(sqliteRun.id);
+
+      // ... and a stale envelope cannot resurrect it.
+      let executions = 0;
+      const executor = executorFor(async () => {
+        executions += 1;
+      });
+      await runDist(
+        sqliteRun.id,
+        executor,
+        payloadOf((await distRows(sqliteRun.id))[0]),
+      );
+      expect(executions).toBe(0);
+      expect((await distRows(sqliteRun.id))[0].status).toBe('cancelled');
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test('mysql outage: the pump falls back to legacy claiming and recovers', async () => {
+    let down = true;
+    const flaky = Object.create(repository) as RunRepository;
+    flaky.submit = async (input) => {
+      if (down) throw new Error('mysql_down');
+      return repository.submit(input);
+    };
+    const { bridge } = createSchedulerBridge(
+      { scheduler: deps, logger: () => {} },
+      testConfig({
+        pollMs: 60_000,
+        fallbackAfterFailures: 3,
+        fallbackAfterMs: 60_000,
+      }),
+      {
+        repository: flaky,
+        probe: async () => {
+          if (down) throw new Error('mysql_down');
+          return 1;
+        },
+      },
+    );
+    try {
+      bridge.start();
+      const sqliteRun = seedRun();
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await bridge.forwarder.flush();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      await vi.waitFor(
+        () =>
+          expect(getDistSchedulerHooks()).toEqual({
+            wake: false,
+            cancel: false,
+          }),
+        { timeout: 2_000 },
+      );
+      expect(bridge.health.state).toBe('degraded');
+      expect(bridge.health.consecutiveFailures).toBeGreaterThanOrEqual(3);
+      // Nothing was dispatched while MySQL was down.
+      expect((await distRows(sqliteRun.id)).length).toBe(0);
+
+      // The legacy claim loop still runs the task, exactly once.
+      const claim = db.claimNextTaskRun('legacy-after-degrade', 60_000);
+      expect(claim?.id).toBe(sqliteRun.id);
+      await executeClaimedTaskRun(claim!, deps);
+      let afterLegacy = db.getTaskRunById(sqliteRun.id);
+      for (let attempt = 0; attempt < 200; attempt++) {
+        if (
+          afterLegacy &&
+          !['queued', 'running', 'retry_wait'].includes(afterLegacy.status)
+        )
+          break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        afterLegacy = db.getTaskRunById(sqliteRun.id);
+      }
+      expect({
+        status: afterLegacy?.status,
+        error: afterLegacy?.error,
+      }).toEqual({ status: 'success', error: null });
+
+      // Two successful probes reinstall the dispatch hooks.
+      down = false;
+      await bridge.health.probeOnce();
+      await bridge.health.probeOnce();
+      expect(bridge.health.state).toBe('healthy');
+      await vi.waitFor(
+        () =>
+          expect(getDistSchedulerHooks()).toEqual({ wake: true, cancel: true }),
+        { timeout: 2_000 },
+      );
+
+      // New work goes through the dist path again, still executed once.
+      const next = seedRun();
+      const envelope = await waitForDistRow(next.id);
+      expect(envelope.status).toBe('queued');
+      await pool.query(
+        "UPDATE dist_task_runs SET status='running', lease_owner='bridge-worker', lease_expires_at=NOW(3)+INTERVAL 60 SECOND WHERE id=?",
+        [next.id],
+      );
+      let executions = 0;
+      const executor = executorFor(async (claimed) => {
+        executions += 1;
+        db.markTaskRunExecutionStarted(
+          claimed.id,
+          claimed.lease_owner,
+          claimed.lease_token,
+        );
+        db.completeTaskRun(
+          claimed.id,
+          claimed.lease_owner,
+          claimed.lease_token,
+          {
+            status: 'success',
+            result: 'dist',
+            notificationStatus: 'skipped',
+          },
+        );
+      });
+      await runDist(next.id, executor, payloadOf(envelope));
+      expect(executions).toBe(1);
+      expect((await distRows(next.id))[0].status).toBe('succeeded');
+      // The run executed during the outage was not dispatched twice.
+      expect(db.getTaskRunById(sqliteRun.id)?.status).toBe('success');
+      expect((await distRows(sqliteRun.id)).length).toBe(0);
+    } finally {
+      await bridge.stop();
+    }
   });
 });

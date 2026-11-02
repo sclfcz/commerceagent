@@ -85,6 +85,12 @@ export interface SubmitInput {
   payload: Record<string, unknown>;
   maxAttempts?: number;
   /**
+   * Explicit primary key. Callers that mirror a foreign id (the scheduler
+   * bridge uses the SQLite `task_run.id`) pass it so that id-keyed operations
+   * — cancel above all — address the same row without a lookup.
+   */
+  id?: string;
+  /**
    * When the run becomes claimable. Defaults to "now" (database clock).
    * The outbox row copies this value, so a relay cannot publish early.
    */
@@ -244,7 +250,7 @@ export class RunRepository {
     if (Buffer.byteLength(payloadJson, 'utf8') > MAX_PAYLOAD_BYTES)
       throw new Error('payload_too_large');
     const payloadHash = payloadDigest(input.payload ?? {});
-    const id = randomUUID();
+    const id = input.id ?? randomUUID();
 
     try {
       const run = await withTransaction(this.pool, async (connection) => {
