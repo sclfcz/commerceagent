@@ -14,6 +14,10 @@ export function createRedis(
 ): Redis {
   return new Redis(url, {
     maxRetriesPerRequest: 1,
+    // Bounded reconnect backoff: without a cap a restarted Redis can leave a
+    // client waiting seconds before it retries, which shows up directly in the
+    // IM ownership recovery time (lease + renew + ~500ms upper bound).
+    retryStrategy: (times) => Math.min(times * 100, 500),
     ...overrides,
   });
 }

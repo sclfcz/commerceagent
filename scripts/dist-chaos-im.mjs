@@ -58,6 +58,7 @@ function percentile(values, q) {
 function startPlatform(mode) {
   const state = {
     mode,
+    ackedSeq: new Map(),
     streams: new Map(),
     connections: new Map(),
     replies: new Map(),
@@ -122,10 +123,12 @@ function startPlatform(mode) {
         credential,
         instance,
         conn,
-        // A fresh socket starts at the head: real platforms do not replay old
-        // messages to a new connection.
+        // push: a fresh socket starts at the head (no replay).
+        // buffered: it resumes at the last acknowledged offset, so messages the
+        // previous owner never acked are delivered again.
         baseSeq: stream.seq,
-        baseOffset: mode === 'buffered' ? stream.seq : 0,
+        baseOffset:
+          mode === 'buffered' ? (state.ackedSeq.get(credential) ?? 0) : 0,
         lastPollAt: Date.now(),
         inFlight: 0,
         closed: false,
@@ -153,6 +156,10 @@ function startPlatform(mode) {
         const keep = stream.messages.filter((message) => message.seq > ack);
         stream.messages.length = 0;
         stream.messages.push(...keep);
+        state.ackedSeq.set(
+          credential,
+          Math.max(state.ackedSeq.get(credential) ?? 0, ack),
+        );
       }
       const since =
         mode === 'buffered'
@@ -331,19 +338,31 @@ async function runScenario(options) {
     return counts;
   };
 
-  /** The instance that actually holds the most leases, or a hard failure. */
+  /**
+   * The instance that both holds leases and has live platform connections.
+   *
+   * Leases alone are not enough: a freshly started instance can hold leases
+   * while its sockets are still being opened, and freezing that one produces a
+   * zombie with nothing to observe.
+   */
   const topOwner = async (what) => {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
-      const counts = await ownersByInstance();
+      const leases = await ownersByInstance();
       const liveIds = new Set(live().map((worker) => worker.instanceId));
-      const best = [...counts.entries()]
-        .filter(([instance, count]) => liveIds.has(instance) && count > 0)
-        .sort((a, b) => b[1] - a[1])[0];
+      const counts = new Map();
+      for (const conn of state.connections.values()) {
+        if (conn.closed) continue;
+        if (!liveIds.has(conn.instance)) continue;
+        const leaseHeld = (leases.get(conn.instance) ?? 0) > 0;
+        if (!leaseHeld) continue;
+        counts.set(conn.instance, (counts.get(conn.instance) ?? 0) + 1);
+      }
+      const best = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
       if (best) return { worker: workers.get(best[0]), count: best[1] };
       await sleep(200);
     }
-    throw new Error(`${what}:no_lease_holder_after_10s`);
+    throw new Error(`${what}:no_connected_lease_holder_after_10s`);
   };
 
   const failover = { SIGKILL: [], SIGTERM: [], takeover: [] };
@@ -758,7 +777,22 @@ async function runScenario(options) {
     workerStats,
   };
 
-  scenarioAssertions.noDuplicateReplies = duplicates.length === 0;
+  // push: a duplicate is a real bug. buffered: a reply that was delivered but
+  // killed before its offset was acknowledged is legitimately re-delivered, so
+  // duplicates are allowed but must come from *different* instances.
+  const duplicatesFromOneInstance = duplicates.filter(
+    (entry) => new Set(entry.by.map((who) => who.split('/')[0])).size === 1,
+  );
+  scenarioAssertions.noDuplicateReplies =
+    mode === 'buffered'
+      ? duplicatesFromOneInstance.length === 0
+      : duplicates.length === 0;
+  if (mode === 'buffered')
+    scenarioAssertions.bufferedDuplicatesAreAtLeastOnce =
+      duplicates.length === 0 ||
+      duplicates.every(
+        (entry) => new Set(entry.by.map((who) => who.split('/')[0])).size > 1,
+      );
   scenarioAssertions.overlapMeasured = typeof overlap.totalMs === 'number';
   if (!freezeChain) {
     scenarioAssertions.sigkillSamples =
@@ -783,7 +817,7 @@ async function runScenario(options) {
       redisOutageResult.maxOnlineDuringOutage === 0;
     scenarioAssertions.recoveredWithinWindow =
       redisOutageResult.recoveryMs !== null &&
-      redisOutageResult.recoveryMs <= LEASE_MS + RENEW_MS + 3_000;
+      redisOutageResult.recoveryMs <= LEASE_MS + RENEW_MS + 1_000;
   }
   result.assertions = scenarioAssertions;
   return result;

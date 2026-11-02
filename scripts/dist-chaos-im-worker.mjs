@@ -104,6 +104,13 @@ function channelFor(credential, jid, userId) {
   let seq = 0;
   let acked = 0;
   let loop = null;
+  const offsets = new Map();
+  const advanceAck = (messageId, offset) => {
+    if (PLATFORM_MODE !== 'buffered') return;
+    if (acked >= offset) return;
+    acked = offset;
+    offsets.delete(messageId);
+  };
   return {
     channelType: 'feishu',
     isConnected: () => connected,
@@ -117,6 +124,8 @@ function channelFor(credential, jid, userId) {
         instance: INSTANCE_ID,
         conn: connId,
       });
+      // Only now is the reply actually out: advance the acknowledged offset.
+      advanceAck(messageId, offsets.get(messageId) ?? 0);
     },
     async connect(opts) {
       const opened = await request(
@@ -144,10 +153,10 @@ function channelFor(credential, jid, userId) {
               // acknowledged to the platform.
               const owned = manager.isChannelOwner(userId, 'feishu');
               try {
+                if (PLATFORM_MODE === 'buffered')
+                  offsets.set(message.id, message.offset ?? 0);
                 opts.onMessage?.(jid, `reply:${message.id}`, 'chaos');
-                if (PLATFORM_MODE === 'buffered' && owned)
-                  acked = Math.max(acked, message.offset ?? 0);
-                else if (PLATFORM_MODE === 'buffered')
+                if (PLATFORM_MODE === 'buffered' && !owned)
                   process.stdout.write(
                     `${JSON.stringify({ event: 'offset_not_acked', message: message.id })}\n`,
                   );

@@ -133,12 +133,20 @@ async function main() {
     DIST_WORKER_CONCURRENCY: '8',
   };
   say('▶ start 3 workers + 2 relays');
-  const workers = [0, 1, 2].map((index) =>
-    startProcess(`worker-${index}`, 'src/distributed/cli-worker.ts', {
-      ...commonEnv,
-      DIST_WORKER_ID: `demo-worker-${index}`,
-    }),
-  );
+  const workerByDuty = new Map();
+  const workers = [0, 1, 2].map((index) => {
+    const duty = `demo-worker-${index}`;
+    const child = startProcess(
+      `worker-${index}`,
+      'src/distributed/cli-worker.ts',
+      {
+        ...commonEnv,
+        DIST_WORKER_ID: duty,
+      },
+    );
+    workerByDuty.set(duty, { child, index, name: `worker-${index}` });
+    return child;
+  });
   const relays = [0, 1].map(() =>
     startProcess('relay', 'src/distributed/cli-relay.ts', commonEnv),
   );
@@ -162,25 +170,62 @@ async function main() {
       taskId: `demo-task-${index}`,
       idempotencyKey: key,
       maxAttempts: 5,
-      payload: { sleepMs: 150 },
+      payload: { sleepMs: 1_000 + Math.floor(Math.random() * 2_000) },
     });
   }
   say(`  submitted in ${Date.now() - submittedAt} ms`);
 
-  const sleepMs = 3_000;
-  await sleep(sleepMs);
-  say('▶ inject: kill -9 one worker, restart RabbitMQ');
-  const victim = workers[Math.floor(Math.random() * workers.length)];
+  // Wait until the fleet is busy, then kill the worker that holds the most
+  // running runs — killing an idle worker would demo nothing.
+  say('▶ inject: kill -9 a busy worker, restart RabbitMQ mid-backlog');
+  const runningDeadline = Date.now() + 30_000;
+  let victimDuty = null;
+  let heldRunIds = [];
+  while (Date.now() < runningDeadline) {
+    const [owners] = await pool.query(
+      `SELECT lease_owner AS owner, COUNT(*) AS n FROM dist_task_runs
+        WHERE status = 'running' AND lease_owner IS NOT NULL
+        GROUP BY lease_owner ORDER BY n DESC LIMIT 1`,
+    );
+    const candidate = owners[0];
+    if (
+      candidate &&
+      workerByDuty.has(candidate.owner) &&
+      Number(candidate.n) >= 2
+    ) {
+      victimDuty = candidate.owner;
+      const [held] = await pool.query(
+        "SELECT id FROM dist_task_runs WHERE status = 'running' AND lease_owner = ?",
+        [victimDuty],
+      );
+      heldRunIds = held.map((row) => row.id);
+      break;
+    }
+    await sleep(250);
+  }
+  const victimEntry = victimDuty
+    ? workerByDuty.get(victimDuty)
+    : { child: workers[0], index: 0, name: 'worker-0' };
   const killedAt = Date.now();
-  victim.kill('SIGKILL');
-  workers[workers.indexOf(victim)] = startProcess(
-    victim.name,
+  victimEntry.child.kill('SIGKILL');
+  workers[victimEntry.index] = startProcess(
+    victimEntry.name,
     'src/distributed/cli-worker.ts',
-    {
-      ...commonEnv,
-      DIST_WORKER_ID: `${victim.name}-restarted`,
-    },
+    { ...commonEnv, DIST_WORKER_ID: `${victimEntry.name}-restarted` },
   );
+  say(
+    `  killed ${victimDuty ?? 'worker-0'} (${heldRunIds.length} running runs)`,
+  );
+
+  // Restart RabbitMQ while there is still real backlog (< 50% completed).
+  const halfDeadline = Date.now() + 60_000;
+  while (Date.now() < halfDeadline) {
+    const [[done]] = await pool.query(
+      "SELECT COALESCE(SUM(status = 'succeeded'), 0) AS done FROM dist_task_runs",
+    );
+    if (Number(done.done) < TASKS / 2) break;
+    await sleep(100);
+  }
   const rabbitRestartAt = Date.now();
   await run('docker', ['restart', 'commerceagent-dist-rabbit']);
   const rabbitReadyAt = Date.now();
@@ -224,13 +269,41 @@ async function main() {
         GROUP BY r.id, r.created_at
      ) t`,
   );
-  const [[recovery]] = await pool.query(
-    `SELECT MIN(created_at) AS at FROM dist_task_run_events
+  const [[afterMq]] = await pool.query(
+    `SELECT COUNT(*) AS total FROM dist_task_run_events
       WHERE event = 'claimed' AND created_at >= FROM_UNIXTIME(?)`,
     [rabbitRestartAt / 1000],
   );
 
-  const ok = Number(totals.succeeded) === TASKS;
+  // How long did the killed worker's runs take to be claimed by someone else?
+  let recoveryP50 = null;
+  let recoveryMax = null;
+  if (heldRunIds.length) {
+    const [rows] = await pool.query(
+      `SELECT e.run_id, MIN(e.created_at) AS at
+         FROM dist_task_run_events e
+        WHERE e.event = 'claimed' AND e.created_at >= FROM_UNIXTIME(?)
+          AND e.run_id IN (${heldRunIds.map(() => '?').join(',')})
+        GROUP BY e.run_id`,
+      [killedAt / 1000, ...heldRunIds],
+    );
+    const delays = rows
+      .map((row) => new Date(row.at).getTime() - killedAt)
+      .filter((value) => Number.isFinite(value) && value >= 0)
+      .sort((a, b) => a - b);
+    if (delays.length) {
+      recoveryP50 = delays[Math.floor(delays.length / 2)];
+      recoveryMax = delays[delays.length - 1];
+    }
+  }
+
+  const checks = {
+    allSucceeded: Number(totals.succeeded) === TASKS,
+    noDuplicates: Number(dups.runs) === 0,
+    reapedAfterKill: Number(reaped.total) > 0,
+    claimsAfterMqRestart: Number(afterMq.total) > 0,
+  };
+  const ok = Object.values(checks).every(Boolean);
   say('');
   say('┌────────────────────────────┬──────────────────────────────┐');
   say('│ 指标                       │ 值                           │');
@@ -243,18 +316,20 @@ async function main() {
   row('needs_review', Number(totals.needsReview));
   row('duplicate completions', Number(dups.runs));
   row('reaped (lease recovery)', Number(reaped.total));
-  row('dispatch latency p95', `${Number(latency.p95 ?? 0).toFixed(0)} ms`);
-  row('worker killed at', `${((killedAt - submittedAt) / 1000).toFixed(1)}s`);
+  row('queue wait max', `${Number(latency.p95 ?? 0).toFixed(0)} ms`);
+  row('killed worker', victimDuty ?? 'worker-0');
+  row('runs it held', heldRunIds.length);
+  row('their recovery p50', recoveryP50 === null ? 'n/a' : `${recoveryP50} ms`);
+  row('their recovery max', recoveryMax === null ? 'n/a' : `${recoveryMax} ms`);
   row(
     'mq restart ready',
     `${((rabbitReadyAt - rabbitRestartAt) / 1000).toFixed(1)}s`,
   );
+  row('claims after mq restart', Number(afterMq.total));
   row('drain time', `${((drainedAt - submittedAt) / 1000).toFixed(1)}s`);
-  row(
-    'claims after mq restart',
-    recovery.at ? new Date(recovery.at).toISOString().slice(11, 23) : 'none',
-  );
   say('└────────────────────────────┴──────────────────────────────┘');
+  for (const [name, value] of Object.entries(checks))
+    say(`  ${value ? '✓' : '✗'} ${name}`);
   say(ok ? '✅ demo passed' : '❌ demo failed');
   say(`total ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
 
