@@ -25,6 +25,12 @@ const PLATFORM_MODE =
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-chaos-worker-'));
 process.env.COMMERCEAGENT_DATA_DIR = dataDir;
 
+const emit = (event, detail = {}) => {
+  process.stdout.write(
+    `${JSON.stringify({ event, at: Date.now(), ...detail })}\n`,
+  );
+};
+
 function request(method, urlPath, body) {
   return new Promise((resolve, reject) => {
     const url = new URL(urlPath, PLATFORM);
@@ -95,8 +101,10 @@ const ownership = new ConnectionOwnership({
   leaseMs: LEASE_MS,
   renewMs: RENEW_MS,
   onEvent: (event, detail) => {
+    // One JSON line per event: the driver collects these from stdout, so a
+    // truncated /stats buffer can never hide the recovery stages again.
+    emit('ownership_event', { name: event, detail: detail ?? null });
     timeline.push({ event, at: Date.now(), detail: detail ?? null });
-    if (timeline.length > 200) timeline.splice(0, 100);
   },
 });
 const manager = new IMConnectionManager();
@@ -124,12 +132,22 @@ function channelFor(credential, jid, userId) {
     async sendMessage(_chatId, text) {
       // `reply:<messageId>` payloads are what the driver counts.
       const messageId = text.startsWith('reply:') ? text.slice(6) : text;
-      await request('POST', '/reply', {
-        credential,
-        messageId,
-        instance: INSTANCE_ID,
-        conn: connId,
-      });
+      try {
+        await request('POST', '/reply', {
+          credential,
+          messageId,
+          instance: INSTANCE_ID,
+          conn: connId,
+        });
+        emit('reply_ok', { credential, messageId });
+      } catch (error) {
+        emit('reply_failed', {
+          credential,
+          messageId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
       // Only now is the reply actually out: advance the acknowledged offset.
       advanceAck(messageId, offsets.get(messageId) ?? 0);
     },
@@ -166,11 +184,18 @@ function channelFor(credential, jid, userId) {
                   resolve();
                   continue;
                 }
+                emit('stream_line', {
+                  credential,
+                  id: message.id,
+                  offset: message.offset,
+                });
                 const owned = manager.isChannelOwner(userId, 'feishu');
+                emit('gate', { credential, id: message.id, owned });
                 if (!owned) {
                   timeline.push({ event: 'inbound_not_owner', at: Date.now() });
                 }
                 try {
+                  if (!opts.onMessage) emit('no_onmessage', { credential });
                   opts.onMessage?.(jid, `reply:${message.id}`, 'chaos');
                 } catch {
                   /* handler failure must not kill the stream */
@@ -315,7 +340,7 @@ process.stdout.write(
 const statsTimer = setInterval(() => {
   void request('POST', '/stats', {
     instance: INSTANCE_ID,
-    timeline: timeline.slice(-40),
+    timeline: timeline.slice(-200),
     ...manager.getConnectionOwnershipStats(),
     standby: manager.getStandbyAccounts().length,
   }).catch(() => {});

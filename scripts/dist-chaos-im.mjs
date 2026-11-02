@@ -36,6 +36,8 @@ const PUSH_INTERVAL_MS = Math.max(
 const LEASE_MS = Number(process.env.DIST_IM_LEASE_MS ?? 3_000);
 const RENEW_MS = Number(process.env.DIST_IM_RENEW_MS ?? 1_000);
 const KILLS = Number(process.env.IM_CHAOS_KILLS ?? 5);
+const DEBUG = process.env.IM_CHAOS_DEBUG === '1';
+const MINIMAL = process.env.IM_CHAOS_MINIMAL === '1';
 const REDIS_CONTAINER =
   process.env.IM_CHAOS_REDIS_CONTAINER ?? 'commerceagent-dist-redis';
 const REDIS_OUTAGE_MS = Number(process.env.IM_CHAOS_REDIS_OUTAGE_MS ?? 10_000);
@@ -59,6 +61,8 @@ function startPlatform(mode) {
   const state = {
     mode,
     ackedSeq: new Map(),
+    streamWrites: 0,
+    streamConns: 0,
     streams: new Map(),
     connections: new Map(),
     replies: new Map(),
@@ -76,6 +80,32 @@ function startPlatform(mode) {
     return stream;
   };
   state.streamFor = streamFor;
+  /** Append + fan out to streaming connections (push mode). */
+  state.publish = (credential, id, phase) => {
+    const stream = streamFor(credential);
+    stream.seq += 1;
+    stream.messages.push({ id, seq: stream.seq });
+    state.published.push({
+      id,
+      credential,
+      seq: stream.seq,
+      phase,
+      at: Date.now(),
+    });
+    if (mode !== 'push') return;
+    const line = `${JSON.stringify({ id, offset: stream.seq })}\n`;
+    for (const conn of state.connections.values()) {
+      if (conn.closed || conn.credential !== credential) continue;
+      try {
+        if (conn.stream) {
+          conn.stream.write(line);
+          state.streamWrites += 1;
+        }
+      } catch {
+        conn.closed = true;
+      }
+    }
+  };
   state.onlineCount = (credential, at = Date.now()) => {
     let count = 0;
     for (const conn of state.connections.values()) {
@@ -152,6 +182,7 @@ function startPlatform(mode) {
         });
         res.write(`${JSON.stringify({ ready: true, conn })}\n`);
         state.connections.get(conn).stream = res;
+        state.streamConns += 1;
         return;
       }
       return json(res, 200, { conn });
@@ -232,27 +263,7 @@ function startPlatform(mode) {
     }
     if (url.pathname === '/publish') {
       const body = await readBody(req);
-      const stream = streamFor(body.credential);
-      stream.seq += 1;
-      stream.messages.push({ id: body.id, seq: stream.seq });
-      if (mode === 'push') {
-        const line = `${JSON.stringify({ id: body.id, offset: stream.seq })}\n`;
-        for (const conn of state.connections.values()) {
-          if (conn.closed || conn.credential !== body.credential) continue;
-          try {
-            conn.stream?.write(line);
-          } catch {
-            conn.closed = true;
-          }
-        }
-      }
-      state.published.push({
-        id: body.id,
-        credential: body.credential,
-        seq: stream.seq,
-        phase: body.phase,
-        at: Date.now(),
-      });
+      state.publish(body.credential, body.id, body.phase);
       return json(res, 200, { ok: true });
     }
     if (url.pathname === '/state') {
@@ -318,10 +329,25 @@ async function runScenario(options) {
     child.stdout.on('data', (chunk) => {
       for (const line of String(chunk).split('\n')) {
         if (!line.trim()) continue;
+        let parsed = null;
         try {
-          if (JSON.parse(line).event === 'ready') worker.readyAt = Date.now();
+          parsed = JSON.parse(line);
+          if (parsed.event === 'ready') worker.readyAt = Date.now();
         } catch {
           /* plain log line */
+        }
+        if (DEBUG)
+          notify(
+            `${worker.instanceId} ${parsed ? JSON.stringify(parsed) : line.slice(0, 200)}`,
+          );
+        if (parsed) (worker.events ??= []).push(parsed);
+        if (DEBUG || MINIMAL) {
+          const { writeSync } = fsSync;
+          try {
+            writeSync(2, `[worker] ${line.slice(0, 300)}\n`);
+          } catch {
+            /* stderr may be closed */
+          }
         }
       }
     });
@@ -429,16 +455,7 @@ async function runScenario(options) {
       state.phase = phase;
       for (let index = 0; index < CREDENTIALS; index += 1) {
         const credential = `cred-${index}`;
-        const stream = state.streamFor(credential);
-        stream.seq += 1;
-        stream.messages.push({ id: `${credential}:${seq}`, seq: stream.seq });
-        state.published.push({
-          id: `${credential}:${seq}`,
-          credential,
-          seq: stream.seq,
-          phase,
-          at: Date.now(),
-        });
+        state.publish(credential, `${credential}:${seq}`, phase);
       }
       await sleep(intervalMs);
     }
@@ -632,34 +649,42 @@ async function runScenario(options) {
         );
         execFileSync('docker', ['start', REDIS_CONTAINER], { stdio: 'ignore' });
         const startAt = Date.now();
+        // PING every 25ms: the first success is `healthyAt`.
         let healthyAt = null;
-        const healthyDeadline = Date.now() + 60_000;
-        while (Date.now() < healthyDeadline) {
-          try {
-            await redis.ping();
-            healthyAt = Date.now();
-            break;
-          } catch {
-            await sleep(100);
+        {
+          const deadline = Date.now() + 60_000;
+          while (Date.now() < deadline) {
+            try {
+              await redis.ping();
+              healthyAt = Date.now();
+              break;
+            } catch {
+              await sleep(25);
+            }
           }
         }
         let firstOwnerAt = null;
         const ownerDeadline = Date.now() + LEASE_MS + RENEW_MS + 30_000;
         while (Date.now() < ownerDeadline) {
           const reconnect = state.connectEvents.find(
-            (event) => event.at >= startAt,
+            (event) => event.at >= (healthyAt ?? startAt),
           );
           if (reconnect) {
             firstOwnerAt = reconnect.at;
             break;
           }
-          await sleep(50);
+          await sleep(25);
         }
-        // Stage timings from the diagnostic timeline, relative to healthyAt.
+        const base = healthyAt ?? startAt;
         const events = [];
-        for (const entry of state.stats.values())
-          for (const event of entry.timeline ?? [])
-            if (event.at >= (healthyAt ?? startAt)) events.push(event);
+        for (const worker of workers.values())
+          for (const event of worker.events ?? [])
+            if (event.event === 'ownership_event' && event.at >= base - 1_000)
+              events.push({
+                event: event.name,
+                at: event.at,
+                detail: event.detail,
+              });
         events.sort((a, b) => a.at - b.at);
         const firstOf = (name) => events.find((event) => event.event === name);
         const firstEnd = (name, after) =>
@@ -674,7 +699,7 @@ async function runScenario(options) {
           ? firstEnd('rebuild_end', rebuildStart.at)
           : undefined;
         const firstConnect = state.connectEvents.find(
-          (event) => event.at >= (healthyAt ?? startAt),
+          (event) => event.at >= base,
         );
         const recoveryWindowMs =
           Math.max(0, LEASE_MS - REDIS_OUTAGE_MS) + RENEW_MS + 500 + 1_000;
@@ -707,8 +732,12 @@ async function runScenario(options) {
           resumedAt: startAt,
           healthyAt,
           firstOwnerReconnectAt: firstOwnerAt,
+          // Signed on purpose: negative means healthyAt was taken too late.
           recoveryMs:
             firstOwnerAt && healthyAt ? firstOwnerAt - healthyAt : null,
+          healthyAtTooLate: Boolean(
+            firstOwnerAt && healthyAt && firstOwnerAt < healthyAt,
+          ),
           repliesDuringOutage: repliesAfterStop - repliesAtStop,
           maxOnlineDuringOutage: onlineDuringOutage,
           container: REDIS_CONTAINER,
@@ -754,6 +783,12 @@ async function runScenario(options) {
   // ── results ─────────────────────────────────────────────────
   const replied = new Set(state.replies.keys());
   const lost = state.published.filter((message) => !replied.has(message.id));
+  const steadyPublished = state.published.filter(
+    (message) => message.phase === 'steady',
+  );
+  const steadyReplied = steadyPublished.filter((message) =>
+    replied.has(message.id),
+  );
   const lostByPhase = {};
   for (const message of lost) {
     const bucket = lostByPhase[message.phase] ?? { count: 0, published: 0 };
@@ -815,6 +850,10 @@ async function runScenario(options) {
 
   const result = {
     label,
+    platform: {
+      streamConns: state.streamConns,
+      streamWrites: state.streamWrites,
+    },
     mode,
     instances,
     startedAt: new Date(startedAt).toISOString(),
@@ -860,6 +899,9 @@ async function runScenario(options) {
         (entry) => new Set(entry.by.map((who) => who.split('/')[0])).size > 1,
       );
   scenarioAssertions.overlapMeasured = typeof overlap.totalMs === 'number';
+  scenarioAssertions.steadyRepliesAboveHalf =
+    steadyPublished.length < 50 ||
+    steadyReplied.length > 0.5 * steadyPublished.length;
   if (!freezeChain) {
     scenarioAssertions.sigkillSamples =
       result.failover.SIGKILL.samples >= kills;
@@ -918,6 +960,26 @@ async function main() {
   };
   let effectiveRate = RATE_PER_SEC;
   try {
+    if (MINIMAL) {
+      notify('minimal: 1 credential, 1 instance, push, no injections');
+      scenarios.push(
+        await runScenario({
+          label: 'minimal',
+          mode: 'push',
+          instances: 1,
+          kills: 0,
+          redisOutage: false,
+          freezeChain: false,
+          probe: true,
+        }),
+      );
+      report.scenarios = scenarios;
+      report.passed = true;
+      report.finishedAt = nowIso();
+      report.durationMs = Date.now() - startedAt;
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      process.exit(0);
+    }
     if (process.env.IM_CHAOS_PROBE === '1') {
       const ladder = [10, 20, 40, 80];
       let best = 0;

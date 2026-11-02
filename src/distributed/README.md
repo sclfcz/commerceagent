@@ -55,6 +55,16 @@ RabbitMQ 只负责唤醒。丢掉任何一个外部系统都不会让已经写�
 | Redis 中断                     | 租约到期后所有实例主动断开，最多一个租约周期不可用 | `dist:chaos-im`（redis_outage）               |
 | IM 持有者崩溃 / 冻结           | 备用实例按租约接管；冻结者恢复后自我围栏并重新排队 | `dist:chaos-im`、`tests/im-ownership.test.ts` |
 
+**优先级通道（`run.recovered`）**
+
+租约回收、准入拒绝和优雅停机释放的 run 写 `run.recovered`，relay 把它们投到独立的
+quorum 队列 `dist.runs.ready.hp`（RabbitMQ 4 的 quorum queue 不接受 `x-max-priority`，
+实测返回 406，因此用独立队列而不是队列内优先级），消费者先订阅这个通道。
+
+这是**有上限的等待**，不是绝对优先：高优先级消息仍要和 Worker 已经预取的普通消息争抢
+空位，所以恢复时间大约是 `租约 + 回收间隔 + 最多一轮任务执行时长`。实测（`dist:demo`）
+被杀 Worker 手上任务的恢复 P50 从 15,088ms 降到约 7,100ms。
+
 **当前边界**
 
 - 执行层仍是单机：依赖本机工作区、进程内队列与本地容器运行时；本子系统解决的是
@@ -296,8 +306,9 @@ MySQL 恢复后，积压的派发记录按对账规则收敛：SQLite 已终态�
   完整的 `${instanceId}:${token}`，所以即使 Redis 丢数据导致 token 回退，也不会把不同实例误判成
   同一个持有者——最坏情况是旧持有者重连后拿到的 token 与它以前用过的一样，此时它必须重新
   acquire 才能继续服务。
-- Redis 客户端用有上限的重连退避（`retryStrategy: min(times * 100, 500)`），所以
-  Redis 恢复后重新持有连接的时间上界约为 `leaseMs + renewMs + 500ms`。
+- Redis 恢复的时间上界：`max(0, leaseMs − 中断时长) + renewMs + 重连退避上限(500ms)
+  - 连接超时(1000ms)`。实测分段（`redis_ready`/ 首次 acquire / acquire 耗时 /
+首次重连）见`benchmarks/results/dist-chaos-im-\*.json`里的`redisOutage.stages`。
 
 ## Failure modes
 
