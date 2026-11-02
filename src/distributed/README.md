@@ -182,6 +182,46 @@ MySQL 恢复后，积压的派发记录按对账规则收敛：SQLite 已终态�
 上限），container 模式任务才走 `tenant-slots`；容器并发仍由 `maxConcurrentContainers`
 控制，内嵌 Worker 的 `concurrency` 只作为单批派发上限。
 
+## IM 连接持有权（DIST_IM_OWNERSHIP=1）
+
+默认关闭。关闭时 `IMConnectionManager` 的行为与本模块加入前完全一致：每个进程各自连接。
+
+一个 IM 凭证（provider + 凭证指纹）在任意时刻只允许**一个进程**持有连接。进程内的
+`credentialClaims` 只能挡住同一进程里的重复账号，跨进程必须靠租约。
+
+**租约与 fencing**
+
+- `dist:im:owner:{credentialKey}` = `{instanceId}:{token}`，`PX leaseMs`；
+- `dist:im:fence:{credentialKey}` 是单调递增的 token，acquire 用一条 Lua 原子完成
+  "key 不存在才 INCR 并 SET"；
+- renew / release 都是"值完全相等才生效"的 Lua，所以被冻结、被抢占的旧持有者既不能
+  续租也不能删掉新持有者的 key；
+- `credentialKey` 复用 `claimCredential` 的 `provider + sha256(凭证)`，原始凭证不进 Redis；
+- 本地自我围栏用**单调时钟**：每次 renew 成功记 `localDeadline = monotonicNow + leaseMs - renewMs`，
+  `isCurrent()` 只看 `monotonicNow < localDeadline` 且最近一次 renew 没被拒绝。
+
+**冻结进程**
+
+进程被 SIGSTOP 或长时间卡住时，定时器不会运行，但单调时钟照常前进；恢复后第一次
+`isCurrent()` 就会失败。光靠 renew 定时器不够——恢复后先处理的是堆积的入站事件，
+所以**每条入站消息**在交给业务前都要过 `isCurrent()`，失败则丢弃并计数
+`inboundDroppedNotOwner`，同时触发 onLost 走原有的 `disconnectChannelLocked` 断开。
+出站（`sendMessage` / `sendFile`）同样在调用渠道前检查，失败抛
+`ConnectionOwnershipLostError`（继承 `DefinitiveChannelDeliveryError`，语义是"渠道
+肯定没收到"），outbox 因此重试而不是把行冻结成 uncertain。
+
+**Redis 不可用**
+
+- 持有者 renew 失败：在 `localDeadline` 之前继续服务，过了 `localDeadline` 自我断开；
+- standby 拿不到锁就不连；
+- 因此 Redis 挂掉以后，最多一个租约周期内所有实例都会断开——宁可不回复，也不重复回复。
+
+**当前边界**
+
+这是 IM 网关主备切换的基础机制：租约决定谁持有连接，fencing 决定旧持有者无法继续
+写入。主服务本身仍是单机运行（执行层依赖本机工作区与进程内队列），本机制解决的是
+"多实例同时连同一个机器人导致重复回复"，不是把整个服务做成分布式。
+
 ## Failure modes
 
 `DIST_ADMISSION_FAIL_MODE=open` (default): a Redis error admits the work and

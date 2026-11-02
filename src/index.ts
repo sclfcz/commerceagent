@@ -512,6 +512,11 @@ import {
   isUnknownFeishuSenderAllowed,
 } from './im-audience-policy.js';
 import { logger } from './logger.js';
+import {
+  ConnectionOwnership,
+  loadImOwnershipConfig,
+} from './distributed/connection-ownership.js';
+import { createRedis } from './distributed/redis.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { checkOwnerActive } from './owner-gate.js';
 import {
@@ -1233,6 +1238,8 @@ class IpcWatcherManager {
 }
 
 let ipcWatcherManager: IpcWatcherManager | null = null;
+/** Cross-instance IM credential ownership, installed when DIST_IM_OWNERSHIP=1. */
+let imOwnership: ConnectionOwnership | null = null;
 /**
  * Embedded distributed dispatcher for scheduled tasks (DIST_SCHEDULER=1).
  * When null the scheduler runs its legacy claim loop unchanged.
@@ -19829,6 +19836,37 @@ async function main(): Promise<void> {
   // Migrate system-level IM config → admin's per-user config (one-time)
   migrateSystemIMToPerUser();
 
+  // Cross-instance IM credential ownership (DIST_IM_OWNERSHIP=1). Must be
+  // installed before loadState() connects any channel, otherwise the first
+  // connector would start without a lease.
+  try {
+    const ownershipConfig = loadImOwnershipConfig();
+    if (ownershipConfig.enabled) {
+      const redis = createRedis(
+        process.env.DIST_REDIS_URL?.trim() || 'redis://127.0.0.1:6379',
+      );
+      imOwnership = new ConnectionOwnership({
+        redis,
+        instanceId: ownershipConfig.instanceId,
+        leaseMs: ownershipConfig.leaseMs,
+        renewMs: ownershipConfig.renewMs,
+        logger: (event) => logger.info(event, 'im ownership'),
+      });
+      imManager.setConnectionOwnership(imOwnership);
+      logger.info(
+        {
+          instanceId: ownershipConfig.instanceId,
+          leaseMs: ownershipConfig.leaseMs,
+          renewMs: ownershipConfig.renewMs,
+        },
+        'IM credential ownership enabled (DIST_IM_OWNERSHIP=1)',
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, 'Failed to enable IM credential ownership');
+    imOwnership = null;
+  }
+
   loadState();
 
   // Plugin catalog scan: one shot 5s after startup + every 1h thereafter.
@@ -19967,6 +20005,13 @@ async function main(): Promise<void> {
       .disconnectAll()
       .catch((err) =>
         logger.warn({ err }, 'Error disconnecting IM connections'),
+      );
+    // Hand every credential over immediately instead of making a standby wait
+    // for the lease to expire.
+    await imOwnership
+      ?.releaseAll()
+      .catch((err) =>
+        logger.warn({ err }, 'Error releasing IM ownership leases'),
       );
 
     clearTimeout(forceExitTimer);
