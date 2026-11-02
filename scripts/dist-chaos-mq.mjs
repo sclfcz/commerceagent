@@ -228,7 +228,15 @@ async function main() {
     connection.query("SET time_zone = '+00:00'", () => {});
   });
   let adminConnection = await amqp.connect(AMQP_URL);
+  // A closed channel (e.g. checkQueue on a queue a restarted broker has not
+  // re-declared yet) must not take the whole run down.
+  adminConnection.on('error', (error) =>
+    notify(`admin connection error: ${error.message?.slice(0, 120)}`),
+  );
   let adminChannel = await adminConnection.createChannel();
+  adminChannel.on('error', (error) =>
+    notify(`admin channel error: ${error.message?.slice(0, 120)}`),
+  );
 
   const finish = async (report, exitCode) => {
     const directory = path.join(ROOT, 'benchmarks/results');
@@ -392,7 +400,13 @@ async function main() {
           /* already closed by the restart */
         }
         adminConnection = await amqp.connect(AMQP_URL);
+        adminConnection.on('error', (error) =>
+          notify(`admin connection error: ${error.message?.slice(0, 120)}`),
+        );
         adminChannel = await adminConnection.createChannel();
+        adminChannel.on('error', (error) =>
+          notify(`admin channel error: ${error.message?.slice(0, 120)}`),
+        );
         notify(
           `broker restart via ${injections.restart.method ?? 'unknown'} ` +
             `(${injections.restart.ok ? 'ok' : 'failed'})`,
@@ -485,8 +499,15 @@ async function main() {
 
     let dlqMessages = 0;
     try {
-      const info = await adminChannel.checkQueue(DLQ);
-      dlqMessages = info.messageCount;
+      // Fresh channel: a 404 closes the channel that issued the check, and the
+      // main queue/DLQ may not have been re-declared right after a restart.
+      const channel = await adminConnection.createChannel();
+      try {
+        const info = await channel.checkQueue(DLQ);
+        dlqMessages = info.messageCount;
+      } finally {
+        await channel.close().catch(() => {});
+      }
     } catch {
       dlqMessages = 0;
     }

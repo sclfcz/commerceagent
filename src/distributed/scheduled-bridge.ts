@@ -539,6 +539,8 @@ export interface SchedulerBridge {
   repository: RunRepository;
   health: DispatchHealthMonitor;
   start(): void;
+  /** Install hooks + forwarder without the embedded worker (tests). */
+  startForwardingOnly(): void;
   stop(): Promise<void>;
 }
 
@@ -674,6 +676,10 @@ export function createSchedulerBridge(
     executor,
     repository,
     health,
+    startForwardingOnly() {
+      forwarder.start();
+      installHooks();
+    },
     start() {
       reaper.start();
       forwarder.start();

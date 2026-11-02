@@ -1,7 +1,72 @@
-# Distributed runs (Phase 1–3)
+# 分布式执行子系统
 
-MySQL owns run state. Redis only answers "may this run start now?" and "may this
-model call go out now?" — losing Redis can never corrupt a run.
+## 总览
+
+```mermaid
+flowchart LR
+  API["api / scheduler<br/>(submit, cancel)"] -->|"submit(tx)"| MY[("MySQL<br/>dist_task_runs<br/>dist_outbox<br/>dist_run_steps")]
+  SCH["task-scheduler<br/>(pump)"] -->|"forwarder: id = task_run.id"| MY
+  MY -->|"outbox row (same tx)"| RELAY["outbox relay<br/>publisher confirms"]
+  RELAY -->|"run.ready"| MQ[("RabbitMQ<br/>quorum + retry ladder + DLQ")]
+  MQ -->|"consume + claimById"| W["worker<br/>lease + fencing token"]
+  MY -->|"FOR UPDATE SKIP LOCKED"| W
+  W -->|"admission"| R[("Redis<br/>tenant slots / token bucket<br/>IM ownership leases")]
+  W -->|"step / effect ledger (tx)"| MY
+  W -->|"execute"| EXT["executor<br/>(script / effect provider)"]
+  IM["IM processes"] -->|"dist:im:owner:*"| R
+```
+
+MySQL 是运行状态的唯一权威；Redis 只回答"现在能不能开始"和"谁持有这个 IM 凭证"；
+RabbitMQ 只负责唤醒。丢掉任何一个外部系统都不会让已经写进 MySQL 的状态出错。
+
+**每个阶段解决了什么**
+
+- **Phase 1 租约 + fencing**：`FOR UPDATE SKIP LOCKED` 认领，`lease_token` 递增作为围栏，
+  心跳续租、reaper 回收过期租约。不变式：同一 `lease_token` 只有一个写入者能提交，
+  过期租约的持有者无法覆盖新持有者的结果。
+- **Phase 2 事务性 outbox + MQ**：状态变更与 outbox 行在同一事务写，relay 用 publisher
+  confirms 投递，消费端按 `dist_consumed_messages` 去重。不变式：MySQL 提交成功就一定
+  会被投递（至少一次），重复投递不影响结果。
+- **Phase 3 准入控制**：Redis 租户槽位与模型令牌桶（全部 Lua + `redis.call('TIME')`）。
+  不变式：Redis 只做门控，丢失 Redis 只会减少并行度，不会让 run 卡住或重复执行。
+- **Phase 4 持久化步骤与外部效应**：`intent → committed/unknown → needs_review` 的
+  effect ledger，发送前写 `send_started_at`，客户端超时后先等结算窗口再判定。
+  不变式：外部副作用最多发生一次；不确定的结果显式进入 `needs_review`，绝不静默重放。
+- **Phase 5 定时任务接入**：SQLite 仍是任务结果/历史的权威，MySQL 只是派发信封
+  （`idempotency_key = task_run.id`）。不变式：两条路径（legacy / dist）用同一行 SQLite
+  记录、同一组认领条件、同一个执行租约，所以一个 run 不可能执行两次。
+- **Phase 6 IM 连接持有权**：`dist:im:owner:{credential}` 租约 + fencing token，入站/出站
+  逐条检查持有权。不变式：同一凭证在任意时刻最多一个进程回复；旧持有者既不能续租也不能
+  删除新持有者的 key。
+
+**故障 → 系统行为 → 验证**
+
+| 故障                           | 系统行为                                           | 验证                                          |
+| ------------------------------ | -------------------------------------------------- | --------------------------------------------- |
+| worker 崩溃                    | 租约到期后 reaper 重新入队；已开始的执行不重放     | `dist:chaos`                                  |
+| 僵尸 worker（进程冻结）        | 单调时钟自我围栏；IM 侧逐条入站门控丢弃            | `dist:chaos-im`（zombie）                     |
+| MQ 重复投递                    | `dist_consumed_messages` 去重 + 认领幂等           | `dist:chaos:mq`                               |
+| MQ 消息丢失                    | fallback poll 兜底                                 | `dist:chaos:mq`                               |
+| MQ 重启                        | 连接自动重建，拓扑重新声明，outbox 未确认的行重发  | `dist:chaos:mq`、`npm run dist:demo`          |
+| relay 崩溃（confirm 后未提交） | 重启后 outbox 行仍 pending，重发一次               | `dist:chaos:mq`                               |
+| 租户打满                       | 拒绝准入并以 200–400ms 延迟重新入队，不占全局队头  | `dist:chaos:tenant`、`dist:bench:fairness`    |
+| 回执丢失（effect unknown）     | 结算窗口后进入 `needs_review`，不自动重放          | `dist:chaos:effects`                          |
+| MySQL 中断                     | bridge 回退到 legacy 认领循环，恢复后对账          | `dist:chaos:scheduler`（outage 场景）         |
+| Redis 中断                     | 租约到期后所有实例主动断开，最多一个租约周期不可用 | `dist:chaos-im`（redis_outage）               |
+| IM 持有者崩溃 / 冻结           | 备用实例按租约接管；冻结者恢复后自我围栏并重新排队 | `dist:chaos-im`、`tests/im-ownership.test.ts` |
+
+**当前边界**
+
+- 执行层仍是单机：依赖本机工作区、进程内队列与本地容器运行时；本子系统解决的是
+  派发、租约与副作用一致性，不是把执行拆成分布式。
+- 流式卡片与 `setTyping` 没有 IM 持有权门控：冻结进程恢复后可能再更新一次已有卡片
+  （不会新建消息、不会重复文本回复）。
+- 外部系统不支持幂等时，"不确定"的结果只能进 `needs_review` 由人确认；系统不会为了
+  追求自动完成而重放可能已经发生的副作用。
+- 具体的容量、延迟、重叠时长等数值只在 `benchmarks/results/` 的报告里，本文不复制，
+  避免文档与最新数据不一致。
+
+## 文件与角色
 
 | File                | Role                                                                                            |
 | ------------------- | ----------------------------------------------------------------------------------------------- |

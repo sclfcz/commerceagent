@@ -26,7 +26,13 @@ const REDIS_URL =
   process.env.DIST_REDIS_URL?.trim() || 'redis://127.0.0.1:6380';
 const CREDENTIALS = Number(process.env.IM_CHAOS_CREDENTIALS ?? 20);
 const DURATION_MS = Number(process.env.IM_CHAOS_DURATION_MS ?? 45_000);
-const PUSH_INTERVAL_MS = Number(process.env.IM_CHAOS_PUSH_MS ?? 100);
+const RATE_PER_SEC = Number(process.env.IM_CHAOS_RATE_PER_SEC ?? 20);
+// The platform pushes RATE_PER_SEC messages per credential; the old
+// 100 ms knob is kept as a fallback for one-off experiments.
+const PUSH_INTERVAL_MS = Math.max(
+  10,
+  Number(process.env.IM_CHAOS_PUSH_MS ?? Math.round(1000 / RATE_PER_SEC)),
+);
 const LEASE_MS = Number(process.env.DIST_IM_LEASE_MS ?? 3_000);
 const RENEW_MS = Number(process.env.DIST_IM_RENEW_MS ?? 1_000);
 const KILLS = Number(process.env.IM_CHAOS_KILLS ?? 5);
@@ -232,6 +238,12 @@ function startPlatform(mode) {
 
 async function runScenario(options) {
   const { label, mode, instances, kills, redisOutage, freezeChain } = options;
+  const intervalMs = Math.max(
+    10,
+    Math.round(
+      1000 / Number(process.env.IM_CHAOS_RATE_PER_SEC ?? RATE_PER_SEC),
+    ),
+  );
   const { state, server } = startPlatform(mode);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const platformUrl = `http://127.0.0.1:${server.address().port}`;
@@ -358,8 +370,16 @@ async function runScenario(options) {
       .map((conn) => conn.credential);
 
   // ── publishing + sampling ───────────────────────────────────
-  let publishing = true;
+  let publishing = false;
   const publisher = (async () => {
+    // Publish only once the workers are connected: messages pushed while the
+    // fleet is still booting are genuinely (and uninterestingly) lost.
+    const startDeadline = Date.now() + 120_000;
+    while (Date.now() < startDeadline) {
+      if (state.onlineCredentials() > 0) break;
+      await sleep(100);
+    }
+    publishing = true;
     const deadline = Date.now() + DURATION_MS;
     let seq = 0;
     while (Date.now() < deadline) {
@@ -378,25 +398,35 @@ async function runScenario(options) {
           at: Date.now(),
         });
       }
-      await sleep(PUSH_INTERVAL_MS);
+      await sleep(intervalMs);
     }
     publishing = false;
     collecting = false;
   })();
 
-  const overlap = { totalMs: 0, byPhase: {} };
+  const overlap = {
+    totalMs: 0,
+    note: 'totalMs sums all credentials (20 credentials add up)',
+    byPhase: {},
+    overlapMsByCredential: {},
+    maxCredentialMs: 0,
+  };
   const sampling = (async () => {
+    while (!publishing) await sleep(20);
     while (publishing) {
       const at = Date.now();
       const current = state.phase;
       for (let index = 0; index < CREDENTIALS; index += 1) {
         if (state.onlineCount(`cred-${index}`, at) >= 2) {
-          overlap.totalMs += PUSH_INTERVAL_MS;
+          const credential = `cred-${index}`;
+          overlap.totalMs += intervalMs;
           overlap.byPhase[current] =
-            (overlap.byPhase[current] ?? 0) + PUSH_INTERVAL_MS;
+            (overlap.byPhase[current] ?? 0) + intervalMs;
+          overlap.overlapMsByCredential[credential] =
+            (overlap.overlapMsByCredential[credential] ?? 0) + intervalMs;
         }
       }
-      await sleep(PUSH_INTERVAL_MS);
+      await sleep(intervalMs);
     }
   })();
 
@@ -410,7 +440,11 @@ async function runScenario(options) {
     await waitForReady(instances);
     await sleep(4_000);
 
-    if (freezeChain) {
+    if (options.probe) {
+      // Steady load only: no kills, no outages, no freezes.
+      await sleep(DURATION_MS + 2_000);
+      phase = 'steady';
+    } else if (freezeChain) {
       // 1. freeze the owner (its TCP connection stays open on the platform)
       const a = await topOwner('freeze');
       phase = 'zombie';
@@ -603,6 +637,21 @@ async function runScenario(options) {
 
   await publisher;
   collecting = false;
+  // Let the backlog drain before counting losses: a message published in the
+  // last second is not "lost" just because its reply is still in flight.
+  {
+    const drainDeadline = Date.now() + 30_000;
+    let previous = -1;
+    while (Date.now() < drainDeadline) {
+      const repliesNow = [...state.replies.values()].reduce(
+        (sum, list) => sum + list.length,
+        0,
+      );
+      if (repliesNow === previous) break;
+      previous = repliesNow;
+      await sleep(1_500);
+    }
+  }
   await sampling;
   await driver.catch((error) => {
     scenarioAssertions.driverError =
@@ -636,6 +685,10 @@ async function runScenario(options) {
       (bucket.count / Math.max(1, bucket.published)).toFixed(4),
     );
 
+  overlap.maxCredentialMs = Math.max(
+    0,
+    ...Object.values(overlap.overlapMsByCredential),
+  );
   const duplicates = [];
   for (const [messageId, list] of state.replies)
     if (list.length > 1)
@@ -739,6 +792,7 @@ async function runScenario(options) {
 async function main() {
   const startedAt = Date.now();
   const scenarios = [];
+  const probeResults = [];
   const report = {
     runId: `dist-chaos-im-${nowIso().replace(/[:.]/g, '-')}`,
     startedAt: new Date(startedAt).toISOString(),
@@ -759,9 +813,50 @@ async function main() {
       kills: KILLS,
       redisContainer: REDIS_CONTAINER,
       redisOutageMs: REDIS_OUTAGE_MS,
+      ratePerSec: RATE_PER_SEC,
     },
   };
+  let effectiveRate = RATE_PER_SEC;
   try {
+    if (process.env.IM_CHAOS_PROBE === '1') {
+      const ladder = [10, 20, 40, 80];
+      let best = 0;
+      for (const rate of ladder) {
+        process.env.IM_CHAOS_RATE_PER_SEC = String(rate);
+        notify(`capacity probe: ${rate} msg/s per credential, steady`);
+        const result = await runScenario({
+          label: `probe-${rate}`,
+          mode: 'push',
+          instances: 3,
+          kills: 0,
+          redisOutage: false,
+          freezeChain: false,
+          probe: true,
+        });
+        const lossRatio =
+          result.counters.lostReplies /
+          Math.max(1, result.counters.messagesPublished);
+        probeResults.push({
+          ratePerSec: rate,
+          published: result.counters.messagesPublished,
+          lost: result.counters.lostReplies,
+          lossRatio: Number(lossRatio.toFixed(4)),
+          duplicates: result.counters.duplicateReplies,
+        });
+        if (lossRatio < 0.01) best = rate;
+        else break;
+      }
+      effectiveRate = Math.max(1, Math.floor(best / 2));
+      report.capacityProbe = {
+        ladder,
+        results: probeResults,
+        steadyRate: best,
+        usedRate: effectiveRate,
+      };
+      notify(
+        `capacity: steady <1% at ${best} msg/s -> chaos runs at ${effectiveRate} msg/s`,
+      );
+    }
     notify('scenario: push / 3 instances (kill/stop/term + redis outage)');
     scenarios.push(
       await runScenario({

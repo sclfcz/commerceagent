@@ -521,7 +521,9 @@ describeMysql('scheduled task bridge', () => {
       { repository },
     );
     try {
-      bridge.start();
+      // Forwarder + hooks only: an embedded worker would race this test and
+      // claim the SQLite run before we can.
+      bridge.startForwardingOnly();
       const dist = await waitForDistRow(sqliteRun.id);
       // Legacy owns the SQLite lease: the dist cancel must address the
       // envelope only, never the execution fence.
