@@ -30,13 +30,13 @@ const MAX_ATTEMPTS = 5;
 const KILLS = 5;
 const ZOMBIE_PAUSE_MS = LEASE_MS * 2;
 const OVERALL_TIMEOUT_MS = 10 * 60 * 1000;
-const REPEATS = Number(process.env.DIST_EFFECT_REPEAT ?? 3);
+const REPEATS = Number(process.env.DIST_EFFECT_REPEAT ?? 5);
 
 const MOCK = {
   honorIdempotency: false,
   dropResponseRate: 0.1,
   errorRate: 0.05,
-  latencyMs: 100,
+  latencyMs: 300,
 };
 
 const GROUPS = [
@@ -81,7 +81,8 @@ function spawnWorker(tag) {
       DIST_REAPER_INTERVAL_MS: '500',
       DIST_BACKOFF_BASE_MS: '100',
       DIST_BACKOFF_MAX_MS: '400',
-      DIST_EFFECT_TIMEOUT_MS: '2000',
+      DIST_EFFECT_TIMEOUT_MS: '1000',
+      DIST_EFFECT_SETTLE_MS: '500',
       DIST_UNKNOWN_SWEEP_MS: '5000',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -270,6 +271,30 @@ async function runGroup(pool, mock, group) {
        ) AS offenders`,
       [group.id],
     );
+    const [[deferred]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM dist_task_run_events e
+         JOIN dist_task_runs r ON r.id = e.run_id
+        WHERE e.event = 'effect_reconcile_deferred' AND r.tenant_id = ?`,
+      [group.id],
+    );
+    const [[notApplied]] = await pool.query(
+      `SELECT COUNT(*) AS total FROM dist_task_run_events e
+         JOIN dist_task_runs r ON r.id = e.run_id
+        WHERE e.event = 'effect_not_applied' AND r.tenant_id = ?`,
+      [group.id],
+    );
+    const [reviewRows] = await pool.query(
+      `SELECT COALESCE(JSON_UNQUOTE(JSON_EXTRACT(e.detail, '$.reason')), 'unknown') AS reason,
+              COUNT(*) AS total
+         FROM dist_task_run_events e
+         JOIN dist_task_runs r ON r.id = e.run_id
+        WHERE e.event = 'needs_review' AND r.tenant_id = ?
+        GROUP BY reason`,
+      [group.id],
+    );
+    const needsReviewByReason = Object.fromEntries(
+      reviewRows.map((row) => [String(row.reason), Number(row.total)]),
+    );
     const [[unknown]] = await pool.query(
       `SELECT COUNT(*) AS total
          FROM dist_run_steps s JOIN dist_task_runs r ON r.id = s.run_id
@@ -307,6 +332,9 @@ async function runGroup(pool, mock, group) {
       },
       reconciledCommitted: Number(events.reconciledCommitted ?? 0),
       reconciledNotFound: Number(events.reconciledNotFound ?? 0),
+      reconcileDeferred: Number(deferred.total),
+      notAppliedRetries: Number(notApplied.total),
+      needsReviewByReason,
       succeededEvents: Number(events.succeededEvents ?? 0),
       duplicateSucceededRuns: Number(duplicates.offenders),
       unknownStepsAtEnd: Number(unknown.total),
@@ -373,6 +401,26 @@ async function main() {
           ),
           reconciledCommitted: median(
             samples.map((row) => row.reconciledCommitted),
+          ),
+          reconcileDeferred: median(
+            samples.map((row) => row.reconcileDeferred),
+          ),
+          notAppliedRetries: median(
+            samples.map((row) => row.notAppliedRetries),
+          ),
+          needsReviewByReason: Object.fromEntries(
+            [
+              ...new Set(
+                samples.flatMap((row) =>
+                  Object.keys(row.needsReviewByReason ?? {}),
+                ),
+              ),
+            ].map((reason) => [
+              reason,
+              median(
+                samples.map((row) => row.needsReviewByReason?.[reason] ?? 0),
+              ),
+            ]),
           ),
           reconciledNotFound: median(
             samples.map((row) => row.reconciledNotFound),

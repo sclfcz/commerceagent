@@ -61,6 +61,8 @@ export interface DistributedConfig {
   effectTimeoutMs: number;
   /** Monitoring scan for stale `unknown` steps. */
   unknownSweepMs: number;
+  /** Grace window after a client timeout before declaring "not sent". */
+  effectSettleMs: number;
 }
 
 function readInt(
@@ -211,6 +213,10 @@ export function loadDistributedConfig(
     unknownSweepMs: readInt(env, 'DIST_UNKNOWN_SWEEP_MS', 60_000, {
       min: 1_000,
       max: 3_600_000,
+    }),
+    effectSettleMs: readInt(env, 'DIST_EFFECT_SETTLE_MS', 2_000, {
+      min: 0,
+      max: 600_000,
     }),
   };
   if (config.backoffBaseMs > config.backoffMaxMs)

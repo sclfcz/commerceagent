@@ -7,6 +7,7 @@ import {
   EffectRequestMismatchError,
   LeaseLostError,
   NeedsReviewError,
+  RetryableEffectError,
   emptyDurableStats,
   type EffectProvider,
 } from '../../src/distributed/durable.js';
@@ -85,8 +86,8 @@ describeMysql('effect protocol', () => {
 
   const stepRow = async (runId: string, stepKey: string) => {
     const [rows] = await pool.query(
-      `SELECT status, provider_ref, attempts, last_error FROM dist_run_steps
-        WHERE run_id = ? AND step_key = ?`,
+      `SELECT status, provider_ref, attempts, last_error, send_started_at
+         FROM dist_run_steps WHERE run_id = ? AND step_key = ?`,
       [runId, stepKey],
     );
     return (rows as Array<Record<string, unknown>>)[0] ?? null;
@@ -280,6 +281,213 @@ describeMysql('effect protocol', () => {
       Number((tokens as Array<{ lease_token: number }>)[0].lease_token),
     ).toBe(second.leaseToken);
     await repository.cancel(run.id);
+  });
+
+  test('reconciliation waits out the provider tail latency instead of resending', async () => {
+    await clearRuns(pool);
+    // 300ms server-side latency: the client aborts before the message lands.
+    const mock = await startMock({
+      honorIdempotency: true,
+      lookup: true,
+      latencyMs: 300,
+    });
+    const provider = new HttpEffectProvider({
+      baseUrl: mock.url,
+      supportsLookup: true,
+    });
+    try {
+      const { run } = await repository.submit({
+        tenantId: uniqueTenant('race'),
+        taskId: 'race',
+        idempotencyKey: 'race-1',
+        payload: {},
+        maxAttempts: 3,
+      });
+      const first = await claimOnce('race-a');
+      const abort = new AbortController();
+      const ctxA = new DurableContext({
+        pool,
+        hooks: repository,
+        identity: {
+          runId: run.id,
+          workerId: 'race-a',
+          leaseToken: first.leaseToken,
+        },
+        signal: abort.signal,
+        effectTimeoutMs: 500,
+        effectSettleMs: 1_000,
+      });
+      const sending = ctxA.effect('msg-0', { v: 1 }, provider);
+      await waitFor(
+        async () => {
+          const row = await stepRow(run.id, 'msg-0');
+          return row?.send_started_at ? row : null;
+        },
+        { label: 'send to start', timeoutMs: 5_000 },
+      );
+      // Simulate the worker dying mid-flight.
+      abort.abort();
+      await expect(sending).rejects.toBeInstanceOf(LeaseLostError);
+      expect((await stepRow(run.id, 'msg-0'))?.status).toBe('intent');
+
+      await repository.forceExpireLease(run.id);
+      await repository.reapExpired(10);
+      await waitFor(
+        async () => (await repository.getRun(run.id))?.status === 'retry_wait',
+        { label: 'run reaped', timeoutMs: 5_000 },
+      );
+      const second = await claimOnce('race-b');
+      const statsB = emptyDurableStats();
+      const ctxB = contextFor(second, 'race-b', statsB);
+      // The message is still in flight server-side: the lookup misses, and the
+      // context must defer instead of sending a second request.
+      const deferred = await ctxB
+        .effect('msg-0', { v: 1 }, provider)
+        .catch((error) => error);
+      expect(deferred).toBeInstanceOf(RetryableEffectError);
+      expect(statsB.reconcileDeferred).toBe(1);
+      expect(statsB.reconciledNotFound).toBe(1);
+      expect(mock.stats.deliveredMessages).toBe(0);
+      const minDelayMs = (deferred as RetryableEffectError).minDelayMs;
+      expect(minDelayMs).toBeGreaterThan(0);
+
+      await repository.fail({
+        runId: run.id,
+        workerId: 'race-b',
+        leaseToken: second.leaseToken,
+        error: 'deferred',
+        retryable: true,
+        minDelayMs,
+      });
+      await waitFor(
+        async () => (await repository.getRun(run.id))?.status === 'retry_wait',
+        { label: 'run retry_wait', timeoutMs: 5_000 },
+      );
+      await sleep(minDelayMs + 100);
+      const third = await claimOnce('race-c');
+      const statsC = emptyDurableStats();
+      const ctxC = contextFor(third, 'race-c', statsC);
+      const result = await ctxC.effect('msg-0', { v: 1 }, provider);
+      expect(result.ref).toMatch(/^msg-/);
+      expect(statsC.reconciledCommitted).toBe(1);
+      expect(mock.stats.deliveredMessages).toBe(1);
+      expect(mock.stats.duplicateDeliveries).toBe(0);
+      expect((await stepRow(run.id, 'msg-0'))?.status).toBe('committed');
+      await repository.cancel(run.id);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('503 without lookup is retried directly, not parked for review', async () => {
+    await clearRuns(pool);
+    const mock = await startMock({
+      honorIdempotency: true,
+      lookup: false,
+      errorRate: 1,
+    });
+    const provider = new HttpEffectProvider({
+      baseUrl: mock.url,
+      supportsLookup: false,
+    });
+    try {
+      const { run } = await repository.submit({
+        tenantId: uniqueTenant('503'),
+        taskId: '503',
+        idempotencyKey: '503-1',
+        payload: {},
+        maxAttempts: 3,
+      });
+      const first = await claimOnce('notapplied-a');
+      const statsA = emptyDurableStats();
+      const ctxA = contextFor(first, 'notapplied-a', statsA);
+      await expect(
+        ctxA.effect('msg-0', { v: 1 }, provider),
+      ).rejects.toBeInstanceOf(RetryableEffectError);
+      expect(statsA.notAppliedRetries).toBe(1);
+      const row = await stepRow(run.id, 'msg-0');
+      expect(row?.status).toBe('intent');
+      expect(row?.send_started_at).toBeNull();
+      expect(Number(row?.attempts)).toBe(1);
+
+      mock.setOptions({ errorRate: 0 });
+      await repository.fail({
+        runId: run.id,
+        workerId: 'notapplied-a',
+        leaseToken: first.leaseToken,
+        error: 'not applied',
+        retryable: true,
+      });
+      await waitFor(
+        async () => (await repository.getRun(run.id))?.status === 'retry_wait',
+        { label: 'run retry_wait', timeoutMs: 5_000 },
+      );
+      await sleep(60);
+      const second = await claimOnce('notapplied-b');
+      const ctxB = contextFor(second, 'notapplied-b');
+      await ctxB.effect('msg-0', { v: 1 }, provider);
+      expect((await stepRow(run.id, 'msg-0'))?.status).toBe('committed');
+      expect((await repository.getRun(run.id))?.status).not.toBe(
+        'needs_review',
+      );
+      expect(mock.stats.deliveredMessages).toBe(1);
+      await repository.cancel(run.id);
+    } finally {
+      await mock.close();
+    }
+  });
+
+  test('an intent without send_started_at is sent without any lookup', async () => {
+    await clearRuns(pool);
+    const mock = await startMock({ honorIdempotency: true, lookup: true });
+    let lookups = 0;
+    const provider: EffectProvider = {
+      name: 'counting',
+      supportsLookup: true,
+      lookup: async () => {
+        lookups += 1;
+        return null;
+      },
+      send: async () => {
+        const response = await fetch(`${mock.url}/messages`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'idempotency-key': `${runIdRef}:msg-0`,
+          },
+          body: '{}',
+        });
+        const body = (await response.json()) as { message_id: string };
+        return { ref: body.message_id };
+      },
+    };
+    let runIdRef = '';
+    try {
+      const { run } = await repository.submit({
+        tenantId: uniqueTenant('nosend'),
+        taskId: 'nosend',
+        idempotencyKey: 'nosend-1',
+        payload: {},
+      });
+      runIdRef = run.id;
+      const claim = await claimOnce('nosend-a');
+      // The previous worker wrote the intent and died before sending.
+      await pool.query(
+        `INSERT INTO dist_run_steps
+           (run_id, step_key, kind, status, lease_token, idempotency_key,
+            request_hash, attempts, created_at, updated_at)
+         VALUES (?, 'msg-0', 'effect', 'intent', 1, ?, SHA2('{"v":1}', 256), 0, NOW(3), NOW(3))`,
+        [run.id, `${run.id}:msg-0`],
+      );
+      const ctx = contextFor(claim, 'nosend-a');
+      await ctx.effect('msg-0', { v: 1 }, provider);
+      expect(lookups).toBe(0);
+      expect((await stepRow(run.id, 'msg-0'))?.status).toBe('committed');
+      expect(mock.stats.deliveredMessages).toBe(1);
+      await repository.cancel(run.id);
+    } finally {
+      await mock.close();
+    }
   });
 
   test('changing the request body for the same step is rejected', async () => {

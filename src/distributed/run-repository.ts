@@ -502,6 +502,7 @@ export class RunRepository {
     workerId: string;
     leaseToken: number;
     stepKey: string;
+    reason?: string;
   }): Promise<boolean> {
     return withTransaction(this.pool, async (connection) => {
       const rows = await queryRows(
@@ -534,7 +535,10 @@ export class RunRepository {
         leaseToken: input.leaseToken,
         workerId: input.workerId,
         event: 'needs_review',
-        detail: { stepKey: input.stepKey },
+        detail: {
+          stepKey: input.stepKey,
+          reason: input.reason ?? 'unknown_outcome',
+        },
       });
       return true;
     });
@@ -726,6 +730,8 @@ export class RunRepository {
     leaseToken: number;
     error: string;
     retryable: boolean;
+    /** Lower bound for the retry delay (reconciliation settle window). */
+    minDelayMs?: number;
   }): Promise<{
     applied: boolean;
     status: RunStatus | null;
@@ -745,11 +751,14 @@ export class RunRepository {
       const maxAttempts = toNumber(rows[0].max_attempts);
       const message = input.error.slice(0, 4000);
       if (input.retryable && attempt < maxAttempts) {
-        const delay = fullJitterBackoff(
-          attempt,
-          this.options.backoffBaseMs,
-          this.options.backoffMaxMs,
-          this.random,
+        const delay = Math.max(
+          fullJitterBackoff(
+            attempt,
+            this.options.backoffBaseMs,
+            this.options.backoffMaxMs,
+            this.random,
+          ),
+          Math.max(0, input.minDelayMs ?? 0),
         );
         await execute(
           connection,

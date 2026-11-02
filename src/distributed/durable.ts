@@ -51,6 +51,21 @@ export class NeedsReviewError extends Error {
   }
 }
 
+/**
+ * The request provably never left this process (connection refused, DNS
+ * failure) or the provider rejected it without accepting it (429/503).
+ * Safe to retry immediately without reconciliation.
+ */
+export class EffectNotAppliedError extends Error {
+  constructor(
+    message: string,
+    readonly reason: string,
+  ) {
+    super(message);
+    this.name = 'EffectNotAppliedError';
+  }
+}
+
 /** A non-retryable provider rejection (4xx). */
 export class EffectPermanentError extends Error {
   constructor(
@@ -68,6 +83,8 @@ export interface DurableStats {
   effectsSent: number;
   reconciledCommitted: number;
   reconciledNotFound: number;
+  reconcileDeferred: number;
+  notAppliedRetries: number;
   needsReview: number;
 }
 
@@ -78,6 +95,8 @@ export function emptyDurableStats(): DurableStats {
     effectsSent: 0,
     reconciledCommitted: 0,
     reconciledNotFound: 0,
+    reconcileDeferred: 0,
+    notAppliedRetries: 0,
     needsReview: 0,
   };
 }
@@ -98,6 +117,7 @@ export interface DurableRunHooks {
     workerId: string;
     leaseToken: number;
     stepKey: string;
+    reason: string;
   }): Promise<boolean>;
   recordEvent(input: {
     runId: string;
@@ -118,6 +138,7 @@ interface StepRow {
   provider_ref: string | null;
   attempts: number;
   last_error: string | null;
+  send_started_at: Date | null;
 }
 
 const requestDigest = (value: unknown) =>
@@ -130,6 +151,8 @@ export interface DurableContextOptions {
   signal: AbortSignal;
   /** DIST_EFFECT_TIMEOUT_MS. */
   effectTimeoutMs?: number;
+  /** DIST_EFFECT_SETTLE_MS: grace window after a client timeout. */
+  effectSettleMs?: number;
   stats?: DurableStats;
   logger?: (event: Record<string, unknown>) => void;
 }
@@ -149,6 +172,7 @@ export class DurableContext implements RunContext {
   private readonly identity: DurableRunIdentity;
   private readonly signal: AbortSignal;
   private readonly effectTimeoutMs: number;
+  private readonly effectSettleMs: number;
   private readonly stats: DurableStats;
   private readonly logger: (event: Record<string, unknown>) => void;
 
@@ -158,6 +182,7 @@ export class DurableContext implements RunContext {
     this.identity = options.identity;
     this.signal = options.signal;
     this.effectTimeoutMs = options.effectTimeoutMs ?? 5_000;
+    this.effectSettleMs = options.effectSettleMs ?? 2_000;
     this.stats = options.stats ?? emptyDurableStats();
     this.logger = options.logger ?? (() => {});
   }
@@ -171,7 +196,7 @@ export class DurableContext implements RunContext {
     const rows = await queryRows(
       this.pool,
       `SELECT step_key, kind, status, lease_token, request_hash, output,
-              provider_ref, attempts, last_error
+              provider_ref, attempts, last_error, send_started_at
          FROM dist_run_steps WHERE run_id = ? AND step_key = ?`,
       [this.identity.runId, stepKey],
     );
@@ -286,7 +311,8 @@ export class DurableContext implements RunContext {
           `effect_failed:${stepKey}:${existing.last_error ?? ''}`,
         );
     } else {
-      // Record the intent before touching the outside world.
+      // Record the intent before touching the outside world. attempts counts
+      // *sends*, so it starts at 0 and the pre-send write increments it.
       await withTransaction(this.pool, async (connection) => {
         await this.assertFence(connection);
         await execute(
@@ -294,7 +320,7 @@ export class DurableContext implements RunContext {
           `INSERT INTO dist_run_steps
              (run_id, step_key, kind, status, lease_token, idempotency_key,
               request_hash, attempts, created_at, updated_at)
-           VALUES (?, ?, 'effect', 'intent', ?, ?, ?, 1, NOW(3), NOW(3))`,
+           VALUES (?, ?, 'effect', 'intent', ?, ?, ?, 0, NOW(3), NOW(3))`,
           [
             this.identity.runId,
             stepKey,
@@ -308,14 +334,26 @@ export class DurableContext implements RunContext {
       existing = await this.readStep(stepKey);
     }
 
-    // A leftover intent/unknown means a previous attempt may already have sent.
-    if (!createdNow) {
+    // "intent with no send_started_at" means the previous attempt died before
+    // sending: nothing can be in flight, so send directly without reconciling.
+    const needsReconcile =
+      !createdNow &&
+      existing !== null &&
+      (existing.status === 'unknown' ||
+        (existing.status === 'intent' && existing.send_started_at !== null));
+
+    if (needsReconcile) {
+      const reason =
+        existing?.status === 'unknown'
+          ? 'unknown_outcome'
+          : 'send_started_unknown_outcome';
       if (!provider.supportsLookup || !provider.lookup) {
         const marked = await this.hooks.markNeedsReview({
           runId: this.identity.runId,
           workerId: this.identity.workerId,
           leaseToken: this.identity.leaseToken,
           stepKey,
+          reason,
         });
         if (marked) this.stats.needsReview += 1;
         throw new NeedsReviewError(stepKey);
@@ -335,17 +373,48 @@ export class DurableContext implements RunContext {
         stepKey,
         result: 'not_found',
       });
+
+      // A client-side timeout does not cancel the request inside the provider.
+      // Wait out the tail latency before declaring "not sent".
+      const ageMs = await this.effectAgeMs(stepKey);
+      const windowMs = this.effectTimeoutMs + this.effectSettleMs;
+      if (ageMs !== null && ageMs < windowMs) {
+        this.stats.reconcileDeferred += 1;
+        await this.record('effect_reconcile_deferred', {
+          stepKey,
+          ageMs: Math.round(ageMs),
+          windowMs,
+        });
+        throw new RetryableEffectError(
+          `reconcile_deferred:${stepKey}`,
+          Math.ceil(windowMs - ageMs),
+        );
+      }
     }
 
     // Fence once more right before the request to shrink the zombie window.
     if (!(await this.isFenced()))
       throw new LeaseLostError('fence_rejected_before_send');
+    await this.markSendStarted(stepKey);
 
     let ref: string;
     try {
       ref = await this.sendWithTimeout(provider, request, idempotencyKey);
     } catch (error) {
       if (this.signal.aborted) throw new LeaseLostError('aborted');
+      if (error instanceof EffectNotAppliedError) {
+        // Provably never applied: go back to "not sent" and retry directly.
+        await this.revertToIntent(stepKey, error.message);
+        this.stats.notAppliedRetries += 1;
+        await this.record('effect_not_applied', {
+          stepKey,
+          reason: error.reason,
+        });
+        throw new RetryableEffectError(
+          `effect_not_applied:${stepKey}:${error.reason}`,
+          0,
+        );
+      }
       if (error instanceof EffectPermanentError) {
         await this.markEffect(stepKey, 'failed', error.message);
         throw error;
@@ -362,6 +431,64 @@ export class DurableContext implements RunContext {
     this.stats.effectsSent += 1;
     await this.record('effect_sent', { stepKey, ref });
     return { ref };
+  }
+
+  /** Milliseconds since the send started, computed by the database clock. */
+  private async effectAgeMs(stepKey: string): Promise<number | null> {
+    const rows = await queryRows(
+      this.pool,
+      `SELECT TIMESTAMPDIFF(MICROSECOND, send_started_at, NOW(3)) / 1000 AS age_ms
+         FROM dist_run_steps WHERE run_id = ? AND step_key = ?`,
+      [this.identity.runId, stepKey],
+    );
+    const value = rows[0]?.age_ms;
+    return value === null || value === undefined ? null : Number(value);
+  }
+
+  private async markSendStarted(stepKey: string): Promise<void> {
+    await withTransaction(this.pool, async (connection) => {
+      await this.assertFence(connection);
+      await execute(
+        connection,
+        `UPDATE dist_run_steps
+            SET status = 'intent', send_started_at = NOW(3),
+                lease_token = ?, attempts = attempts + 1, updated_at = NOW(3)
+          WHERE run_id = ? AND step_key = ?`,
+        [this.identity.leaseToken, this.identity.runId, stepKey],
+      );
+    });
+  }
+
+  /** The provider rejected the request without accepting it. */
+  private async revertToIntent(stepKey: string, error: string): Promise<void> {
+    try {
+      await withTransaction(this.pool, async (connection) => {
+        await this.assertFence(connection);
+        await execute(
+          connection,
+          `UPDATE dist_run_steps
+              SET status = 'intent', send_started_at = NULL,
+                  last_error = ?, lease_token = ?, updated_at = NOW(3)
+            WHERE run_id = ? AND step_key = ?`,
+          [
+            error.slice(0, 2000),
+            this.identity.leaseToken,
+            this.identity.runId,
+            stepKey,
+          ],
+        );
+      });
+    } catch (writeError) {
+      // Left as intent+send_started_at: the next owner will reconcile instead.
+      this.logger({
+        event: 'effect_revert_failed',
+        stepKey,
+        error:
+          writeError instanceof Error
+            ? writeError.message.slice(0, 200)
+            : 'unknown',
+      });
+    }
   }
 
   private sendWithTimeout(
@@ -406,8 +533,7 @@ export class DurableContext implements RunContext {
         connection,
         `UPDATE dist_run_steps
             SET status = 'committed', provider_ref = ?, output = ?,
-                lease_token = ?, attempts = attempts + 1,
-                last_error = NULL, updated_at = NOW(3)
+                lease_token = ?, last_error = NULL, updated_at = NOW(3)
           WHERE run_id = ? AND step_key = ?`,
         [
           ref,
@@ -436,8 +562,7 @@ export class DurableContext implements RunContext {
         await execute(
           connection,
           `UPDATE dist_run_steps
-              SET status = ?, last_error = ?, lease_token = ?,
-                  attempts = attempts + 1, updated_at = NOW(3)
+              SET status = ?, last_error = ?, lease_token = ?, updated_at = NOW(3)
             WHERE run_id = ? AND step_key = ?`,
           [
             status,
@@ -462,9 +587,16 @@ export class DurableContext implements RunContext {
   }
 }
 
-/** Retryable effect failure (timeout / network / 5xx): outcome unknown. */
+/**
+ * Retryable effect failure (timeout / network / 5xx): outcome unknown.
+ * `minDelayMs` lets reconciliation defer the retry until the settle window
+ * has elapsed.
+ */
 export class RetryableEffectError extends RetryableError {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly minDelayMs: number = 0,
+  ) {
     super(message);
     this.name = 'RetryableEffectError';
   }

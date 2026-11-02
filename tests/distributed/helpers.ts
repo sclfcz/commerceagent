@@ -37,6 +37,7 @@ export async function createTestPool(connectionLimit = 16): Promise<Pool> {
 
 /** Drop everything and re-apply migrations, giving the file a clean schema. */
 export async function resetSchema(pool: Pool): Promise<void> {
+  await pool.query('DROP TABLE IF EXISTS dist_run_steps');
   await pool.query('DROP TABLE IF EXISTS dist_consumed_messages');
   await pool.query('DROP TABLE IF EXISTS dist_outbox');
   await pool.query('DROP TABLE IF EXISTS dist_task_run_events');
@@ -132,6 +133,7 @@ export function testConfig(
     relayDuplicateRate: 0,
     effectTimeoutMs: 5_000,
     unknownSweepMs: 60_000,
+    effectSettleMs: 2_000,
     ...overrides,
     ...(overrides.claimBatch === undefined
       ? { claimBatch: overrides.concurrency ?? 1 }

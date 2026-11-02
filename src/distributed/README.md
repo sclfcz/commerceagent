@@ -96,6 +96,16 @@ world may deduplicate on.
 `Reaper` additionally scans for `unknown` steps older than 5 minutes whose run
 is already terminal (`DIST_UNKNOWN_SWEEP_MS`, monitoring only).
 
+**Settle window (`DIST_EFFECT_SETTLE_MS`, default 2000):** a client timeout does
+not cancel the request the provider is already processing. When a lookup misses,
+the context compares `NOW(3) - send_started_at` against
+`effectTimeoutMs + effectSettleMs` and, while still inside that window, defers
+the retry (`reconcileDeferred`) with `available_at` pushed past the window
+instead of sending again. Only after the window does a second miss count as
+"never sent". The window cannot cover a worker frozen between the fence check
+and the send (unbounded); only a provider that honours the idempotency key can
+remove that duplicate.
+
 **Lookup race:** "lookup says not found, so send" assumes the provider has
 already made a _timed-out_ send visible. If the first send is still in flight
 server-side when the retry looks it up, the retry sends again and the provider

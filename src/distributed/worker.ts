@@ -9,6 +9,7 @@ import type { TenantSlots } from './tenant-slots.js';
 import {
   DurableContext,
   NeedsReviewError,
+  RetryableEffectError,
   emptyDurableStats,
   type DurableStats,
 } from './durable.js';
@@ -295,6 +296,7 @@ export class Worker {
       },
       signal: controller.signal,
       effectTimeoutMs: this.config.effectTimeoutMs,
+      effectSettleMs: this.config.effectSettleMs,
       stats: durableStats,
       logger: this.logger,
     });
@@ -354,6 +356,10 @@ export class Worker {
             leaseToken: claim.leaseToken,
             error: errorMessage(error),
             retryable,
+            minDelayMs:
+              error instanceof RetryableEffectError
+                ? error.minDelayMs
+                : undefined,
           });
           if (!outcome.applied)
             this.logger({

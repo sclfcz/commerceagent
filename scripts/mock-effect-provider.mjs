@@ -99,12 +99,16 @@ export function startMockProvider(options = {}) {
       return;
     }
 
-    res.writeHead(200, { 'content-type': 'application/json' }).end(
-      JSON.stringify({
-        message_id: message.message_id,
-        idempotency_key: key,
-      }),
-    );
+    try {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(
+        JSON.stringify({
+          message_id: message.message_id,
+          idempotency_key: key,
+        }),
+      );
+    } catch {
+      /* the caller already timed out and closed the socket */
+    }
   };
 
   const server = http.createServer(async (req, res) => {
