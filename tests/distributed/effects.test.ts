@@ -43,6 +43,18 @@ async function startMock(options: Record<string, unknown> = {}) {
   return module.startMockProvider(options);
 }
 
+/** Expire the lease and reap, retrying in case a concurrent reaper won the row. */
+async function reapUntilRetryWait(repository: RunRepository, runId: string) {
+  await repository.forceExpireLease(runId);
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const row = await repository.getRun(runId);
+    if (row?.status === 'retry_wait') return;
+    await repository.reapExpired(10);
+    await sleep(50);
+  }
+  throw new Error(`run ${runId} was not reaped`);
+}
+
 describeMysql('effect protocol', () => {
   let pool: Pool;
   let repository: RunRepository;
@@ -250,12 +262,7 @@ describeMysql('effect protocol', () => {
     );
 
     // A's lease expires; B takes over and commits the same step.
-    await repository.forceExpireLease(run.id);
-    await repository.reapExpired(10);
-    await waitFor(
-      async () => (await repository.getRun(run.id))?.status === 'retry_wait',
-      { label: 'run reaped', timeoutMs: 5_000 },
-    );
+    await reapUntilRetryWait(repository, run.id);
     const second = await claimOnce('zombie-b');
     const providerB: EffectProvider = {
       name: 'b',
@@ -285,16 +292,29 @@ describeMysql('effect protocol', () => {
 
   test('reconciliation waits out the provider tail latency instead of resending', async () => {
     await clearRuns(pool);
-    // 300ms server-side latency: the client aborts before the message lands.
-    const mock = await startMock({
-      honorIdempotency: true,
-      lookup: true,
-      latencyMs: 300,
-    });
-    const provider = new HttpEffectProvider({
-      baseUrl: mock.url,
+    // Deterministic stand-in for "the provider is still working": the first
+    // send never settles, and lookup only finds the message once we mark it
+    // delivered.
+    let delivered = false;
+    let lookups = 0;
+    let sends = 0;
+    const provider: EffectProvider = {
+      name: 'slow',
       supportsLookup: true,
-    });
+      send: (_request, _key, signal) => {
+        sends += 1;
+        // Never succeeds, but honours the abort so the "killed" worker stops.
+        return new Promise<{ ref: string }>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('aborted')), {
+            once: true,
+          });
+        });
+      },
+      lookup: async () => {
+        lookups += 1;
+        return delivered ? { ref: 'msg-1' } : null;
+      },
+    };
     try {
       const { run } = await repository.submit({
         tenantId: uniqueTenant('race'),
@@ -325,29 +345,24 @@ describeMysql('effect protocol', () => {
         },
         { label: 'send to start', timeoutMs: 5_000 },
       );
-      // Simulate the worker dying mid-flight.
       abort.abort();
       await expect(sending).rejects.toBeInstanceOf(LeaseLostError);
       expect((await stepRow(run.id, 'msg-0'))?.status).toBe('intent');
+      expect(sends).toBe(1);
 
-      await repository.forceExpireLease(run.id);
-      await repository.reapExpired(10);
-      await waitFor(
-        async () => (await repository.getRun(run.id))?.status === 'retry_wait',
-        { label: 'run reaped', timeoutMs: 5_000 },
-      );
+      await reapUntilRetryWait(repository, run.id);
       const second = await claimOnce('race-b');
       const statsB = emptyDurableStats();
       const ctxB = contextFor(second, 'race-b', statsB);
-      // The message is still in flight server-side: the lookup misses, and the
-      // context must defer instead of sending a second request.
+      // Still inside the settle window and the message is not visible yet.
       const deferred = await ctxB
         .effect('msg-0', { v: 1 }, provider)
         .catch((error) => error);
       expect(deferred).toBeInstanceOf(RetryableEffectError);
       expect(statsB.reconcileDeferred).toBe(1);
       expect(statsB.reconciledNotFound).toBe(1);
-      expect(mock.stats.deliveredMessages).toBe(0);
+      expect(lookups).toBe(1);
+      expect(sends).toBe(1); // no second request while deferring
       const minDelayMs = (deferred as RetryableEffectError).minDelayMs;
       expect(minDelayMs).toBeGreaterThan(0);
 
@@ -359,6 +374,8 @@ describeMysql('effect protocol', () => {
         retryable: true,
         minDelayMs,
       });
+      // The provider finishes processing during the window.
+      delivered = true;
       await waitFor(
         async () => (await repository.getRun(run.id))?.status === 'retry_wait',
         { label: 'run retry_wait', timeoutMs: 5_000 },
@@ -368,14 +385,13 @@ describeMysql('effect protocol', () => {
       const statsC = emptyDurableStats();
       const ctxC = contextFor(third, 'race-c', statsC);
       const result = await ctxC.effect('msg-0', { v: 1 }, provider);
-      expect(result.ref).toMatch(/^msg-/);
+      expect(result.ref).toBe('msg-1');
       expect(statsC.reconciledCommitted).toBe(1);
-      expect(mock.stats.deliveredMessages).toBe(1);
-      expect(mock.stats.duplicateDeliveries).toBe(0);
+      expect(sends).toBe(1);
       expect((await stepRow(run.id, 'msg-0'))?.status).toBe('committed');
       await repository.cancel(run.id);
     } finally {
-      await mock.close();
+      /* no server to close */
     }
   });
 

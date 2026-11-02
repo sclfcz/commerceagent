@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
 import type { Pool } from '../../src/distributed/mysql.js';
 import {
+  listMigrations,
   splitSqlStatements,
   SchemaTooNewError,
   runMigrations,
@@ -29,23 +30,31 @@ describeMysql('migrations', () => {
     release?.();
   });
 
+  const knownVersions = listMigrations().map((migration) => migration.version);
+
   test('runs once and is idempotent on the second call', async () => {
     // resetSchema() in beforeAll already migrated once; start from empty here.
-    await pool.query('DROP TABLE IF EXISTS dist_task_run_events');
-    await pool.query('DROP TABLE IF EXISTS dist_task_runs');
-    await pool.query('DROP TABLE IF EXISTS dist_schema_migrations');
+    for (const table of [
+      'dist_run_steps',
+      'dist_consumed_messages',
+      'dist_outbox',
+      'dist_task_run_events',
+      'dist_task_runs',
+      'dist_schema_migrations',
+    ])
+      await pool.query(`DROP TABLE IF EXISTS ${table}`);
     const first = await runMigrations(pool);
-    expect(first.applied).toEqual([1, 2, 3, 4]);
+    expect(first.applied).toEqual(knownVersions);
     const second = await runMigrations(pool);
     expect(second.applied).toEqual([]);
-    expect(second.known).toEqual([1, 2, 3, 4]);
+    expect(second.known).toEqual(knownVersions);
 
     const rows = (
       await pool.query(
         'SELECT version FROM dist_schema_migrations ORDER BY version',
       )
     )[0] as Array<{ version: number }>;
-    expect(rows.map((row) => Number(row.version))).toEqual([1, 2, 3, 4]);
+    expect(rows.map((row) => Number(row.version))).toEqual(knownVersions);
   });
 
   test('refuses to run when the database is newer than the code', async () => {
