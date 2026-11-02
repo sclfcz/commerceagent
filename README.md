@@ -510,6 +510,17 @@ commerceagent/
 | [智能体优先架构记录](docs/agent-first-architecture-plan.md)           | 智能体、工作区、运行会话与渠道挂载的迁移背景       |
 | [Plugin 自动化设计记录](docs/claude-code-plugin-automation-design.md) | Claude Code Plugin catalog 与运行快照的历史设计    |
 
+## 可选：分布式派发层
+
+仓库内置一套可选的分布式派发层，用于多 Worker 场景下的租约认领、事务性 Outbox +
+RabbitMQ 唤醒、租户准入和 IM 凭证单持有者。两个开关（`DIST_SCHEDULER`、
+`DIST_IM_OWNERSHIP`）默认关闭，关闭时行为与未引入该层完全一致。
+
+本地启动依赖：`docker compose -f docker-compose.distributed.yml up -d`（MySQL、
+RabbitMQ、Redis，healthcheck 通过即可），一键演示：`npm run dist:demo`。
+
+设计、配置项、故障语义与验证脚本见 [src/distributed/README.md](src/distributed/README.md)。
+
 ## 常见问题
 
 <details>
