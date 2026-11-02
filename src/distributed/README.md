@@ -222,6 +222,14 @@ MySQL 恢复后，积压的派发记录按对账规则收敛：SQLite 已终态�
 写入。主服务本身仍是单机运行（执行层依赖本机工作区与进程内队列），本机制解决的是
 "多实例同时连同一个机器人导致重复回复"，不是把整个服务做成分布式。
 
+- 出站门控覆盖 `sendMessage` / `sendFile` / `sendImage`。**流式卡片与 `setTyping` 不加门控**：
+  冻结后恢复的进程可能在下一次检查之前再更新一次已有卡片（不会新建消息，也不会重复回复
+  文本），这是为了不打断进行中的卡片生命周期而接受的偏差。
+- Redis 客户端带离线队列时 renew 会挂起，实现里给每次 Redis 往返都加了超时，
+  超时按失败处理，保证自我围栏一定会在 `localDeadline` 生效。
+- Redis 恢复后重新持有连接的时间包含 ioredis 的重连退避，实测比 `leaseMs + renewMs`
+  多约 1–1.5s。
+
 ## Failure modes
 
 `DIST_ADMISSION_FAIL_MODE=open` (default): a Redis error admits the work and

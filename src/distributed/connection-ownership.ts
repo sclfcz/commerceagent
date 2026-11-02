@@ -146,6 +146,25 @@ end
 return redis.call('DEL', KEYS[1])
 `;
 
+/**
+ * Bound every Redis round-trip: a client with an offline queue would otherwise
+ * keep a renew pending forever and the self-fence would never fire.
+ */
+function withDeadline<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}_timeout`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
+}
+
 export interface OwnershipLease {
   readonly credentialKey: string;
   /** Fencing token, monotonic per credential. */
@@ -221,13 +240,17 @@ export class ConnectionOwnership {
     let token: number;
     try {
       token = Number(
-        await this.redis.eval(
-          ACQUIRE_LUA,
-          2,
-          this.ownerKey(credentialKey),
-          this.fenceKey(credentialKey),
-          this.instanceId,
-          String(this.leaseMs),
+        await withDeadline(
+          this.redis.eval(
+            ACQUIRE_LUA,
+            2,
+            this.ownerKey(credentialKey),
+            this.fenceKey(credentialKey),
+            this.instanceId,
+            String(this.leaseMs),
+          ),
+          this.leaseMs,
+          'acquire',
         ),
       );
     } catch (error) {
@@ -323,12 +346,16 @@ export class ConnectionOwnership {
         if (lost) return false;
         try {
           const result = Number(
-            await this.redis.eval(
-              RENEW_LUA,
-              1,
-              this.ownerKey(credentialKey),
-              owner,
-              String(leaseMs),
+            await withDeadline(
+              this.redis.eval(
+                RENEW_LUA,
+                1,
+                this.ownerKey(credentialKey),
+                owner,
+                String(leaseMs),
+              ),
+              renewMs,
+              'renew',
             ),
           );
           if (result !== 1) {
@@ -361,11 +388,15 @@ export class ConnectionOwnership {
         lease.stop();
         this.leases.delete(credentialKey);
         try {
-          await this.redis.eval(
-            RELEASE_LUA,
-            1,
-            this.ownerKey(credentialKey),
-            owner,
+          await withDeadline(
+            this.redis.eval(
+              RELEASE_LUA,
+              1,
+              this.ownerKey(credentialKey),
+              owner,
+            ),
+            renewMs,
+            'release',
           );
         } catch (error) {
           this.logger({

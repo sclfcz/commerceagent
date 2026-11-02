@@ -179,6 +179,7 @@ import {
   getChannelMount,
   migrateAgentProfileAutoCompactWindow,
   getChannelAccount,
+  getLegacyChannelAccount,
   listChannelAccountsForUser,
   listEnabledChannelAccounts,
   updateChannelAccountAuthStatus,
@@ -516,6 +517,14 @@ import {
   ConnectionOwnership,
   loadImOwnershipConfig,
 } from './distributed/connection-ownership.js';
+import {
+  createDingTalkChannel,
+  createDiscordChannel,
+  createFeishuChannel,
+  createQQChannel,
+  createTelegramChannel as createTelegramChannelObject,
+  createWeChatChannel,
+} from './im-channel.js';
 import { createRedis } from './distributed/redis.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { checkOwnerActive } from './owner-gate.js';
@@ -19853,6 +19862,62 @@ async function main(): Promise<void> {
         logger: (event) => logger.info(event, 'im ownership'),
       });
       imManager.setConnectionOwnership(imOwnership);
+      // A lost lease must be rejoínable. Build a *fresh* transport for the
+      // account (never reuse the object we already disconnected); `null` when
+      // the account was deleted or disabled, which stops the standby retries.
+      imManager.setChannelRebuilder(async (userId, channelKey) => {
+        const [provider, accountId] = channelKey.split('\u0000');
+        const account = accountId
+          ? getChannelAccount(accountId)
+          : getLegacyChannelAccount(
+              userId,
+              provider as Parameters<typeof getLegacyChannelAccount>[1],
+            );
+        if (!account || !account.enabled) return null;
+        if (account.owner_user_id !== userId) return null;
+        const secret = loadChannelAccountSecret(account.secret_ref);
+        if (!secret) return null;
+        switch (provider) {
+          case 'feishu':
+            return createFeishuChannel({
+              appId: secret.appId || '',
+              appSecret: secret.appSecret || '',
+            });
+          case 'telegram':
+            return createTelegramChannelObject({
+              botToken: secret.botToken || '',
+              proxyUrl: secret.proxyUrl,
+            });
+          case 'qq':
+            return createQQChannel({
+              appId: secret.appId || '',
+              appSecret: secret.appSecret || '',
+            });
+          case 'dingtalk':
+            return createDingTalkChannel({
+              clientId: secret.clientId || '',
+              clientSecret: secret.clientSecret || '',
+            });
+          case 'discord':
+            return createDiscordChannel(
+              { botToken: secret.botToken || '' },
+              {
+                streamingMode: secret.streamingMode === 'edit' ? 'edit' : 'off',
+              },
+            );
+          case 'wechat':
+            return createWeChatChannel({
+              botToken: secret.botToken || '',
+              ilinkBotId: secret.ilinkBotId || '',
+              baseUrl: secret.baseUrl,
+              cdnBaseUrl: secret.cdnBaseUrl,
+              getUpdatesBuf: secret.getUpdatesBuf,
+              bypassProxy: secret.bypassProxy !== 'false',
+            });
+          default:
+            return null;
+        }
+      });
       logger.info(
         {
           instanceId: ownershipConfig.instanceId,

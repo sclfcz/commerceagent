@@ -19,6 +19,8 @@ const INSTANCE_ID = process.env.DIST_INSTANCE_ID;
 const LEASE_MS = Number(process.env.DIST_IM_LEASE_MS ?? 3000);
 const RENEW_MS = Number(process.env.DIST_IM_RENEW_MS ?? 1000);
 const REDIS_URL = process.env.DIST_REDIS_URL;
+const PLATFORM_MODE =
+  process.env.PLATFORM_MODE === 'buffered' ? 'buffered' : 'push';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'im-chaos-worker-'));
 process.env.COMMERCEAGENT_DATA_DIR = dataDir;
@@ -95,11 +97,12 @@ const ownership = new ConnectionOwnership({
 const manager = new IMConnectionManager();
 manager.setConnectionOwnership(ownership);
 
-function channelFor(credential, jid) {
+function channelFor(credential, jid, userId) {
   let connected = false;
   let stopped = false;
   let connId = null;
   let seq = 0;
+  let acked = 0;
   let loop = null;
   return {
     channelType: 'feishu',
@@ -118,7 +121,7 @@ function channelFor(credential, jid) {
     async connect(opts) {
       const opened = await request(
         'GET',
-        `/connect?credential=${encodeURIComponent(credential)}&instance=${encodeURIComponent(INSTANCE_ID)}`,
+        `/connect?credential=${encodeURIComponent(credential)}&instance=${encodeURIComponent(INSTANCE_ID)}&mode=${PLATFORM_MODE}`,
       );
       connId = opened.conn;
       connected = true;
@@ -129,12 +132,25 @@ function channelFor(credential, jid) {
           try {
             const result = await request(
               'GET',
-              `/poll?credential=${encodeURIComponent(credential)}&conn=${connId}&since=${seq}`,
+              `/poll?credential=${encodeURIComponent(credential)}&conn=${connId}&since=${seq}&ack=${acked}`,
             );
             seq = result.seq ?? seq;
             for (const message of result.messages ?? []) {
+              // Buffered mode only acknowledges what this process is still
+              // entitled to answer: the manager's inbound gate runs inside
+              // `onMessage`, so ownership is checked immediately before it.
+              // The inbound gate still runs (so drops are counted); only a
+              // message this process is entitled to answer gets its offset
+              // acknowledged to the platform.
+              const owned = manager.isChannelOwner(userId, 'feishu');
               try {
                 opts.onMessage?.(jid, `reply:${message.id}`, 'chaos');
+                if (PLATFORM_MODE === 'buffered' && owned)
+                  acked = Math.max(acked, message.offset ?? 0);
+                else if (PLATFORM_MODE === 'buffered')
+                  process.stdout.write(
+                    `${JSON.stringify({ event: 'offset_not_acked', message: message.id })}\n`,
+                  );
               } catch (error) {
                 process.stdout.write(
                   `${JSON.stringify({ event: 'handler_error', error: String(error) })}\n`,
@@ -162,6 +178,13 @@ function channelFor(credential, jid) {
     },
   };
 }
+
+// A lost lease must rejoin with a *fresh* transport, exactly like production.
+manager.setChannelRebuilder(async (userId, channelKey) => {
+  const credential = channelKey.split('\u0000')[0] ?? '';
+  const owner = userId.slice('chaos-owner-'.length);
+  return channelFor(owner, `feishu:${owner}`, userId);
+});
 
 for (const credential of CREDENTIALS) {
   const jid = `feishu:${credential}`;
@@ -194,7 +217,7 @@ for (const credential of CREDENTIALS) {
     .connectChannel(
       userId,
       'feishu',
-      channelFor(credential, jid),
+      channelFor(credential, jid, userId),
       {
         onReady: () => {},
         onNewChat: () => {},
