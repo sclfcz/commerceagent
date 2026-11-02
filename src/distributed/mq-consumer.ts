@@ -41,6 +41,7 @@ export class MqConsumer {
   private channel: Channel | null = null;
   private topology: Topology;
   private consumerTag: string | null = null;
+  private priorityConsumerTag: string | null = null;
   private stopping = false;
   private readonly counters = {
     received: 0,
@@ -96,6 +97,15 @@ export class MqConsumer {
     });
     this.topology = await declareTopology(channel, this.options.topology);
     await channel.prefetch(this.options.concurrency);
+    // Priority lane first: `run.recovered` must not wait behind a long backlog.
+    const priority = await channel.consume(
+      this.topology.priorityQueue,
+      (message) => {
+        if (message) void this.handle(message);
+      },
+      { noAck: false },
+    );
+    this.priorityConsumerTag = priority.consumerTag;
     const consumed = await channel.consume(
       this.topology.mainQueue,
       (message) => {

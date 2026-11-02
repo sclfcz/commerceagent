@@ -51,7 +51,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: commerceagent-dist-redis
-    command: ['redis-server', '--appendonly', 'no']
+    # AOF: the fencing token must stay monotonic across a restart.
+    command: ['redis-server', '--appendonly', 'yes']
     ports:
       # 6379 is often taken locally (Langfuse in this repo's dev setup).
       - '${DIST_REDIS_HOST_PORT:-6379}:6379'

@@ -292,6 +292,10 @@ MySQL 恢复后，积压的派发记录按对账规则收敛：SQLite 已终态�
   文本），这是为了不打断进行中的卡片生命周期而接受的偏差。
 - Redis 客户端带离线队列时 renew 会挂起，实现里给每次 Redis 往返都加了超时，
   超时按失败处理，保证自我围栏一定会在 `localDeadline` 生效。
+- fencing token 的单调递增依赖 Redis 持久化（compose 里 `--appendonly yes`）。持有权校验比较的是
+  完整的 `${instanceId}:${token}`，所以即使 Redis 丢数据导致 token 回退，也不会把不同实例误判成
+  同一个持有者——最坏情况是旧持有者重连后拿到的 token 与它以前用过的一样，此时它必须重新
+  acquire 才能继续服务。
 - Redis 客户端用有上限的重连退避（`retryStrategy: min(times * 100, 500)`），所以
   Redis 恢复后重新持有连接的时间上界约为 `leaseMs + renewMs + 500ms`。
 

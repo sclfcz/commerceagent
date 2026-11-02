@@ -10,6 +10,12 @@ import type { Channel, ChannelModel, ConfirmChannel } from 'amqplib';
  */
 export const EXCHANGE = 'dist.runs';
 export const ROUTING_KEY = 'run.ready';
+/**
+ * Recovered work (lease expiry, admission rejection, graceful hand-back) gets
+ * its own queue: RabbitMQ 4 quorum queues reject `x-max-priority` (406), so the
+ * priority lane is a separate queue whose consumer is otherwise idle.
+ */
+export const RECOVERED_ROUTING_KEY = 'run.recovered';
 export const DEFAULT_QUEUE_PREFIX = 'dist.runs';
 export const DEFAULT_RETRY_TTLS_MS = [5_000, 30_000, 300_000] as const;
 export const MAX_RETRY_COUNT = 5;
@@ -29,6 +35,8 @@ export interface RetryQueue {
 export interface Topology {
   exchange: string;
   mainQueue: string;
+  /** Priority lane for `run.recovered`; consumed before the main backlog. */
+  priorityQueue: string;
   retryQueues: RetryQueue[];
   deadLetterQueue: string;
 }
@@ -40,6 +48,7 @@ export function topologyFor(options: TopologyOptions = {}): Topology {
   return {
     exchange: EXCHANGE,
     mainQueue: `${prefix}.ready`,
+    priorityQueue: `${prefix}.ready.hp`,
     retryQueues: ttls.map((ttlMs, index) => ({
       // Canonical names encode the delay; custom (test) delays get a stable
       // numeric suffix so two different TTL sets never collide on arguments.
@@ -87,6 +96,15 @@ export async function declareTopology(
     arguments: { 'x-queue-type': 'quorum' },
   });
   await channel.bindQueue(topology.mainQueue, topology.exchange, ROUTING_KEY);
+  await channel.assertQueue(topology.priorityQueue, {
+    durable: true,
+    arguments: { 'x-queue-type': 'quorum' },
+  });
+  await channel.bindQueue(
+    topology.priorityQueue,
+    topology.exchange,
+    RECOVERED_ROUTING_KEY,
+  );
   for (const queue of topology.retryQueues) {
     await channel.assertQueue(queue.name, {
       durable: true,

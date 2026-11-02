@@ -229,14 +229,15 @@ export class RunRepository {
     connection: Queryable,
     runId: string,
     tenantId: string,
+    eventType: 'run.ready' | 'run.recovered' = 'run.ready',
   ): Promise<void> {
     await execute(
       connection,
       `INSERT INTO dist_outbox
          (run_id, event_type, payload, status, publish_attempts, available_at, created_at)
-       SELECT ?, 'run.ready', ?, 'pending', 0, available_at, NOW(3)
+       SELECT ?, ?, ?, 'pending', 0, available_at, NOW(3)
          FROM dist_task_runs WHERE id = ?`,
-      [runId, JSON.stringify({ runId, tenantId }), runId],
+      [runId, eventType, JSON.stringify({ runId, tenantId }), runId],
     );
   }
 
@@ -803,6 +804,7 @@ export class RunRepository {
           connection,
           input.runId,
           (rows[0].tenant_id as string) ?? '',
+          'run.recovered',
         );
         return {
           applied: true,
@@ -920,6 +922,7 @@ export class RunRepository {
         connection,
         input.runId,
         (rows[0].tenant_id as string) ?? '',
+        'run.recovered',
       );
       return true;
     });
@@ -996,6 +999,7 @@ export class RunRepository {
               connection,
               String(row.id),
               (row.tenant_id as string) ?? '',
+              'run.recovered',
             );
           await this.insertEvent(connection, {
             runId: String(row.id),

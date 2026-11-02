@@ -142,6 +142,18 @@ function startPlatform(mode) {
       });
       state.connections.set(conn, record);
       state.connectEvents.push({ credential, instance, conn, at: Date.now() });
+      if (mode === 'push') {
+        // Streaming connection: never ends, one JSON line per message. A frozen
+        // process stops reading but the socket stays open (the platform keeps
+        // writing), which is exactly the zombie case.
+        res.writeHead(200, {
+          'content-type': 'application/x-ndjson',
+          'cache-control': 'no-store',
+        });
+        res.write(`${JSON.stringify({ ready: true, conn })}\n`);
+        state.connections.get(conn).stream = res;
+        return;
+      }
       return json(res, 200, { conn });
     }
     if (url.pathname === '/poll') {
@@ -223,6 +235,17 @@ function startPlatform(mode) {
       const stream = streamFor(body.credential);
       stream.seq += 1;
       stream.messages.push({ id: body.id, seq: stream.seq });
+      if (mode === 'push') {
+        const line = `${JSON.stringify({ id: body.id, offset: stream.seq })}\n`;
+        for (const conn of state.connections.values()) {
+          if (conn.closed || conn.credential !== body.credential) continue;
+          try {
+            conn.stream?.write(line);
+          } catch {
+            conn.closed = true;
+          }
+        }
+      }
       state.published.push({
         id: body.id,
         credential: body.credential,
@@ -632,7 +655,50 @@ async function runScenario(options) {
           }
           await sleep(50);
         }
+        // Stage timings from the diagnostic timeline, relative to healthyAt.
+        const events = [];
+        for (const entry of state.stats.values())
+          for (const event of entry.timeline ?? [])
+            if (event.at >= (healthyAt ?? startAt)) events.push(event);
+        events.sort((a, b) => a.at - b.at);
+        const firstOf = (name) => events.find((event) => event.event === name);
+        const firstEnd = (name, after) =>
+          events.find((event) => event.event === name && event.at >= after);
+        const readyAt = firstOf('redis_ready');
+        const acquireStart = firstOf('acquire_start');
+        const acquireEnd = acquireStart
+          ? firstEnd('acquire_end', acquireStart.at)
+          : undefined;
+        const rebuildStart = firstOf('rebuild_start');
+        const rebuildEnd = rebuildStart
+          ? firstEnd('rebuild_end', rebuildStart.at)
+          : undefined;
+        const firstConnect = state.connectEvents.find(
+          (event) => event.at >= (healthyAt ?? startAt),
+        );
+        const recoveryWindowMs =
+          Math.max(0, LEASE_MS - REDIS_OUTAGE_MS) + RENEW_MS + 500 + 1_000;
         Object.assign(redisOutageResult, {
+          stages: {
+            redisReadyMs: readyAt ? readyAt.at - (healthyAt ?? startAt) : null,
+            firstAcquireStartMs: acquireStart
+              ? acquireStart.at - (healthyAt ?? startAt)
+              : null,
+            firstAcquireMs:
+              acquireStart && acquireEnd
+                ? acquireEnd.at - acquireStart.at
+                : null,
+            rebuildMs:
+              rebuildStart && rebuildEnd
+                ? rebuildEnd.at - rebuildStart.at
+                : null,
+            firstConnectMs: firstConnect
+              ? firstConnect.at - (healthyAt ?? startAt)
+              : null,
+          },
+          recoveryWindowMs,
+          recoveryFormula:
+            'max(0, leaseMs - outageMs) + renewMs + 500 (backoff cap) + 1000 (connect timeout)',
           skipped: false,
           stopError,
           stoppedAt: stopAt,
@@ -817,7 +883,7 @@ async function runScenario(options) {
       redisOutageResult.maxOnlineDuringOutage === 0;
     scenarioAssertions.recoveredWithinWindow =
       redisOutageResult.recoveryMs !== null &&
-      redisOutageResult.recoveryMs <= LEASE_MS + RENEW_MS + 1_000;
+      redisOutageResult.recoveryMs <= redisOutageResult.recoveryWindowMs;
   }
   result.assertions = scenarioAssertions;
   return result;

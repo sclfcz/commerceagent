@@ -18,6 +18,9 @@ export function createRedis(
     // client waiting seconds before it retries, which shows up directly in the
     // IM ownership recovery time (lease + renew + ~500ms upper bound).
     retryStrategy: (times) => Math.min(times * 100, 500),
+    // Fail the first handshake quickly: a stopped Redis otherwise holds the
+    // reconnect attempt for the OS TCP timeout, which dominates recovery.
+    connectTimeout: 1_000,
     ...overrides,
   });
 }

@@ -4,6 +4,7 @@ import type { Pool } from './mysql.js';
 import {
   connectAmqp,
   declareTopology,
+  RECOVERED_ROUTING_KEY,
   ROUTING_KEY,
   topologyFor,
   type Topology,
@@ -36,6 +37,7 @@ export interface RelayOptions {
 interface OutboxRow {
   id: number | string;
   run_id: string;
+  event_type: string;
   payload: { runId?: string; tenantId?: string } | null;
 }
 
@@ -163,7 +165,7 @@ export class Relay {
         this.options.pool,
         async (connection) => {
           const [rawRows] = await connection.query(
-            `SELECT id, run_id, payload FROM dist_outbox
+            `SELECT id, run_id, event_type, payload FROM dist_outbox
               WHERE status = 'pending' AND available_at <= NOW(3)
               ORDER BY id
               LIMIT ?
@@ -191,16 +193,21 @@ export class Relay {
               contentType: 'application/json',
               headers: { 'x-run-id': runId },
             };
+            // Recovered work jumps the backlog through the priority lane.
+            const routingKey =
+              row.event_type === 'run.recovered'
+                ? RECOVERED_ROUTING_KEY
+                : ROUTING_KEY;
             channel.publish(
               this.topology.exchange,
-              ROUTING_KEY,
+              routingKey,
               body,
               publishOptions,
             );
             if (this.duplicateRate > 0 && this.random() < this.duplicateRate) {
               channel.publish(
                 this.topology.exchange,
-                ROUTING_KEY,
+                routingKey,
                 body,
                 publishOptions,
               );

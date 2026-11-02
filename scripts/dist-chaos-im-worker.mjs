@@ -88,11 +88,16 @@ if (!db.getUserById(USER_ID)) {
 }
 
 const redis = createRedis(REDIS_URL);
+const timeline = [];
 const ownership = new ConnectionOwnership({
   redis,
   instanceId: INSTANCE_ID,
   leaseMs: LEASE_MS,
   renewMs: RENEW_MS,
+  onEvent: (event, detail) => {
+    timeline.push({ event, at: Date.now(), detail: detail ?? null });
+    if (timeline.length > 200) timeline.splice(0, 100);
+  },
 });
 const manager = new IMConnectionManager();
 manager.setConnectionOwnership(ownership);
@@ -104,6 +109,7 @@ function channelFor(credential, jid, userId) {
   let seq = 0;
   let acked = 0;
   let loop = null;
+  let streamRequest = null;
   const offsets = new Map();
   const advanceAck = (messageId, offset) => {
     if (PLATFORM_MODE !== 'buffered') return;
@@ -128,6 +134,63 @@ function channelFor(credential, jid, userId) {
       advanceAck(messageId, offsets.get(messageId) ?? 0);
     },
     async connect(opts) {
+      stopped = false;
+      if (PLATFORM_MODE === 'push') {
+        // Streaming: one JSON line per message until the socket closes.
+        await new Promise((resolve, reject) => {
+          const url = new URL(
+            `/connect?credential=${encodeURIComponent(credential)}&instance=${encodeURIComponent(INSTANCE_ID)}&mode=push`,
+            PLATFORM,
+          );
+          const req = http.get(url, (res) => {
+            let buffer = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => {
+              buffer += chunk;
+              let index = buffer.indexOf('\n');
+              while (index >= 0) {
+                const line = buffer.slice(0, index);
+                buffer = buffer.slice(index + 1);
+                index = buffer.indexOf('\n');
+                if (!line.trim()) continue;
+                let message;
+                try {
+                  message = JSON.parse(line);
+                } catch {
+                  continue;
+                }
+                if (message.ready) {
+                  connId = message.conn;
+                  connected = true;
+                  opts.onReady?.();
+                  resolve();
+                  continue;
+                }
+                const owned = manager.isChannelOwner(userId, 'feishu');
+                if (!owned) {
+                  timeline.push({ event: 'inbound_not_owner', at: Date.now() });
+                }
+                try {
+                  opts.onMessage?.(jid, `reply:${message.id}`, 'chaos');
+                } catch {
+                  /* handler failure must not kill the stream */
+                }
+              }
+            });
+            res.on('end', () => {
+              connected = false;
+              resolve();
+            });
+          });
+          req.on('error', (error) => {
+            connected = false;
+            reject(error);
+          });
+          req.setTimeout(0);
+          streamRequest = req;
+        });
+        return true;
+      }
       const opened = await request(
         'GET',
         `/connect?credential=${encodeURIComponent(credential)}&instance=${encodeURIComponent(INSTANCE_ID)}&mode=${PLATFORM_MODE}`,
@@ -176,6 +239,10 @@ function channelFor(credential, jid, userId) {
     async disconnect() {
       stopped = true;
       connected = false;
+      if (streamRequest) {
+        streamRequest.destroy();
+        streamRequest = null;
+      }
       if (connId)
         await request('POST', '/disconnect', {
           credential,
@@ -248,6 +315,7 @@ process.stdout.write(
 const statsTimer = setInterval(() => {
   void request('POST', '/stats', {
     instance: INSTANCE_ID,
+    timeline: timeline.slice(-40),
     ...manager.getConnectionOwnershipStats(),
     standby: manager.getStandbyAccounts().length,
   }).catch(() => {});

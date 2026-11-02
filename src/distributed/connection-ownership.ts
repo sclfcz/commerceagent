@@ -195,6 +195,11 @@ export interface ConnectionOwnershipOptions {
   monotonicNow?: () => number;
   /** Wall clock, used for logs only. */
   now?: () => number;
+  /**
+   * Diagnostic timeline (chaos reports only): `redis_ready`, `acquire_start`,
+   * `acquire_end`. Never used for correctness decisions.
+   */
+  onEvent?: (event: string, detail?: Record<string, unknown>) => void;
 }
 
 export class ConnectionOwnership {
@@ -205,6 +210,10 @@ export class ConnectionOwnership {
   private readonly logger: (event: Record<string, unknown>) => void;
   private readonly monotonicNow: () => number;
   private readonly now: () => number;
+  private readonly onEvent?: (
+    event: string,
+    detail?: Record<string, unknown>,
+  ) => void;
   private readonly leases = new Map<string, OwnershipLease>();
 
   constructor(options: ConnectionOwnershipOptions) {
@@ -215,6 +224,17 @@ export class ConnectionOwnership {
     this.logger = options.logger ?? (() => {});
     this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.now = options.now ?? Date.now;
+    this.onEvent = options.onEvent;
+    this.redis.on('ready', () => this.record('redis_ready'));
+  }
+
+  /** Record a timeline event (diagnostics only). */
+  record(event: string, detail?: Record<string, unknown>): void {
+    try {
+      this.onEvent?.(event, detail);
+    } catch {
+      /* diagnostics must never throw */
+    }
   }
 
   private ownerKey(credentialKey: string): string {
@@ -238,6 +258,7 @@ export class ConnectionOwnership {
     const existing = this.leases.get(credentialKey);
     if (existing && existing.isCurrent()) return existing;
     let token: number;
+    this.record('acquire_start', { credentialKey });
     try {
       token = Number(
         await withDeadline(
@@ -261,6 +282,10 @@ export class ConnectionOwnership {
       });
       return null;
     }
+    this.record('acquire_end', {
+      credentialKey,
+      granted: Number.isSafeInteger(token) && token > 0,
+    });
     if (!Number.isSafeInteger(token) || token <= 0) return null;
     const lease = this.createLease(credentialKey, token, onLost);
     this.leases.set(credentialKey, lease);

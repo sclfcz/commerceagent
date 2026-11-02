@@ -512,10 +512,17 @@ export class IMConnectionManager {
       void (async () => {
         let channel = args.channel;
         if (args.needsRebuild) {
+          this.ownership?.record('rebuild_start', {
+            userId: args.userId,
+            channelKey: args.channelKey,
+          });
           const rebuilt = await this.channelRebuilder?.(
             args.userId,
             args.channelKey,
           );
+          this.ownership?.record('rebuild_end', {
+            ok: rebuilt !== null && rebuilt !== undefined,
+          });
           if (rebuilt === null) {
             // Account deleted/disabled: stop pretending we can take over.
             this.standbyKeys.delete(ownerKey);
