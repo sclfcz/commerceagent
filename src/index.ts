@@ -179,6 +179,7 @@ import {
   getChannelMount,
   migrateAgentProfileAutoCompactWindow,
   getChannelAccount,
+  getLegacyChannelAccount,
   listChannelAccountsForUser,
   listEnabledChannelAccounts,
   updateChannelAccountAuthStatus,
@@ -512,6 +513,19 @@ import {
   isUnknownFeishuSenderAllowed,
 } from './im-audience-policy.js';
 import { logger } from './logger.js';
+import {
+  ConnectionOwnership,
+  loadImOwnershipConfig,
+} from './distributed/connection-ownership.js';
+import {
+  createDingTalkChannel,
+  createDiscordChannel,
+  createFeishuChannel,
+  createQQChannel,
+  createTelegramChannel as createTelegramChannelObject,
+  createWeChatChannel,
+} from './im-channel.js';
+import { createRedis } from './distributed/redis.js';
 import { resolveTaskOwner } from './task-utils.js';
 import { checkOwnerActive } from './owner-gate.js';
 import {
@@ -1233,6 +1247,13 @@ class IpcWatcherManager {
 }
 
 let ipcWatcherManager: IpcWatcherManager | null = null;
+/** Cross-instance IM credential ownership, installed when DIST_IM_OWNERSHIP=1. */
+let imOwnership: ConnectionOwnership | null = null;
+/**
+ * Embedded distributed dispatcher for scheduled tasks (DIST_SCHEDULER=1).
+ * When null the scheduler runs its legacy claim loop unchanged.
+ */
+let distSchedulerBridge: { stop(): Promise<void> } | null = null;
 /** JIDs already persisted by the shutdown handler — prevents finally blocks from duplicating. */
 const shutdownSavedJids = new Set<string>();
 
@@ -19824,6 +19845,93 @@ async function main(): Promise<void> {
   // Migrate system-level IM config → admin's per-user config (one-time)
   migrateSystemIMToPerUser();
 
+  // Cross-instance IM credential ownership (DIST_IM_OWNERSHIP=1). Must be
+  // installed before loadState() connects any channel, otherwise the first
+  // connector would start without a lease.
+  try {
+    const ownershipConfig = loadImOwnershipConfig();
+    if (ownershipConfig.enabled) {
+      const redis = createRedis(
+        process.env.DIST_REDIS_URL?.trim() || 'redis://127.0.0.1:6379',
+      );
+      imOwnership = new ConnectionOwnership({
+        redis,
+        instanceId: ownershipConfig.instanceId,
+        leaseMs: ownershipConfig.leaseMs,
+        renewMs: ownershipConfig.renewMs,
+        logger: (event) => logger.info(event, 'im ownership'),
+      });
+      imManager.setConnectionOwnership(imOwnership);
+      // A lost lease must be rejoínable. Build a *fresh* transport for the
+      // account (never reuse the object we already disconnected); `null` when
+      // the account was deleted or disabled, which stops the standby retries.
+      imManager.setChannelRebuilder(async (userId, channelKey) => {
+        const [provider, accountId] = channelKey.split('\u0000');
+        const account = accountId
+          ? getChannelAccount(accountId)
+          : getLegacyChannelAccount(
+              userId,
+              provider as Parameters<typeof getLegacyChannelAccount>[1],
+            );
+        if (!account || !account.enabled) return null;
+        if (account.owner_user_id !== userId) return null;
+        const secret = loadChannelAccountSecret(account.secret_ref);
+        if (!secret) return null;
+        switch (provider) {
+          case 'feishu':
+            return createFeishuChannel({
+              appId: secret.appId || '',
+              appSecret: secret.appSecret || '',
+            });
+          case 'telegram':
+            return createTelegramChannelObject({
+              botToken: secret.botToken || '',
+              proxyUrl: secret.proxyUrl,
+            });
+          case 'qq':
+            return createQQChannel({
+              appId: secret.appId || '',
+              appSecret: secret.appSecret || '',
+            });
+          case 'dingtalk':
+            return createDingTalkChannel({
+              clientId: secret.clientId || '',
+              clientSecret: secret.clientSecret || '',
+            });
+          case 'discord':
+            return createDiscordChannel(
+              { botToken: secret.botToken || '' },
+              {
+                streamingMode: secret.streamingMode === 'edit' ? 'edit' : 'off',
+              },
+            );
+          case 'wechat':
+            return createWeChatChannel({
+              botToken: secret.botToken || '',
+              ilinkBotId: secret.ilinkBotId || '',
+              baseUrl: secret.baseUrl,
+              cdnBaseUrl: secret.cdnBaseUrl,
+              getUpdatesBuf: secret.getUpdatesBuf,
+              bypassProxy: secret.bypassProxy !== 'false',
+            });
+          default:
+            return null;
+        }
+      });
+      logger.info(
+        {
+          instanceId: ownershipConfig.instanceId,
+          leaseMs: ownershipConfig.leaseMs,
+          renewMs: ownershipConfig.renewMs,
+        },
+        'IM credential ownership enabled (DIST_IM_OWNERSHIP=1)',
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, 'Failed to enable IM credential ownership');
+    imOwnership = null;
+  }
+
   loadState();
 
   // Plugin catalog scan: one shot 5s after startup + every 1h thereafter.
@@ -19898,6 +20006,17 @@ async function main(): Promise<void> {
     unsubscribeChannelReadyRecovery?.();
     unsubscribeChannelReadyRecovery = null;
 
+    // Stop the distributed dispatcher first: it must not claim new envelopes
+    // while the legacy scheduler drains its in-flight executions.
+    if (distSchedulerBridge) {
+      await distSchedulerBridge
+        .stop()
+        .catch((err) =>
+          logger.warn({ err }, 'Error stopping distributed scheduler bridge'),
+        );
+      distSchedulerBridge = null;
+    }
+
     // Phase 0: stop materializing new occurrences and drain scheduler-owned
     // detached work (script runs, notification retries) that the group queue
     // does not track. Delivery stays available throughout so those can settle.
@@ -19951,6 +20070,13 @@ async function main(): Promise<void> {
       .disconnectAll()
       .catch((err) =>
         logger.warn({ err }, 'Error disconnecting IM connections'),
+      );
+    // Hand every credential over immediately instead of making a standby wait
+    // for the lease to expire.
+    await imOwnership
+      ?.releaseAll()
+      .catch((err) =>
+        logger.warn({ err }, 'Error releasing IM ownership leases'),
       );
 
     clearTimeout(forceExitTimer);
@@ -21135,6 +21261,27 @@ async function main(): Promise<void> {
     },
     assistantName: ASSISTANT_NAME,
   };
+
+  if (process.env.DIST_SCHEDULER === '1') {
+    try {
+      const { startSchedulerBridge } =
+        await import('./distributed/scheduled-bridge.js');
+      distSchedulerBridge = startSchedulerBridge({
+        scheduler: schedulerDeps,
+        logger: (event) => logger.info(event, 'distributed scheduler'),
+      });
+      logger.info('Distributed scheduler dispatch enabled (DIST_SCHEDULER=1)');
+    } catch (err) {
+      // Never let dispatch infrastructure stop the service: without the bridge
+      // the hook stays unset and the legacy claim loop keeps running.
+      logger.error(
+        { err },
+        'Failed to start distributed scheduler bridge; falling back to legacy dispatch',
+      );
+      distSchedulerBridge = null;
+    }
+  }
+
   startSchedulerLoop(schedulerDeps);
 
   // Inject triggerTaskRun into WebDeps (schedulerDeps must exist first)

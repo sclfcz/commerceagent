@@ -46,19 +46,20 @@ Agent Profile（身份、四段 Prompt、能力策略）
 
 ### 3.1 主服务
 
-| 文件/目录                          | 职责                                                   |
-| ---------------------------------- | ------------------------------------------------------ |
-| `src/index.ts`                     | 启动、消息消费、渠道路由、IPC、调度与 Agent 运行编排   |
-| `src/web.ts`                       | Hono 应用、路由挂载、Cookie 认证、WebSocket 与静态资源 |
-| `src/db.ts`                        | SQLite Schema、迁移和持久化访问器                      |
-| `src/group-queue.ts`               | Session 串行、Runner 生命周期、重试与容量控制          |
-| `src/container-runner.ts`          | Host/Container Runner、挂载、环境与能力快照            |
-| `src/task-scheduler.ts`            | Cron、interval、once 调度和重启恢复                    |
-| `src/channel-mount-service.ts`     | 工作区/会话绑定和原生线程路由                          |
-| `src/channel-reliability-store.ts` | Inbox、Turn、Outbox、Streaming Card 的持久状态机       |
-| `src/im-manager.ts`                | 多用户、多账号渠道连接池                               |
-| `src/agent-capability-preview.ts`  | Agent 最终上下文和能力预览                             |
-| `src/claude-context-resolver.ts`   | Claude 上下文、Skills 与来源解析                       |
+| 文件/目录                          | 职责                                                                                                 |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `src/index.ts`                     | 启动、消息消费、渠道路由、IPC、调度与 Agent 运行编排                                                 |
+| `src/web.ts`                       | Hono 应用、路由挂载、Cookie 认证、WebSocket 与静态资源                                               |
+| `src/db.ts`                        | SQLite Schema、迁移和持久化访问器                                                                    |
+| `src/group-queue.ts`               | Session 串行、Runner 生命周期、重试与容量控制                                                        |
+| `src/container-runner.ts`          | Host/Container Runner、挂载、环境与能力快照                                                          |
+| `src/task-scheduler.ts`            | Cron、interval、once 调度和重启恢复                                                                  |
+| `src/distributed/`                 | 可选的分布式派发层：MySQL 租约认领、Outbox + RabbitMQ 唤醒、Redis 租户准入与 IM 连接持有权，默认关闭 |
+| `src/channel-mount-service.ts`     | 工作区/会话绑定和原生线程路由                                                                        |
+| `src/channel-reliability-store.ts` | Inbox、Turn、Outbox、Streaming Card 的持久状态机                                                     |
+| `src/im-manager.ts`                | 多用户、多账号渠道连接池                                                                             |
+| `src/agent-capability-preview.ts`  | Agent 最终上下文和能力预览                                                                           |
+| `src/claude-context-resolver.ts`   | Claude 上下文、Skills 与来源解析                                                                     |
 
 渠道实现位于：
 
@@ -296,6 +297,20 @@ Web 持久设置 > 环境变量 > 代码默认值
 Provider 和渠道账号应优先通过 Web 配置。Legacy `/api/config/user-im/*` 只用于兼容，
 新功能统一使用 `/api/channel-accounts`。
 
+### 可选分布式层
+
+默认关闭，关闭时行为与未引入该层完全一致。
+
+| 变量                | 默认值 | 说明                         |
+| ------------------- | ------ | ---------------------------- |
+| `DIST_SCHEDULER`    | 关闭   | `1` 时定时任务走分布式派发层 |
+| `DIST_IM_OWNERSHIP` | 关闭   | `1` 时 IM 凭证跨实例单持有者 |
+| `DIST_MYSQL_URL`    | 无     | 派发层 MySQL                 |
+| `DIST_AMQP_URL`     | 无     | RabbitMQ 唤醒通道            |
+| `DIST_REDIS_URL`    | 无     | 租户准入与 IM 持有权         |
+
+其余变量（租约、心跳、并发、退避、结算窗口等）见 `src/distributed/README.md`。
+
 ## 10. 开发与验证
 
 ```bash
@@ -318,6 +333,7 @@ npm run self-test
 - 修改文档后运行 `npm run docs:check`。
 - SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。
 - 容器以非 root 用户执行 Agent；修改 Dockerfile 或 entrypoint 后需要重建镜像。
+- 分布式层的测试需要 `DIST_MYSQL_TEST_URL` / `DIST_AMQP_TEST_URL` / `DIST_REDIS_TEST_URL`，未设置时自动跳过；本地环境用 `docker compose -f docker-compose.distributed.yml up -d`，一键演示用 `npm run dist:demo`。
 - 停止服务只能杀监听进程：`lsof -ti:PORT -sTCP:LISTEN | xargs kill`。
 - 不要使用会杀死连接方或 Docker 网络代理的宽泛端口 kill 命令。
 

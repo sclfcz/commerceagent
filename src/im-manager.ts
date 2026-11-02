@@ -56,6 +56,12 @@ import {
 } from './db.js';
 import { getUserDingTalkConfig } from './runtime-config.js';
 import { logger } from './logger.js';
+import {
+  ConnectionOwnershipLostError,
+  ownershipCredentialKey,
+  type ConnectionOwnership,
+  type OwnershipLease,
+} from './distributed/connection-ownership.js';
 import type {
   ChannelMessageMeta,
   ChannelTurnContext,
@@ -191,6 +197,23 @@ export interface ConnectFeishuOptions {
   onP2pSender?: (senderOpenId: string) => void;
 }
 
+/** Everything needed to retry `connectChannel` from a standby timer. */
+interface StandbyConnectArgs {
+  userId: string;
+  channelType: string;
+  /** Account-scoped key used for the ownership lease (`type` or `type\0acct`). */
+  channelKey: string;
+  channel: IMChannel;
+  opts: IMChannelConnectOpts;
+  accountId: string | null;
+  scopeIncomingJids: boolean;
+  credentialIdentity: string;
+  attempts: number;
+  /** True once the lease was lost after a real connect: the transport object
+   * we were given is already disconnected and must not be reused. */
+  needsRebuild: boolean;
+}
+
 export class IMConnectionManager {
   private connections = new Map<string, UserIMConnection>();
   private adminUserIds = new Set<string>();
@@ -232,6 +255,67 @@ export class IMConnectionManager {
    */
   private inboundPaused = false;
   private inboundDeferred = false;
+  /**
+   * Cross-instance ownership of provider credentials (DIST_IM_OWNERSHIP=1).
+   * `null` keeps the exact pre-existing behaviour: every process that loads a
+   * user connects and answers.
+   */
+  private ownership: ConnectionOwnership | null = null;
+  private channelRebuilder:
+    | ((userId: string, channelKey: string) => Promise<IMChannel | null>)
+    | null = null;
+  /** ownerKey (`userId\0channelKey`) -> lease currently held by this process. */
+  private ownershipLeases = new Map<string, OwnershipLease>();
+  /** ownerKey -> how to reconnect when this process is a standby. */
+  private standbyConnects = new Map<string, StandbyConnectArgs>();
+  private standbyTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private standbyKeys = new Set<string>();
+  private ownershipStats = {
+    inboundDroppedNotOwner: 0,
+    outboundRefusedNotOwner: 0,
+    standbyAcquireAttempts: 0,
+    ownershipLost: 0,
+  };
+
+  /**
+   * Install (or remove) cross-instance credential ownership. Called once at
+   * startup when `DIST_IM_OWNERSHIP=1`; tests call it directly.
+   */
+  setConnectionOwnership(ownership: ConnectionOwnership | null): void {
+    this.ownership = ownership;
+  }
+
+  /**
+   * Builds a *fresh* transport for a credential after a lease loss. Installing
+   * it makes every lost lease rejoínable: the retry calls this instead of
+   * reusing the object we already disconnected.
+   *
+   * Returning `null` means the account is gone/disabled: standby stops.
+   */
+  setChannelRebuilder(
+    rebuild:
+      | ((userId: string, channelKey: string) => Promise<IMChannel | null>)
+      | null,
+  ): void {
+    this.channelRebuilder = rebuild;
+  }
+
+  /**
+   * Whether this process currently owns the credential behind a channel.
+   * `true` when cross-instance ownership is not configured (legacy).
+   */
+  isChannelOwner(userId: string, channelKey: string): boolean {
+    return this.ownershipAllows(userId, channelKey);
+  }
+
+  getConnectionOwnershipStats(): Readonly<typeof this.ownershipStats> {
+    return { ...this.ownershipStats };
+  }
+
+  /** ownerKeys currently treated as standby (connected channel = none). */
+  getStandbyAccounts(): string[] {
+    return [...this.standbyKeys];
+  }
 
   pauseInbound(): void {
     this.inboundPaused = true;
@@ -278,11 +362,7 @@ export class IMConnectionManager {
     userId: string,
     accountId?: string | null,
   ): void {
-    const fingerprint = crypto
-      .createHash('sha256')
-      .update(`${provider}\0${credentialIdentity}`)
-      .digest('hex');
-    const credentialKey = `${provider}\0${fingerprint}`;
+    const credentialKey = ownershipCredentialKey(provider, credentialIdentity);
     const channelKey = this.channelKey(provider, accountId);
     const ownerKey = `${userId}\0${channelKey}`;
     const claimedBy = this.credentialClaims.get(credentialKey);
@@ -309,16 +389,189 @@ export class IMConnectionManager {
     this.connectionCredentialClaims.delete(ownerKey);
   }
 
+  private ownershipOwnerKey(userId: string, channelKey: string): string {
+    return `${userId}\u0000${channelKey}`;
+  }
+
+  private leaseFor(
+    userId: string,
+    channelKey: string,
+  ): OwnershipLease | undefined {
+    return this.ownershipLeases.get(this.ownershipOwnerKey(userId, channelKey));
+  }
+
+  /** True when this process may act on behalf of the credential (or when
+   * cross-instance ownership is not configured at all). */
+  private ownershipAllows(
+    userId: string | undefined,
+    channelKey: string,
+  ): boolean {
+    if (!this.ownership || !userId) return true;
+    const lease = this.leaseFor(userId, channelKey);
+    if (!lease) return true;
+    return lease.isCurrent();
+  }
+
+  /**
+   * Inbound gate: a frozen process resumes with queued events before any
+   * timer can fire, so ownership must be checked per message, not only when
+   * the renewal timer happens to run.
+   */
+  private ownershipAllowsInbound(
+    userId: string | undefined,
+    channelKey: string,
+  ): boolean {
+    if (this.ownershipAllows(userId, channelKey)) return true;
+    this.ownershipStats.inboundDroppedNotOwner += 1;
+    return false;
+  }
+
+  private ownershipAllowsOutbound(
+    userId: string,
+    channelKey: string,
+    credentialKey: string,
+  ): void {
+    if (this.ownershipAllows(userId, channelKey)) return;
+    this.ownershipStats.outboundRefusedNotOwner += 1;
+    throw new ConnectionOwnershipLostError(
+      credentialKey,
+      new Date(Date.now() + 1_000).toISOString(),
+    );
+  }
+
+  private async releaseOwnership(
+    userId: string,
+    channelKey: string,
+  ): Promise<void> {
+    const ownerKey = this.ownershipOwnerKey(userId, channelKey);
+    const lease = this.ownershipLeases.get(ownerKey);
+    this.ownershipLeases.delete(ownerKey);
+    this.clearStandbyRetry(ownerKey);
+    this.standbyKeys.delete(ownerKey);
+    if (!lease) return;
+    // Normal disconnect / shutdown: hand the credential over immediately
+    // instead of making the standby wait for the lease to expire.
+    await lease.release();
+  }
+
+  private clearStandbyRetry(ownerKey: string): void {
+    const timer = this.standbyTimers.get(ownerKey);
+    if (timer) {
+      clearTimeout(timer);
+      this.standbyTimers.delete(ownerKey);
+    }
+  }
+
+  /**
+   * Called from the lease's onLost callback and from the inbound gate.
+   *
+   * Runs the *existing* per-(userId, channelType) lock and disconnect path so
+   * there is exactly one teardown implementation, then becomes a standby.
+   */
+  private handleOwnershipLost(userId: string, channelKey: string): void {
+    const ownerKey = this.ownershipOwnerKey(userId, channelKey);
+    const lease = this.ownershipLeases.get(ownerKey);
+    if (!lease) return;
+    // Keep the dead lease in the map: it is `isCurrent() === false` forever,
+    // which is what keeps inbound/outbound fenced until a new lease is
+    // acquired. Deleting it would make the manager look "unconfigured".
+    this.ownershipStats.ownershipLost += 1;
+    lease.stop();
+    logger.warn(
+      { userId, channelKey },
+      'IM ownership lost; disconnecting and going standby',
+    );
+    void this.withChannelLock(userId, channelKey, async () => {
+      await this.disconnectChannelLocked(userId, channelKey);
+    })
+      .catch((error: unknown) => {
+        logger.warn(
+          { userId, channelKey, error },
+          'IM ownership teardown failed',
+        );
+      })
+      .finally(() => {
+        const args = this.standbyConnects.get(ownerKey);
+        if (args) {
+          // The transport is already disconnected: a standby retry must build
+          // a fresh one, never reconnect the dead object.
+          args.needsRebuild = true;
+          this.scheduleStandbyRetry(args);
+        }
+      });
+  }
+
+  private scheduleStandbyRetry(args: StandbyConnectArgs): void {
+    const ownerKey = this.ownershipOwnerKey(args.userId, args.channelKey);
+    if (this.standbyTimers.has(ownerKey)) return;
+    const delay = this.ownership?.renewMs ?? 5_000;
+    this.standbyKeys.add(ownerKey);
+    const timer = setTimeout(() => {
+      this.standbyTimers.delete(ownerKey);
+      this.ownershipStats.standbyAcquireAttempts += 1;
+      void (async () => {
+        let channel = args.channel;
+        if (args.needsRebuild) {
+          this.ownership?.record('rebuild_start', {
+            userId: args.userId,
+            channelKey: args.channelKey,
+          });
+          const rebuilt = await this.channelRebuilder?.(
+            args.userId,
+            args.channelKey,
+          );
+          this.ownership?.record('rebuild_end', {
+            ok: rebuilt !== null && rebuilt !== undefined,
+          });
+          if (rebuilt === null) {
+            // Account deleted/disabled: stop pretending we can take over.
+            this.standbyKeys.delete(ownerKey);
+            this.standbyConnects.delete(ownerKey);
+            logger.info(
+              { userId: args.userId, channelKey: args.channelKey },
+              'IM standby dropped: channel account is no longer connectable',
+            );
+            return;
+          }
+          if (rebuilt) channel = rebuilt;
+        }
+        await this.connectChannel(
+          args.userId,
+          args.channelType,
+          channel,
+          args.opts,
+          args.accountId,
+          args.scopeIncomingJids,
+          args.credentialIdentity,
+          { standbyAttempt: args.attempts + 1 },
+        );
+      })().catch((error: unknown) => {
+        logger.warn(
+          { userId: args.userId, channelKey: args.channelType, error },
+          'Standby IM reconnect failed',
+        );
+        this.scheduleStandbyRetry({ ...args, attempts: args.attempts + 1 });
+      });
+    }, delay);
+    timer.unref?.();
+    this.standbyTimers.set(ownerKey, timer);
+  }
+
   private scopeConnectOpts(
     opts: IMChannelConnectOpts,
     accountId?: string | null,
     userId?: string,
+    channelKey?: string,
   ): IMChannelConnectOpts {
     const scope = (jid: string) =>
       accountId ? scopeChannelJid(jid, accountId) : jid;
     const inboundAllowed = (): boolean => {
       if (this.inboundPaused) return false;
       if (userId && this.sealedUsers.has(userId)) return false;
+      // Per-message ownership gate: after a freeze the queued events arrive
+      // before the renewal timer can notice the lease is gone.
+      if (channelKey && !this.ownershipAllowsInbound(userId, channelKey))
+        return false;
       // Most lifecycle unit tests intentionally use the manager without a DB.
       // The production process always initializes SQLite before connecting IM.
       if (!userId || !isDatabaseInitialized()) return true;
@@ -611,8 +864,10 @@ export class IMConnectionManager {
     accountId?: string | null,
     scopeIncomingJids = true,
     credentialIdentity?: string,
+    internal: { standbyAttempt?: number } = {},
   ): Promise<boolean> {
     const channelKey = this.channelKey(channelType, accountId);
+    const ownershipOwnerKey = this.ownershipOwnerKey(userId, channelKey);
     // user 维度锁 + sealed 检查：避免与 disconnectAllUserChannels race。
     // disconnect-all 期间任何 connect 都被排到锁队列后面；disconnect-all
     // 完成时把 user 标 sealed，新 connect 直接拒绝。运维流程：禁用/删除
@@ -653,6 +908,61 @@ export class IMConnectionManager {
             accountId,
           );
         }
+        // Cross-instance fence: only the lease holder may open a connector.
+        // A standby keeps the credential claim (it is process-local and does
+        // not affect other instances) and retries on a timer.
+        if (credentialIdentity && this.ownership) {
+          const credentialKey = ownershipCredentialKey(
+            channelType,
+            credentialIdentity,
+          );
+          const existing = this.ownershipLeases.get(ownershipOwnerKey);
+          let lease: OwnershipLease | null =
+            existing && existing.isCurrent() ? existing : null;
+          if (!lease) {
+            lease = await this.ownership.acquire(credentialKey, () =>
+              this.handleOwnershipLost(userId, channelKey),
+            );
+          }
+          if (!lease) {
+            this.releaseCredentialClaim(userId, channelKey);
+            this.standbyConnects.set(ownershipOwnerKey, {
+              userId,
+              channelType,
+              channelKey,
+              channel,
+              opts,
+              accountId: accountId ?? null,
+              scopeIncomingJids,
+              credentialIdentity,
+              attempts: internal.standbyAttempt ?? 0,
+              needsRebuild: false,
+            });
+            this.scheduleStandbyRetry(
+              this.standbyConnects.get(ownershipOwnerKey)!,
+            );
+            logger.info(
+              { userId, channelType, accountId },
+              'IM credential held by another instance; standby',
+            );
+            return false;
+          }
+          this.ownershipLeases.set(ownershipOwnerKey, lease);
+          this.clearStandbyRetry(ownershipOwnerKey);
+          this.standbyKeys.delete(ownershipOwnerKey);
+          this.standbyConnects.set(ownershipOwnerKey, {
+            userId,
+            channelType,
+            channelKey,
+            channel,
+            opts,
+            accountId: accountId ?? null,
+            scopeIncomingJids,
+            credentialIdentity,
+            attempts: internal.standbyAttempt ?? 0,
+            needsRebuild: false,
+          });
+        }
         const conn = this.getOrCreate(userId);
         const cleanupRejectedChannel = async (): Promise<boolean> => {
           try {
@@ -678,12 +988,14 @@ export class IMConnectionManager {
               opts,
               scopeIncomingJids ? accountId : null,
               userId,
+              channelKey,
             ),
           );
         } catch (error) {
           if (await cleanupRejectedChannel()) {
             this.releaseCredentialClaim(userId, channelKey);
           }
+          await this.releaseOwnership(userId, channelKey);
           throw error;
         }
         if (connected) {
@@ -696,6 +1008,7 @@ export class IMConnectionManager {
               /* ignore */
             }
             this.releaseCredentialClaim(userId, channelKey);
+            await this.releaseOwnership(userId, channelKey);
             return false;
           }
           conn.channels.set(channelKey, channel);
@@ -717,6 +1030,7 @@ export class IMConnectionManager {
           if (await cleanupRejectedChannel()) {
             this.releaseCredentialClaim(userId, channelKey);
           }
+          await this.releaseOwnership(userId, channelKey);
         }
         return connected;
       });
@@ -729,6 +1043,7 @@ export class IMConnectionManager {
   async disconnectChannel(userId: string, channelType: string): Promise<void> {
     return this.withChannelLock(userId, channelType, async () => {
       await this.disconnectChannelLocked(userId, channelType);
+      await this.releaseOwnership(userId, channelType);
     });
   }
 
@@ -740,6 +1055,7 @@ export class IMConnectionManager {
     const key = this.channelKey(channelType, accountId);
     return this.withChannelLock(userId, key, async () => {
       await this.disconnectChannelLocked(userId, key);
+      await this.releaseOwnership(userId, key);
     });
   }
 
@@ -776,10 +1092,20 @@ export class IMConnectionManager {
     }
 
     const chatId = extractProviderTarget(jid);
-    const channel = this.findChannelForJid(jid, channelType);
-    if (!channel) {
+    const route = this.findChannelRoute(jid, channelType);
+    const channel = route?.channel;
+    if (!route || !channel) {
       throw new Error(`No IM channel available for ${jid} (${channelType})`);
     }
+    // Outbound fence: a non-owner must not answer, even if a stale transport
+    // is still open (frozen process, expired lease).
+    this.ownershipAllowsOutbound(
+      route.userId,
+      route.channelKey,
+      this.connectionCredentialClaims.get(
+        this.ownershipOwnerKey(route.userId, route.channelKey),
+      ) ?? route.channelKey,
+    );
     if (options) {
       await channel.sendMessage(chatId, text, localImagePaths, options);
     } else {
@@ -805,7 +1131,17 @@ export class IMConnectionManager {
     }
 
     const chatId = extractProviderTarget(jid);
-    const channel = this.findChannelForJid(jid, channelType);
+    const route = this.findChannelRoute(jid, channelType);
+    if (route) {
+      this.ownershipAllowsOutbound(
+        route.userId,
+        route.channelKey,
+        this.connectionCredentialClaims.get(
+          this.ownershipOwnerKey(route.userId, route.channelKey),
+        ) ?? route.channelKey,
+      );
+    }
+    const channel = route?.channel;
     if (channel?.sendImage) {
       await channel.sendImage(chatId, imageBuffer, mimeType, caption, fileName);
       return;
@@ -836,7 +1172,17 @@ export class IMConnectionManager {
     }
 
     const chatId = extractProviderTarget(jid);
-    const channel = this.findChannelForJid(jid, channelType);
+    const route = this.findChannelRoute(jid, channelType);
+    if (route) {
+      this.ownershipAllowsOutbound(
+        route.userId,
+        route.channelKey,
+        this.connectionCredentialClaims.get(
+          this.ownershipOwnerKey(route.userId, route.channelKey),
+        ) ?? route.channelKey,
+      );
+    }
+    const channel = route?.channel;
     if (channel?.sendFile) {
       await channel.sendFile(chatId, filePath, fileName);
     } else {
@@ -1049,6 +1395,15 @@ export class IMConnectionManager {
     jid: string,
     channelType: string,
   ): IMChannel | undefined {
+    return this.findChannelRoute(jid, channelType)?.channel;
+  }
+
+  /** Same resolution as `findChannelForJid`, plus the identity of the exact
+   * connection so outbound sends can be fenced by credential ownership. */
+  private findChannelRoute(
+    jid: string,
+    channelType: string,
+  ): { channel: IMChannel; userId: string; channelKey: string } | undefined {
     const baseJid = channelConversationJid(jid);
     const scopedAccountId = parseChannelAddress(jid)?.channelAccountId;
     const group = getRegisteredGroup(baseJid);
@@ -1070,8 +1425,10 @@ export class IMConnectionManager {
       ) {
         return undefined;
       }
-      const ch = conn?.channels.get(this.channelKey(channelType, accountId));
-      if (ch?.isConnected()) return ch;
+      const channelKey = this.channelKey(channelType, accountId);
+      const ch = conn?.channels.get(channelKey);
+      if (ch?.isConnected())
+        return { channel: ch, userId: group.created_by, channelKey };
     }
     return undefined;
   }
@@ -2112,6 +2469,7 @@ export class IMConnectionManager {
       for (const ct of channelTypes) {
         try {
           await this.disconnectChannelLocked(userId, ct);
+          await this.releaseOwnership(userId, ct);
         } catch (err) {
           logger.warn(
             { userId, channelType: ct, err },
@@ -2151,8 +2509,9 @@ export class IMConnectionManager {
         promises.push(
           channel
             .disconnect()
-            .then(() => {
+            .then(async () => {
               this.releaseCredentialClaim(userId, channelType);
+              await this.releaseOwnership(userId, channelType);
               conn.channels.delete(channelType);
             })
             .catch((err) => {
@@ -2166,6 +2525,10 @@ export class IMConnectionManager {
     }
 
     await Promise.allSettled(promises);
+    for (const [ownerKey, timer] of this.standbyTimers) {
+      clearTimeout(timer);
+      this.standbyTimers.delete(ownerKey);
+    }
     for (const [userId, conn] of this.connections.entries()) {
       if (conn.channels.size === 0) this.connections.delete(userId);
     }

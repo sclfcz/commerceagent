@@ -5381,6 +5381,53 @@ export function claimNextTaskRun(
   })();
 }
 
+/**
+ * Claim one specific occurrence. Conditions and fencing are byte-for-byte the
+ * same as `claimNextTaskRun`; only the id is fixed. Used by the distributed
+ * dispatcher so an MQ message can never start a run the legacy scheduler would
+ * not have picked (not yet due, already taken, or started-and-abandoned).
+ */
+export function claimTaskRunById(
+  id: string,
+  owner: string,
+  leaseMs: number,
+): ClaimedTaskRun | undefined {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const expiresAt = new Date(now.getTime() + leaseMs).toISOString();
+  return db.transaction(() => {
+    const candidate = db
+      .prepare(
+        `SELECT * FROM task_runs
+         WHERE id = ? AND (
+           (status IN ('queued','retry_wait') AND available_at <= ?)
+           OR (
+             status = 'running' AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= ? AND started_at IS NULL
+           )
+         )`,
+      )
+      .get(id, nowIso, nowIso) as TaskRunRow | undefined;
+    if (!candidate) return undefined;
+    const nextToken = candidate.lease_token + 1;
+    const result = db
+      .prepare(
+        `UPDATE task_runs
+         SET status = 'running', lease_owner = ?, lease_token = ?,
+             lease_expires_at = ?, attempt = attempt + 1,
+             updated_at = ?
+         WHERE id = ? AND (
+           (status IN ('queued','retry_wait') AND available_at <= ?)
+           OR (status = 'running' AND lease_expires_at IS NOT NULL
+               AND lease_expires_at <= ? AND started_at IS NULL)
+         )`,
+      )
+      .run(owner, nextToken, expiresAt, nowIso, id, nowIso, nowIso);
+    if (result.changes !== 1) return undefined;
+    return getTaskRunById(id) as ClaimedTaskRun;
+  })();
+}
+
 /** Mark the irreversible execution boundary before invoking Agent/script/group. */
 export function markTaskRunExecutionStarted(
   id: string,
