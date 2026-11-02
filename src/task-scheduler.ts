@@ -152,7 +152,7 @@ function resolveTargetGroupJid(
   return '';
 }
 
-function resolveTaskExecutionMode(
+export function resolveTaskExecutionMode(
   task: ScheduledTask,
   deps: SchedulerDependencies,
 ): ExecutionMode {
@@ -815,6 +815,27 @@ function isTaskStillActive(taskId: string, label?: string): boolean {
 }
 
 const SCHEDULER_RUNNER_ID = `${process.pid}:${randomUUID()}`;
+
+/**
+ * Distributed-dispatch hooks. They are only installed when the embedded
+ * distributed bridge is running (DIST_SCHEDULER=1); when they are null the
+ * scheduler behaves exactly as before.
+ *
+ * With the bridge installed the pump no longer claims runs itself: SQLite stays
+ * the execution and result authority, while the forwarder turns due runs into
+ * dist envelopes for admission/dispatch, and the embedded worker claims the
+ * SQLite row again before executing it.
+ */
+let distSchedulerWake: (() => void) | null = null;
+let distSchedulerCancel: ((runId: string) => void) | null = null;
+
+export function setDistSchedulerHooks(hooks: {
+  wake?: (() => void) | null;
+  cancel?: ((runId: string) => void) | null;
+}): void {
+  if (hooks.wake !== undefined) distSchedulerWake = hooks.wake;
+  if (hooks.cancel !== undefined) distSchedulerCancel = hooks.cancel;
+}
 const MIN_INTERVAL_MS = 60 * 1000;
 
 function getTaskLeaseMs(): number {
@@ -2636,9 +2657,26 @@ function finishDurableRunFromLegacyLog(
   }
 }
 
-function executeClaimedTaskRun(
+/**
+ * Execute one claimed occurrence and resolve once the run reached a terminal
+ * state, was handed back for a retry, or was dropped without starting.
+ *
+ * The legacy pump ignores the returned promise; the distributed dispatcher
+ * awaits it so it can mirror the SQLite outcome into the dist envelope.
+ */
+export function executeClaimedTaskRun(
   claim: ClaimedTaskRun,
   deps: SchedulerDependencies,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    executeClaimedTaskRunInner(claim, deps, resolve);
+  });
+}
+
+function executeClaimedTaskRunInner(
+  claim: ClaimedTaskRun,
+  deps: SchedulerDependencies,
+  resolve: () => void,
 ): void {
   const current = getTaskById(claim.task_id);
   if (!current || current.deleted_at) {
@@ -2647,6 +2685,7 @@ function executeClaimedTaskRun(
       error: 'Task definition was deleted before execution',
       notificationStatus: 'skipped',
     });
+    resolve();
     return;
   }
   const task = taskFromRunSnapshot(current, claim);
@@ -2657,6 +2696,7 @@ function executeClaimedTaskRun(
       error: `Target group not registered: ${task.chat_jid}`,
       notificationStatus: 'skipped',
     });
+    resolve();
     return;
   }
   // Script runs bypass GroupQueue.enqueueTask(), so checking only at enqueue
@@ -2668,6 +2708,7 @@ function executeClaimedTaskRun(
       countsAsAttempt: false,
       retryDelayMs: 1_000,
     });
+    resolve();
     return;
   }
   const notificationTracker = trackTaskRunNotifications(claim, deps);
@@ -2708,6 +2749,7 @@ function executeClaimedTaskRun(
       atomicHandoffAttempted,
     );
     armScheduler(0);
+    resolve();
   };
 
   if (task.execution_type === 'script') {
@@ -2719,6 +2761,7 @@ function executeClaimedTaskRun(
         error: runtimePolicyError,
         notificationStatus: 'skipped',
       });
+      resolve();
       return;
     }
     let leaseLost = false;
@@ -2742,6 +2785,7 @@ function executeClaimedTaskRun(
     ) {
       clearInterval(heartbeat);
       clearActiveDurableExecution(claim.id, claim.attempt);
+      resolve();
       return;
     }
     executionStartedAtMs = Date.now();
@@ -2769,6 +2813,7 @@ function executeClaimedTaskRun(
           }
         }),
     );
+    resolve();
     return;
   }
 
@@ -2791,6 +2836,7 @@ function executeClaimedTaskRun(
     ) {
       clearInterval(heartbeat);
       clearActiveDurableExecution(claim.id, claim.attempt);
+      resolve();
       return;
     }
     executionStartedAtMs = Date.now();
@@ -2815,6 +2861,7 @@ function executeClaimedTaskRun(
           clearActiveDurableExecution(claim.id, claim.attempt);
         }
       });
+    resolve();
     return;
   }
 
@@ -2831,6 +2878,7 @@ function executeClaimedTaskRun(
       error: 'Failed to resolve task workspace',
       notificationStatus: 'skipped',
     });
+    resolve();
     return;
   }
 
@@ -2881,6 +2929,7 @@ function executeClaimedTaskRun(
       }
     }
     armScheduler(0);
+    resolve();
   };
   try {
     const accepted = deps.queue.enqueueTask(
@@ -2897,6 +2946,7 @@ function executeClaimedTaskRun(
           settled = true;
           clearInterval(heartbeat);
           clearActiveDurableExecution(claim.id, claim.attempt);
+          resolve();
           return;
         }
         executionStartedAtMs = Date.now();
@@ -3215,10 +3265,15 @@ function pumpTaskScheduler(deps: SchedulerDependencies): void {
     finalizeExpiredTaskRunNotificationAttempts();
     materializeDueOccurrences();
     pumpTaskNotificationRetries(deps);
-    for (let count = 0; count < MAX_CLAIMS_PER_PUMP; count++) {
-      const claim = claimNextTaskRun(SCHEDULER_RUNNER_ID, TASK_RUN_LEASE_MS);
-      if (!claim) break;
-      executeClaimedTaskRun(claim, deps);
+    if (distSchedulerWake) {
+      // Distributed mode: hand control to the forwarder instead of claiming.
+      distSchedulerWake();
+    } else {
+      for (let count = 0; count < MAX_CLAIMS_PER_PUMP; count++) {
+        const claim = claimNextTaskRun(SCHEDULER_RUNNER_ID, TASK_RUN_LEASE_MS);
+        if (!claim) break;
+        void executeClaimedTaskRun(claim, deps);
+      }
     }
     const now = Date.now();
     if (now - lastCleanupTime >= CLEANUP_INTERVAL_MS) {
@@ -3464,6 +3519,14 @@ export function cancelTaskRunNow(runId: string): {
     void active?.stop?.();
   } catch (err) {
     logger.error({ runId, err }, 'Failed to stop cancelled task-run process');
+  }
+  try {
+    distSchedulerCancel?.(runId);
+  } catch (err) {
+    logger.error(
+      { runId, err },
+      'Distributed cancel failed (state reconciles)',
+    );
   }
   notifyTaskSchedulerChanged();
   return { success: true };

@@ -213,6 +213,10 @@ export class Worker {
    */
   private async admit(claim: ClaimedRun): Promise<boolean> {
     if (!this.tenantSlots) return true;
+    // Host-mode tasks skip tenant slots on purpose: CLAUDE.md §4 forbids an
+    // application-level concurrency cap between host sessions, and container
+    // concurrency is already bounded by maxConcurrentContainers.
+    if (claim.payload?.skipTenantAdmission === true) return true;
     const granted = await this.tenantSlots.acquire(
       claim.tenantId,
       claim.runId,
@@ -314,6 +318,7 @@ export class Worker {
             maxAttempts: claim.maxAttempts,
             payload: claim.payload,
             workerId: this.config.workerId,
+            leaseToken: claim.leaseToken,
             signal: controller.signal,
           },
           durable,

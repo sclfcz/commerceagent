@@ -84,6 +84,11 @@ export interface SubmitInput {
   idempotencyKey: string;
   payload: Record<string, unknown>;
   maxAttempts?: number;
+  /**
+   * When the run becomes claimable. Defaults to "now" (database clock).
+   * The outbox row copies this value, so a relay cannot publish early.
+   */
+  availableAt?: Date;
 }
 
 export class IdempotencyConflictError extends Error {
@@ -248,7 +253,9 @@ export class RunRepository {
           `INSERT INTO dist_task_runs
              (id, tenant_id, task_id, idempotency_key, payload, payload_hash,
               status, attempt, max_attempts, available_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, NOW(3), NOW(3), NOW(3))`,
+           VALUES (?, ?, ?, ?, ?, ?, 'queued', 0, ?, ${
+             input.availableAt ? '?' : 'NOW(3)'
+           }, NOW(3), NOW(3))`,
           [
             id,
             input.tenantId,
@@ -257,6 +264,7 @@ export class RunRepository {
             payloadJson,
             payloadHash,
             maxAttempts,
+            ...(input.availableAt ? [input.availableAt] : []),
           ],
         );
         await this.insertEvent(connection, {

@@ -27,6 +27,8 @@
     "dist:bench:dispatch": "node scripts/dist-bench-dispatch.mjs",
     "dist:chaos:tenant": "node scripts/dist-chaos-tenant.mjs",
     "dist:chaos:effects": "node scripts/dist-chaos-effects.mjs",
+    "dist:e2e:scheduler": "node scripts/dist-e2e-scheduler.mjs",
+    "dist:smoke:agent": "node scripts/dist-smoke-agent.mjs",
     "dist:mock:effect": "node scripts/mock-effect-provider.mjs",
     "dist:bench:fairness": "node scripts/dist-bench-fairness.mjs",
     "dist:dlq": "node scripts/dist-dlq.mjs",

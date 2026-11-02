@@ -114,6 +114,51 @@ one that does not will record a duplicate. This was observed once during
 development (2 duplicates out of 1000 messages in one repeat); the delivered
 chaos run had 0 because the retry happened after the message was visible.
 
+## 与定时任务的集成（DIST_SCHEDULER=1）
+
+默认关闭。开关关闭时 `pumpTaskScheduler` 仍按原逻辑循环 `claimNextTaskRun`，行为与
+加入本模块前完全一致。
+
+**职责划分**
+
+- **SQLite `task_runs` 仍是任务结果、历史、通知和 UI 的唯一真相源。**
+  `materializeDueOccurrences`、`failExpiredStartedTaskRuns`、通知重试与日志清理继续在
+  legacy pump 里运行，不迁移、不改语义。
+- **MySQL `dist_task_runs` 只是派发信封**：负责排队、outbox + MQ 唤醒、派发租约和租户
+  准入。一个 SQLite run 对应一个 dist run：`idempotency_key = task_run.id`，
+  `tenant_id = 工作区 owner 的 user id`（取不到时 `system`），`max_attempts = 20`
+  只统计派发次数，重试预算仍由 SQLite `attempt` 决定。
+- 开关打开后 pump 不再自己认领，而是唤醒 forwarder；forwarder 把 `queued/retry_wait`
+  的 run 提交成 dist 信封（`available_at` 取 SQLite 的值，outbox 同步）。
+  内存 Set 只减少重复提交，重启后全量重提，靠幂等键去重。
+
+**每次领到 dist 信封都要先对账 SQLite**
+
+1. SQLite 已终态（`success/failed/cancelled/missed/delivered`）→ dist complete，
+   `result = {mirroredStatus}`，**不执行**；
+2. `queued/retry_wait` 且未到 `available_at` → dist release，延迟为剩余时间；
+3. `running` 且 SQLite 租约未过期 → dist release，延迟 `leaseMs`；
+4. 否则 `claimTaskRunById`（条件与 `claimNextTaskRun` 完全相同，只固定 id）→ 执行 →
+   重新读 SQLite → 终态则 complete，回到 `retry_wait` 则 release（按其 `available_at`）。
+
+崩溃语义沿用 legacy：**执行开始后进程崩溃不会重放**，`failExpiredStartedTaskRuns`
+把它记为 `failed`，下一次 dist 对账把这个终态镜像过去；dist 的 20 次派发额度绕不过它。
+
+**两个围栏，不要混用**
+
+- **MySQL 租约是派发围栏**：丢失后只是停止向 dist 回写，下一次认领会通过对账收敛；
+  它**不会**中止正在运行的 legacy 执行。
+- **SQLite 租约是执行围栏**：`claimTaskRunById` / `markTaskRunExecutionStarted` /
+  `completeTaskRun` 全部按 owner+token 校验，本地执行只认它。
+
+**当前边界**
+
+执行层依赖进程内的 `GroupQueue`、`sendMessage`、`broadcastStreamEvent` 和本机工作区
+文件，因此这一版只能单机运行：内嵌 Worker 与主服务同进程，不拆独立进程，也不跨机器
+执行。Host 模式任务跳过租户槽位（CLAUDE.md §4 不允许在 Host 会话之间设置应用层并发
+上限），container 模式任务才走 `tenant-slots`；容器并发仍由 `maxConcurrentContainers`
+控制，内嵌 Worker 的 `concurrency` 只作为单批派发上限。
+
 ## Failure modes
 
 `DIST_ADMISSION_FAIL_MODE=open` (default): a Redis error admits the work and

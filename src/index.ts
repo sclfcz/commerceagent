@@ -1233,6 +1233,11 @@ class IpcWatcherManager {
 }
 
 let ipcWatcherManager: IpcWatcherManager | null = null;
+/**
+ * Embedded distributed dispatcher for scheduled tasks (DIST_SCHEDULER=1).
+ * When null the scheduler runs its legacy claim loop unchanged.
+ */
+let distSchedulerBridge: { stop(): Promise<void> } | null = null;
 /** JIDs already persisted by the shutdown handler — prevents finally blocks from duplicating. */
 const shutdownSavedJids = new Set<string>();
 
@@ -19898,6 +19903,17 @@ async function main(): Promise<void> {
     unsubscribeChannelReadyRecovery?.();
     unsubscribeChannelReadyRecovery = null;
 
+    // Stop the distributed dispatcher first: it must not claim new envelopes
+    // while the legacy scheduler drains its in-flight executions.
+    if (distSchedulerBridge) {
+      await distSchedulerBridge
+        .stop()
+        .catch((err) =>
+          logger.warn({ err }, 'Error stopping distributed scheduler bridge'),
+        );
+      distSchedulerBridge = null;
+    }
+
     // Phase 0: stop materializing new occurrences and drain scheduler-owned
     // detached work (script runs, notification retries) that the group queue
     // does not track. Delivery stays available throughout so those can settle.
@@ -21135,6 +21151,27 @@ async function main(): Promise<void> {
     },
     assistantName: ASSISTANT_NAME,
   };
+
+  if (process.env.DIST_SCHEDULER === '1') {
+    try {
+      const { startSchedulerBridge } =
+        await import('./distributed/scheduled-bridge.js');
+      distSchedulerBridge = startSchedulerBridge({
+        scheduler: schedulerDeps,
+        logger: (event) => logger.info(event, 'distributed scheduler'),
+      });
+      logger.info('Distributed scheduler dispatch enabled (DIST_SCHEDULER=1)');
+    } catch (err) {
+      // Never let dispatch infrastructure stop the service: without the bridge
+      // the hook stays unset and the legacy claim loop keeps running.
+      logger.error(
+        { err },
+        'Failed to start distributed scheduler bridge; falling back to legacy dispatch',
+      );
+      distSchedulerBridge = null;
+    }
+  }
+
   startSchedulerLoop(schedulerDeps);
 
   // Inject triggerTaskRun into WebDeps (schedulerDeps must exist first)

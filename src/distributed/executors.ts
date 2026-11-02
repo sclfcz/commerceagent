@@ -19,6 +19,8 @@ export interface ExecutorRunContext {
   maxAttempts: number;
   payload: Record<string, unknown>;
   workerId: string;
+  /** Dispatch lease token; needed to settle the dist envelope. */
+  leaseToken: number;
   /** Aborted when the lease is lost, the run is cancelled, or the worker stops. */
   signal: AbortSignal;
 }
