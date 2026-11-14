@@ -24,7 +24,8 @@ const {
   getSessionProviderId,
   setSessionProviderId,
   deleteSession,
-  deleteSessionsByProviderId,
+  getSessionResumeStripThinking,
+  markSessionsForThinkingStripByProviderId,
 } = await import('../src/db.js');
 
 beforeAll(() => {
@@ -83,41 +84,49 @@ describe('session→provider sticky binding', () => {
   });
 });
 
-describe('deleteSessionsByProviderId — narrowed cleanup (issue #476)', () => {
-  test('only removes rows bound to the target provider', () => {
+describe('markSessionsForThinkingStripByProviderId — narrowed cleanup (issue #476)', () => {
+  test('only marks rows bound to the target provider', () => {
     setSession('folder-narrow-1', 'sess-1', '');
     setSessionProviderId('folder-narrow-1', '', 'provider-target');
     setSession('folder-narrow-2', 'sess-2', '');
     setSessionProviderId('folder-narrow-2', '', 'provider-other');
 
-    const result = deleteSessionsByProviderId('provider-target');
+    const result = markSessionsForThinkingStripByProviderId('provider-target');
 
-    expect(result.deletedCount).toBe(1);
+    expect(result.markedCount).toBe(1);
     expect(result.affectedFolders).toEqual(['folder-narrow-1']);
-    expect(getSessionProviderId('folder-narrow-1')).toBeUndefined();
+    expect(getSessionResumeStripThinking('folder-narrow-1')).toBe(true);
     // Unrelated provider's binding survives — this is the core fix.
+    expect(getSessionResumeStripThinking('folder-narrow-2')).toBe(false);
     expect(getSessionProviderId('folder-narrow-2')).toBe('provider-other');
+    // The conversation itself is kept; only the resume strategy changes.
+    expect(getSession('folder-narrow-1')).toBe('sess-1');
+    expect(getSessionProviderId('folder-narrow-1')).toBe('provider-target');
   });
 
-  test('removes per-agent bindings to the same provider in one folder', () => {
+  test('marks per-agent bindings to the same provider in one folder', () => {
     setSessionProviderId('folder-narrow-3', '', 'provider-shared');
     setSessionProviderId('folder-narrow-3', 'agent-a', 'provider-shared');
     setSessionProviderId('folder-narrow-3', 'agent-b', 'provider-other');
 
-    const result = deleteSessionsByProviderId('provider-shared');
+    const result = markSessionsForThinkingStripByProviderId('provider-shared');
 
-    expect(result.deletedCount).toBe(2);
+    expect(result.markedCount).toBe(2);
     expect(result.affectedFolders).toEqual(['folder-narrow-3']);
-    expect(getSessionProviderId('folder-narrow-3')).toBeUndefined();
-    expect(getSessionProviderId('folder-narrow-3', 'agent-a')).toBeUndefined();
-    expect(getSessionProviderId('folder-narrow-3', 'agent-b')).toBe(
-      'provider-other',
+    expect(getSessionResumeStripThinking('folder-narrow-3')).toBe(true);
+    expect(getSessionResumeStripThinking('folder-narrow-3', 'agent-a')).toBe(
+      true,
+    );
+    expect(getSessionResumeStripThinking('folder-narrow-3', 'agent-b')).toBe(
+      false,
     );
   });
 
   test('returns empty result when no sessions match', () => {
-    const result = deleteSessionsByProviderId('provider-does-not-exist');
-    expect(result.deletedCount).toBe(0);
+    const result = markSessionsForThinkingStripByProviderId(
+      'provider-does-not-exist',
+    );
+    expect(result.markedCount).toBe(0);
     expect(result.affectedFolders).toEqual([]);
   });
 
@@ -126,28 +135,47 @@ describe('deleteSessionsByProviderId — narrowed cleanup (issue #476)', () => {
     setSessionProviderId('folder-narrow-4', 'agent-x', 'provider-multi');
     setSessionProviderId('folder-narrow-5', '', 'provider-multi');
 
-    const result = deleteSessionsByProviderId('provider-multi');
+    const result = markSessionsForThinkingStripByProviderId('provider-multi');
 
-    expect(result.deletedCount).toBe(3);
+    expect(result.markedCount).toBe(3);
     expect(result.affectedFolders.sort()).toEqual([
       'folder-narrow-4',
       'folder-narrow-5',
     ]);
   });
 
-  test('only removes unbound legacy rows from explicitly attributable folders', () => {
+  test('marks unbound legacy rows only from explicitly attributable folders', () => {
     setSession('folder-unbound-safe', 'sess-safe', '');
     setSession('folder-unbound-ambiguous', 'sess-ambiguous', '');
 
-    const result = deleteSessionsByProviderId('provider-target', {
-      includeUnboundFolders: ['folder-unbound-safe'],
-    });
+    const result = markSessionsForThinkingStripByProviderId(
+      'provider-with-no-bound-rows',
+      { includeUnboundFolders: ['folder-unbound-safe'] },
+    );
 
-    expect(result.deletedCount).toBe(1);
+    expect(result.markedCount).toBe(1);
     expect(result.affectedFolders).toEqual(['folder-unbound-safe']);
-    expect(getSessionProviderId('folder-unbound-safe')).toBeUndefined();
-    expect(getSessionProviderId('folder-unbound-ambiguous')).toBeUndefined();
-    expect(getSession('folder-unbound-safe')).toBeUndefined();
+    expect(getSessionResumeStripThinking('folder-unbound-safe')).toBe(true);
+    expect(getSessionResumeStripThinking('folder-unbound-ambiguous')).toBe(
+      false,
+    );
+    expect(getSession('folder-unbound-safe')).toBe('sess-safe');
     expect(getSession('folder-unbound-ambiguous')).toBe('sess-ambiguous');
+  });
+
+  test('a new session id spends the marker, the same id keeps it', () => {
+    setSession('folder-marker', 'sess-old', '');
+    setSessionProviderId('folder-marker', '', 'provider-marked');
+    markSessionsForThinkingStripByProviderId('provider-marked');
+    expect(getSessionResumeStripThinking('folder-marker')).toBe(true);
+
+    // A failed strip leaves the old id in place: the marker must survive so the
+    // next turn tries again instead of replaying unverifiable thinking blocks.
+    setSession('folder-marker', 'sess-old', '');
+    expect(getSessionResumeStripThinking('folder-marker')).toBe(true);
+
+    // The stripped copy reports a new id; that transcript is clean.
+    setSession('folder-marker', 'sess-stripped', '');
+    expect(getSessionResumeStripThinking('folder-marker')).toBe(false);
   });
 });

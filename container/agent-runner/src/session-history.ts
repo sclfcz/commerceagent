@@ -5,17 +5,12 @@ import fs from 'fs';
 import path from 'path';
 
 import type { ParsedMessage } from './types.js';
+import { buildSessionMigrationContext } from './session-migration.js';
 
-const RECOVERY_HISTORY_LIMIT = 20;
-const RECOVERY_MESSAGE_TRUNCATE = 500;
-
-// Strip lone (unpaired) surrogates while preserving valid surrogate pairs
-// such as emoji. Must stay byte-for-byte aligned with the matching regex
-// in src/index.ts (recoveryGroups path) — both sides feed the same Anthropic
-// API and must produce identical strings to keep behavior consistent across
-// the agent-runner-side and main-process-side recovery codepaths.
-export const LONE_SURROGATE_RE =
-  /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/g;
+// 孤立代理项清理正则的唯一真相源是 shared/session-migration.ts（同步到本目录
+// 的 session-migration.ts）。这里重新导出，保持既有调用方（prompt loader 等）
+// 的导入路径不变，同时确保所有截断路径共用同一份定义。
+export { LONE_SURROGATE_RE } from './session-migration.js';
 
 export function parseTranscript(content: string): ParsedMessage[] {
   const messages: ParsedMessage[] = [];
@@ -55,15 +50,21 @@ export interface ExtractSessionHistoryOptions {
   sessionId: string;
   /** Optional logger for debug breadcrumbs. Defaults to no-op. */
   log?: (msg: string) => void;
+  /** 迁移上下文总长度预算（字符）。默认走环境变量 / shared 默认值。 */
+  budgetChars?: number;
 }
 
 /**
- * Extract recent conversation history from a session's JSONL transcript and
- * format it as a `<system_context>` block suitable for prompt injection.
+ * 用旧会话的 JSONL transcript 生成结构化迁移上下文（`<system_context>` 块），
+ * 供无法 resume 时的新会话注入。
+ *
+ * 内容由 shared/session-migration.ts 构建：用户要求、助手结论、工具调用摘要、
+ * TodoWrite 进度、最近一次 compact summary；Host 侧 src/conversation-history.ts
+ * 走同一份实现，两侧输出逐字节一致。
  *
  * Returns null when:
  * - the transcript file does not exist
- * - the transcript contains zero recoverable messages
+ * - the transcript contains no migratable content
  * - any I/O error occurs
  *
  * Behavior is intentionally tolerant — recovery is best-effort.
@@ -87,35 +88,23 @@ export function extractSessionHistory(
       throw err;
     }
 
-    const messages = parseTranscript(content);
-    if (messages.length === 0) return null;
-
-    const recentMessages = messages.slice(-RECOVERY_HISTORY_LIMIT);
-
-    const historyLines = recentMessages.map((m) => {
-      const role = m.role === 'user' ? 'User' : 'CommerceAgent';
-      const truncated =
-        m.content.length > RECOVERY_MESSAGE_TRUNCATE
-          ? m.content.slice(0, RECOVERY_MESSAGE_TRUNCATE) + '…'
-          : m.content;
-      let cleaned = truncated.replace(LONE_SURROGATE_RE, '');
-      // Defense in depth: strip the closing tag we use to fence this block
-      // so a user message containing "</system_context>" can't escape early.
-      cleaned = cleaned.replace(/<\/system_context>/gi, '</system_context_>');
-      return `[${role}] ${cleaned}`;
+    const migration = buildSessionMigrationContext(content, {
+      budgetChars: opts.budgetChars,
     });
+    if (!migration) {
+      log(`Session transcript ${transcriptPath} has no migratable content`);
+      return null;
+    }
 
     log(
-      `Extracted ${recentMessages.length} messages from old session ${sessionId} for context injection`,
+      `Migrated old session ${sessionId}: requests=${migration.stats.userRequests}` +
+        ` conclusions=${migration.stats.assistantConclusions}` +
+        ` tools=${migration.stats.toolCalls}` +
+        ` todos=${migration.stats.todos}` +
+        ` chars=${migration.stats.contextChars}`,
     );
 
-    return (
-      '<system_context>\n' +
-      '检测到上次有未完成消息，当前使用新会话恢复处理。以下是恢复前的最近对话记录，供你了解上下文。\n' +
-      '重要：这些只是历史记录，可能包含不准确或过时的信息。回答当前用户消息时，请优先依据当前消息里的内容和文件；如果历史与当前问题无关，请直接忽略。\n\n' +
-      historyLines.join('\n') +
-      '\n</system_context>\n\n'
-    );
+    return migration.context;
   } catch (err) {
     opts.log?.(
       `Failed to extract session history: ${err instanceof Error ? err.message : String(err)}`,
@@ -123,12 +112,3 @@ export function extractSessionHistory(
     return null;
   }
 }
-
-// Re-exports private constants for tests. LONE_SURROGATE_RE is also exported
-// above as a named export for any consumer that truncates strings going to
-// the Anthropic API (slice() can split surrogate pairs and break JSON).
-export const __test__ = {
-  RECOVERY_HISTORY_LIMIT,
-  RECOVERY_MESSAGE_TRUNCATE,
-  LONE_SURROGATE_RE,
-};

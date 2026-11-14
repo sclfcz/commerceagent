@@ -79,6 +79,17 @@ export interface AgentProfile {
   updated_at: string;
 }
 
+/**
+ * 会话续接状态。`verified` = 该上游能续接自己产生的会话（基线通过）；
+ * `failed` = 基线失败，切换到它会丢失会话上下文；`unverified` = 尚未验证，
+ * 或上游 endpoint / 模型在验证后被修改过。
+ */
+export interface ProviderSessionContinuity {
+  status: 'unverified' | 'verified' | 'failed';
+  checkedAt: string | null;
+  bidirectionalProviderIds: string[];
+}
+
 export interface ModelConfigOption {
   id: string;
   name: string;
@@ -86,6 +97,7 @@ export interface ModelConfigOption {
   enabled: boolean;
   anthropic_model: string;
   is_default: boolean;
+  session_continuity?: ProviderSessionContinuity;
 }
 
 export type AgentProfilePromptMode = 'append' | 'replace';

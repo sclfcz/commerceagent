@@ -72,7 +72,6 @@ import {
   runHostAgent,
   runAgentWithModelFallback,
   shouldRotatePoolProviderAfterTurn,
-  willClearSessionOnProviderSwitch,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -576,6 +575,11 @@ import {
   persistGroupUpdate,
 } from './group-owner.js';
 import { buildRecentConversationHistoryContext } from './conversation-history.js';
+import { resolveGroupSessionsDir } from './session-transcript.js';
+import {
+  buildAgentProfileRefreshNotice,
+  planAgentProfileSessionContinuity,
+} from './session-continuity.js';
 import {
   collectKnownReferenceAttachmentIndexes,
   collectReferencedMessageIds,
@@ -2297,95 +2301,33 @@ function isCommerceAgentOwnerProfileRuntimeEligible(input: {
   });
 }
 
-function hasSessionAgentProfileMismatch(
-  groupFolder: string,
-  agentId: string | null | undefined,
-  profile: AgentProfile | undefined,
-): boolean {
-  if (!profile) return false;
-  const current = getSessionAgentIdentity(groupFolder, agentId);
-  if (!current) return false;
-
-  const hasLegacyUntrackedIdentity =
-    !current.agent_profile_id && !current.identity_hash;
-  if (
-    hasLegacyUntrackedIdentity &&
-    !hasAgentProfilePrompts(profile) &&
-    profile.prompt_mode === 'append'
-  ) {
-    return false;
-  }
-
-  if (current.identity_hash !== profile.identity_hash) return true;
-  if (
-    current.agent_profile_version != null &&
-    current.agent_profile_version !== profile.version
-  ) {
-    return true;
-  }
-  return !!current.agent_profile_id && current.agent_profile_id !== profile.id;
-}
-
-function resetMainSessionForAgentProfileMismatch(
-  group: RegisteredGroup,
-  profile: AgentProfile | undefined,
-): boolean {
-  if (!hasSessionAgentProfileMismatch(group.folder, null, profile))
-    return false;
-  deleteSession(group.folder);
-  delete sessions[group.folder];
-  logger.info(
-    {
-      groupFolder: group.folder,
-      agentProfileId: profile?.id,
-      identityHash: profile?.identity_hash,
-    },
-    'Cleared main Claude session after AgentProfile identity changed',
-  );
-  return true;
-}
-
-function resetConversationSessionForAgentProfileMismatch(
-  group: RegisteredGroup,
-  agentId: string,
-  profile: AgentProfile | undefined,
-): boolean {
-  if (!hasSessionAgentProfileMismatch(group.folder, agentId, profile)) {
-    return false;
-  }
-  deleteSession(group.folder, agentId);
-  logger.info(
-    {
-      groupFolder: group.folder,
-      agentId,
-      agentProfileId: profile?.id,
-      identityHash: profile?.identity_hash,
-    },
-    'Cleared conversation agent Claude session after AgentProfile identity changed',
-  );
-  return true;
-}
-
 /**
- * Drop the resumable SDK session after a rotating-strategy turn while keeping
- * enough host metadata for the next cold run to predict the provider switch,
- * inject persisted history, and preserve AgentProfile identity.
+ * AgentProfile changes refresh the runner (the profile route already stops
+ * warm runners) but keep the SDK session: the conversation the user built must
+ * survive prompt, model, effort or capability edits. Returns a one-shot notice
+ * for the model, or '' when nothing changed.
  */
-function resetSessionAfterProviderRotation(
+function agentProfileRefreshNotice(
   groupFolder: string,
   agentId: string | null | undefined,
-  selectedProviderId: string | null,
   profile: AgentProfile | undefined,
-): void {
-  deleteSession(groupFolder, agentId);
-  setSession(groupFolder, '', agentId, {
-    agentProfileId: profile?.id,
-    agentProfileVersion: profile?.version,
-    identityHash: profile?.identity_hash,
-  });
-  if (selectedProviderId) {
-    setSessionProviderId(groupFolder, agentId, selectedProviderId);
-  }
+): string {
+  const plan = planAgentProfileSessionContinuity(
+    getSessionAgentIdentity(groupFolder, agentId),
+    profile,
+  );
+  if (plan.kind !== 'refresh' || !profile) return '';
+  logger.info(
+    {
+      groupFolder,
+      agentId: agentId || null,
+      agentProfileId: profile.id,
+      agentProfileVersion: profile.version,
+      profileSwitched: plan.profileSwitched,
+    },
+    'AgentProfile changed; keeping Claude session and refreshing configuration',
+  );
+  return buildAgentProfileRefreshNotice(profile, plan);
 }
 
 /**
@@ -5747,8 +5689,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     getWorkspaceInteractionMode(effectiveGroup.folder),
     { agentKind: 'main' },
   );
-  const resetForAgentProfile = resetMainSessionForAgentProfileMismatch(
-    effectiveGroup,
+  const agentProfileNotice = agentProfileRefreshNotice(
+    effectiveGroup.folder,
+    null,
     agentProfile,
   );
 
@@ -5762,66 +5705,30 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       chatJid,
       new Set(missedMessages.map((m) => m.id)),
       {
-        limit: 20,
-        maxMessageLength: 500,
         intro:
           '检测到上次有未完成消息，当前使用新会话恢复处理。以下是恢复前的最近对话记录，供你了解上下文。',
-      },
-    );
-    if (historyContext) {
-      logger.info(
-        { group: group.name, historyCount: historyContext.count },
-        'Recovery: injected recent conversation history into prompt',
-      );
-    }
-  } else if (resetForAgentProfile) {
-    historyContext = buildRecentConversationHistoryContext(
-      chatJid,
-      new Set(missedMessages.map((m) => m.id)),
-      {
-        limit: 30,
-        maxMessageLength: 700,
-        intro:
-          '检测到当前 workspace 切换或更新了顶层 AgentProfile 身份提示词，底层模型 session 已重置。以下是 CommerceAgent 保存的最近对话记录，供你在新身份下延续上下文。',
+        transcript: {
+          // 旧 session id 在恢复扫描时已从 DB 删除，交给 transcript 查找器
+          // 取该工作区最近写入的文件。
+          sessionsDir: resolveGroupSessionsDir(effectiveGroup.folder),
+        },
       },
     );
     if (historyContext) {
       logger.info(
         {
           group: group.name,
-          agentProfileId: agentProfile?.id,
           historyCount: historyContext.count,
+          historySource: historyContext.source,
+          historyStats: historyContext.stats,
         },
-        'AgentProfile identity change: injected recent conversation history into prompt',
-      );
-    }
-  } else if (
-    willClearSessionOnProviderSwitch(
-      effectiveGroup.folder,
-      undefined,
-      agentProfile?.model_config_id,
-    )
-  ) {
-    // Proactive provider switch (sticky binding unhealthy/disabled) will clear
-    // the SDK session inside the runner. Inject history so the new provider's
-    // first turn keeps context, matching the recovery + reactive-failure paths.
-    historyContext = buildRecentConversationHistoryContext(
-      chatJid,
-      new Set(missedMessages.map((m) => m.id)),
-      {
-        limit: 30,
-        maxMessageLength: 700,
-        intro:
-          '检测到本次因切换 provider 需要使用新的底层模型 session。以下是 CommerceAgent 保存的最近对话记录，供你延续上下文。',
-      },
-    );
-    if (historyContext) {
-      logger.info(
-        { group: group.name, historyCount: historyContext.count },
-        'Provider switch: injected recent conversation history into prompt',
+        'Recovery: injected recent conversation history into prompt',
       );
     }
   }
+  // A provider switch no longer clears the SDK session: the runner resumes a
+  // thinking-stripped copy of the transcript, so the conversation continues and
+  // injecting recent history here would duplicate it.
 
   const activeSessionReferencedMessageIds =
     !historyContext && sessions[effectiveGroup.folder]
@@ -5832,6 +5739,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     : activeSessionReferencedMessageIds;
   let prompt =
     (historyContext?.context ?? '') +
+    agentProfileNotice +
     formatMessages(missedMessages, {
       knownMessageIds: knownReferencedMessageIds,
     });
@@ -9452,12 +9360,6 @@ async function runAgentTurn(
     getWorkspaceInteractionMode(group.folder),
     { agentKind: 'main' },
   );
-  if (resetMainSessionForAgentProfileMismatch(group, resolvedAgentProfile)) {
-    logger.info(
-      { groupFolder: group.folder, chatJid },
-      'AgentProfile identity mismatch handled inside runAgent',
-    );
-  }
   const sessionId = sessions[group.folder];
   const containerAgentProfile = toContainerAgentProfile(resolvedAgentProfile);
   const rotateProviderAfterTurn = shouldRotatePoolProviderAfterTurn(
@@ -9691,16 +9593,6 @@ async function runAgentTurn(
         agentProfileVersion: resolvedAgentProfile?.version,
         identityHash: resolvedAgentProfile?.identity_hash,
       });
-    }
-
-    if (rotatingTurnCompleted) {
-      delete sessions[group.folder];
-      resetSessionAfterProviderRotation(
-        group.folder,
-        null,
-        selectedProviderIdForRun,
-        resolvedAgentProfile,
-      );
     }
 
     // Agent was interrupted by _close sentinel (home folder drain).
@@ -14248,29 +14140,20 @@ async function processAgentConversationTurn(
     getWorkspaceInteractionMode(effectiveGroup.folder),
     { agentKind: agent.kind },
   );
-  const resetForAgentProfile = resetConversationSessionForAgentProfileMismatch(
-    effectiveGroup,
+  const agentProfileNotice = agentProfileRefreshNotice(
+    effectiveGroup.folder,
     agentId,
     agentProfile,
   );
 
   // Get or use agent-specific session before building the prompt. If the
-  // session was cleared by provider/model switching, inject persisted CommerceAgent
-  // chat history so the new model does not mistake the fresh SDK session for
-  // an empty conversation.
+  // session is missing (first turn, or a resume that failed), inject persisted
+  // CommerceAgent chat history so the new model does not mistake the fresh SDK
+  // session for an empty conversation. A provider switch is not such a case:
+  // the runner resumes a thinking-stripped copy of the existing transcript.
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
   let currentAgentSessionId = sessionId;
-  // Inject history when the SDK session is fresh, or when a proactive provider
-  // switch (sticky binding unhealthy/disabled) will clear the existing session
-  // inside the runner — otherwise the new provider's first turn loses context.
-  const startsFreshSession =
-    !sessionId ||
-    resetForAgentProfile ||
-    willClearSessionOnProviderSwitch(
-      effectiveGroup.folder,
-      agentId,
-      agentProfile?.model_config_id,
-    );
+  const startsFreshSession = !sessionId;
   let historyContext: ReturnType<typeof buildRecentConversationHistoryContext> =
     null;
   if (startsFreshSession) {
@@ -14278,16 +14161,23 @@ async function processAgentConversationTurn(
       virtualChatJid,
       new Set(missedMessages.map((m) => m.id)),
       {
-        limit: 30,
-        maxMessageLength: 700,
-        intro: resetForAgentProfile
-          ? '检测到当前 workspace 切换或更新了顶层 AgentProfile 身份提示词，当前 agent 的底层模型 session 已重置。以下是 CommerceAgent 保存的最近对话记录，供你在新身份下延续上下文。'
-          : '检测到当前 agent 的底层模型 session 是新的（可能因为切换 provider/model 或恢复失败）。以下是 CommerceAgent 保存的最近对话记录，供你延续上下文。',
+        intro:
+          '检测到当前 agent 的底层模型 session 是新的（可能因为切换 provider/model 或恢复失败）。以下是 CommerceAgent 保存的最近对话记录，供你延续上下文。',
+        transcript: {
+          sessionsDir: resolveGroupSessionsDir(effectiveGroup.folder, agentId),
+          sessionId: sessionId || undefined,
+        },
       },
     );
     if (historyContext) {
       logger.info(
-        { chatJid, agentId, historyCount: historyContext.count },
+        {
+          chatJid,
+          agentId,
+          historyCount: historyContext.count,
+          historySource: historyContext.source,
+          historyStats: historyContext.stats,
+        },
         'Agent fresh session: injected recent conversation history into prompt',
       );
     }
@@ -14300,6 +14190,7 @@ async function processAgentConversationTurn(
     : activeSessionReferencedMessageIds;
   let prompt =
     (historyContext?.context ?? '') +
+    agentProfileNotice +
     formatMessages(missedMessages, {
       knownMessageIds: knownReferencedMessageIds,
     });
@@ -16514,16 +16405,6 @@ async function processAgentConversationTurn(
         agentProfileVersion: agentProfile?.version,
         identityHash: agentProfile?.identity_hash,
       });
-    }
-
-    if (rotatingAgentTurnCompleted) {
-      resetSessionAfterProviderRotation(
-        effectiveGroup.folder,
-        agentId,
-        selectedAgentProviderIdForRun,
-        agentProfile,
-      );
-      currentAgentSessionId = undefined;
     }
 
     // 不可恢复的转录错误（如超大图片/MIME 错配被固化在会话历史中）

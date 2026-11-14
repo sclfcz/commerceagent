@@ -1,4 +1,8 @@
+import type { ProviderSessionContinuity } from '../../types';
+
 // ─── 统一供应商类型 (V4) ─────────────────────────────────────
+
+export type { ProviderSessionContinuity } from '../../types';
 
 export interface UnifiedProviderPublic {
   id: string;
@@ -19,6 +23,7 @@ export interface UnifiedProviderPublic {
   claudeOAuthCredentialsAccessTokenMasked: string | null;
   customEnv: Record<string, string>;
   updatedAt: string;
+  sessionContinuity?: ProviderSessionContinuity;
 }
 
 export interface ProviderHealthStatus {
@@ -96,6 +101,7 @@ export interface SystemSettings {
   maxLoginAttempts: number;
   loginLockoutMinutes: number;
   fallbackModel: string;
+  blockUnverifiedModelConfigs: boolean;
   observabilityEnabled: boolean;
   observabilityEndpoint: string;
   observabilityPublicKey: string;

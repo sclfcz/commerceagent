@@ -18,6 +18,7 @@
     "docs:check": "node scripts/check-docs.mjs",
     "test": "vitest",
     "test:real-model": "tsx scripts/test-real-model-smoke.ts",
+    "probe:session-continuity": "tsx scripts/probe-session-continuity.ts",
     "dist:worker": "tsx src/distributed/cli-worker.ts",
     "dist:migrate": "tsx src/distributed/migrate.ts",
     "dist:chaos": "node scripts/dist-chaos.mjs",
