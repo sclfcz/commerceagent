@@ -249,6 +249,32 @@ export function ClaudeProviderSection({
 
   return (
     <div className="space-y-4">
+      {/* 会话续接状态说明 */}
+      <div className="rounded-xl border border-border bg-muted/40 px-4 py-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="text-sm font-medium text-foreground">会话续接</div>
+          <code className="rounded bg-background px-1.5 py-0.5 text-[11px] text-muted-foreground">
+            npm run probe:session-continuity
+          </code>
+        </div>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">
+          智能体切换模型配置时，已有对话要由新的上游继续。只有通过实测的上游才能稳定续接：
+          <span className="mx-1 rounded border border-emerald-200 bg-emerald-50 px-1 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300">
+            已验证续接
+          </span>
+          表示该上游可以接续自己产生的会话；
+          <span className="mx-1 rounded border border-amber-200 bg-amber-50 px-1 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300">
+            续接未验证
+          </span>
+          表示还没测过，仍可选，但切换会让会话以新会话继续；
+          <span className="mx-1 rounded border border-red-200 bg-red-50 px-1 text-red-600 dark:border-red-800 dark:bg-red-950/40 dark:text-red-400">
+            不可续接
+          </span>
+          的上游不能作为智能体的模型配置。在服务器上运行上面的命令会产生真实模型请求并可能产生费用；
+          修改上游地址或模型后，旧结论自动失效。
+        </p>
+      </div>
+
       {/* 提供商列表 */}
       <ProviderList
         providers={providers}

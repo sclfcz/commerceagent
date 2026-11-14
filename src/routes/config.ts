@@ -871,7 +871,7 @@ configRoutes.get(
 
       return c.json({
         providers: providers.map((p) => ({
-          ...toPublicProvider(p),
+          ...toPublicProvider(p, providers),
           health: healthStatuses.find((h) => h.profileId === p.id) || null,
         })),
         balancing,
@@ -2223,6 +2223,7 @@ function toSystemSettingsResponse(
     maxLoginAttempts: settings.maxLoginAttempts,
     loginLockoutMinutes: settings.loginLockoutMinutes,
     fallbackModel: settings.fallbackModel,
+    blockUnverifiedModelConfigs: settings.blockUnverifiedModelConfigs,
     observabilityEnabled: settings.observabilityEnabled,
     observabilityEndpoint: settings.observabilityEndpoint,
     observabilityPublicKey: settings.observabilityPublicKey,

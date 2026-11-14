@@ -68,6 +68,10 @@
 `effective-capabilities` 的 `runtime_session_id` 只允许查询本人 Profile 工作区内的 Session；
 不能利用 Session ID 跨工作区读取运行上下文。省略该字段沿用主会话行为。
 
+`/api/agent-profiles/*` 的 `model_config_id` 准入不是权限：续接基线失败的上游对所有
+用户、所有角色一律拒绝。系统设置 `blockUnverifiedModelConfigs` 决定未验证的上游是否
+可选，修改它需要 `manage_system_config`，但生效范围同样是全体租户。
+
 产品级 Agent 删除前必须先迁移其工作区。渠道账号删除、登出或断开时必须清理/更新
 自身连接和绑定，不能影响其他用户或其他账号。
 

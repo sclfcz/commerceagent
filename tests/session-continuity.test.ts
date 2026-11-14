@@ -141,3 +141,94 @@ describe('canResumeAcrossProviders', () => {
     ).toBe(false);
   });
 });
+
+describe('summarizeProviderContinuity', () => {
+  const a = { id: 'a', anthropicBaseUrl: '', anthropicModel: 'claude-x' };
+  const b = { id: 'b', anthropicBaseUrl: '', anthropicModel: 'claude-x' };
+  const c = { id: 'c', anthropicBaseUrl: '', anthropicModel: 'claude-x' };
+  const file = path.join(root, 'catalog-matrix.json');
+  const passing = {
+    resumed: true,
+    recalledToolResult: true,
+    toolCallAfterResume: true,
+    streamed: true,
+  };
+  const entry = (
+    from: typeof a,
+    to: typeof a,
+    resume: boolean,
+    checkedAt = '2026-11-01T00:00:00.000Z',
+  ) => ({
+    fromFingerprint: continuity.providerContinuityFingerprint(from),
+    toFingerprint: continuity.providerContinuityFingerprint(to),
+    fromName: from.id,
+    toName: to.id,
+    checks: resume ? passing : { ...passing, resumed: false },
+    resume,
+    checkedAt,
+  });
+
+  test('a provider without a baseline entry is unverified', () => {
+    expect(continuity.summarizeProviderContinuity(a, [a, b], file)).toEqual({
+      status: 'unverified',
+      checkedAt: null,
+      bidirectionalProviderIds: [],
+    });
+  });
+
+  test('a passing baseline is verified and keeps its check time', () => {
+    const verifiedFile = path.join(root, 'catalog-verified.json');
+    continuity.writeResumeMatrixEntries([entry(a, a, true)], verifiedFile);
+    expect(
+      continuity.summarizeProviderContinuity(a, [a, b], verifiedFile),
+    ).toEqual({
+      status: 'verified',
+      checkedAt: '2026-11-01T00:00:00.000Z',
+      bidirectionalProviderIds: [],
+    });
+  });
+
+  test('a failing baseline is failed even when cross pairs exist', () => {
+    const failedFile = path.join(root, 'catalog-failed.json');
+    continuity.writeResumeMatrixEntries(
+      [entry(a, a, false), entry(a, b, true), entry(b, a, true)],
+      failedFile,
+    );
+    expect(
+      continuity.summarizeProviderContinuity(a, [a, b], failedFile),
+    ).toMatchObject({
+      status: 'failed',
+      bidirectionalProviderIds: ['b'],
+    });
+  });
+
+  test('only providers sharing both directions count as bidirectional', () => {
+    const pairFile = path.join(root, 'catalog-pairs.json');
+    continuity.writeResumeMatrixEntries(
+      [
+        entry(a, a, true),
+        entry(a, b, true),
+        entry(b, a, true),
+        entry(a, c, true),
+        entry(c, a, false),
+      ],
+      pairFile,
+    );
+    expect(
+      continuity.summarizeProviderContinuity(a, [a, b, c], pairFile)
+        .bidirectionalProviderIds,
+    ).toEqual(['b']);
+  });
+
+  test('editing the model voids the baseline', () => {
+    const staleFile = path.join(root, 'catalog-stale.json');
+    continuity.writeResumeMatrixEntries([entry(a, a, true)], staleFile);
+    expect(
+      continuity.summarizeProviderContinuity(
+        { ...a, anthropicModel: 'claude-y' },
+        [],
+        staleFile,
+      ).status,
+    ).toBe('unverified');
+  });
+});
