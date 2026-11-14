@@ -22,13 +22,16 @@
  *   npm run probe:session-continuity              # all enabled providers
  *   npm run probe:session-continuity -- --all     # include disabled ones
  *   npm run probe:session-continuity -- --dry-run # do not write the matrix
+ *   npm run probe:session-continuity -- --strip-thinking
+ *
+ * `--strip-thinking` exercises the fallback used for unverified pairs: after
+ * the first turn, thinking blocks are removed into a new session id (the
+ * runner's `createThinkingStrippedSession`) and that copy is resumed on `to`.
+ * Its results are printed only and never written to the matrix, which records
+ * direct resume. A pair whose first turn produced no thinking blocks is
+ * reported as inconclusive, since nothing was actually stripped.
  */
 import '../src/load-env.js';
-
-import crypto from 'node:crypto';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 
 import {
   createSdkMcpServer,
@@ -49,20 +52,17 @@ import {
   providerContinuityFingerprint,
   resumeChecksPass,
   writeResumeMatrixEntries,
-  type ResumeCheckResult,
   type ResumeMatrixEntry,
 } from '../src/session-continuity.js';
+import {
+  probePair,
+  stripResultInconclusive,
+  type RunTurnOptions,
+  type TurnResult,
+} from './session-continuity-probe-core.js';
 
 const args = new Set(process.argv.slice(2));
 const TIMEOUT_MS = 180_000;
-
-interface TurnResult {
-  sessionId?: string;
-  text: string;
-  ok: boolean;
-  toolCalls: number;
-  streamed: boolean;
-}
 
 function providerEnv(
   provider: UnifiedProvider,
@@ -80,14 +80,9 @@ function providerEnv(
   return env;
 }
 
-async function runTurn(opts: {
-  provider: UnifiedProvider;
-  configDir: string;
-  cwd: string;
-  prompt: string;
-  resume?: string;
-  code: string;
-}): Promise<TurnResult> {
+async function runTurn(
+  opts: RunTurnOptions<UnifiedProvider>,
+): Promise<TurnResult> {
   let toolCalls = 0;
   const server = createSdkMcpServer({
     name: 'probe',
@@ -154,55 +149,6 @@ async function runTurn(opts: {
   return result;
 }
 
-async function probePair(
-  from: UnifiedProvider,
-  to: UnifiedProvider,
-): Promise<ResumeCheckResult | null> {
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ca-continuity-'));
-  const configDir = path.join(workDir, '.claude');
-  const cwd = path.join(workDir, 'workspace');
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.mkdirSync(cwd, { recursive: true });
-  const firstCode = `C${crypto.randomInt(100000, 999999)}`;
-  const secondCode = `D${crypto.randomInt(100000, 999999)}`;
-  try {
-    const first = await runTurn({
-      provider: from,
-      configDir,
-      cwd,
-      code: firstCode,
-      prompt:
-        '请调用 lookup_order 工具查询订单 A-1，然后只回复“已查询”，不要复述验证码。',
-    });
-    // The first turn says nothing about resuming: an expired key, quota or
-    // a model that never calls the tool must not be recorded as a resume
-    // failure, or the model catalog would refuse a provider for the wrong
-    // reason. Such pairs are reported as inconclusive and left unwritten.
-    if (!first.ok || !first.sessionId || first.toolCalls === 0) return null;
-
-    const second = await runTurn({
-      provider: to,
-      configDir,
-      cwd,
-      code: secondCode,
-      resume: first.sessionId,
-      prompt:
-        '1. 回忆上一次查询订单 A-1 时工具返回的验证码。' +
-        '2. 再调用 lookup_order 查询订单 B-2。' +
-        '最后只输出一行：A-1=<验证码>;B-2=<验证码>',
-    });
-    return {
-      resumed: second.ok,
-      recalledToolResult: second.ok && second.text.includes(firstCode),
-      toolCallAfterResume:
-        second.ok && second.toolCalls > 0 && second.text.includes(secondCode),
-      streamed: second.streamed,
-    };
-  } finally {
-    fs.rmSync(workDir, { recursive: true, force: true });
-  }
-}
-
 async function main(): Promise<void> {
   const providers = getProviders().filter(
     (p) => args.has('--all') || p.enabled,
@@ -212,6 +158,7 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const stripMode = args.has('--strip-thinking');
   const pairs: Array<[UnifiedProvider, UnifiedProvider]> = [];
   for (const from of providers) {
     for (const to of providers) pairs.push([from, to]);
@@ -221,14 +168,47 @@ async function main(): Promise<void> {
   const inconclusive: string[] = [];
   for (const [from, to] of pairs) {
     const startedAt = Date.now();
-    const checks = await probePair(from, to);
-    if (!checks) {
-      inconclusive.push(`${from.name} → ${to.name}`);
+    const outcome = await probePair({
+      from,
+      to,
+      mode: stripMode ? 'strip_thinking' : 'direct',
+      runTurn,
+    });
+    const label = `${from.name} → ${to.name}`;
+    const base = { from: from.name, to: to.name };
+    if (outcome.kind !== 'checked') {
+      inconclusive.push(label);
       process.stdout.write(
         `${JSON.stringify({
-          from: from.name,
-          to: to.name,
+          ...base,
           inconclusive: true,
+          cause: outcome.kind,
+          ...(outcome.kind === 'strip_failed'
+            ? {
+                thinkingBlocksStripped: outcome.strip.thinkingBlocksStripped,
+                stripReason: outcome.strip.reason,
+              }
+            : {}),
+          elapsedMs: Date.now() - startedAt,
+        })}\n`,
+      );
+      continue;
+    }
+    const { checks, strip } = outcome;
+    const resume = resumeChecksPass(checks);
+    if (strip) {
+      // Strip mode: report only, never persisted.
+      const noThinking = stripResultInconclusive(strip);
+      if (noThinking) inconclusive.push(label);
+      else if (!resume) process.exitCode = 1;
+      process.stdout.write(
+        `${JSON.stringify({
+          ...base,
+          mode: 'strip_thinking',
+          thinkingBlocksStripped: strip.thinkingBlocksStripped,
+          ...checks,
+          resume,
+          ...(noThinking ? { inconclusive: true, cause: 'no_thinking' } : {}),
           elapsedMs: Date.now() - startedAt,
         })}\n`,
       );
@@ -240,16 +220,15 @@ async function main(): Promise<void> {
       fromName: from.name,
       toName: to.name,
       checks,
-      resume: resumeChecksPass(checks),
+      resume,
       checkedAt: new Date().toISOString(),
     };
     entries.push(entry);
     process.stdout.write(
       `${JSON.stringify({
-        from: from.name,
-        to: to.name,
+        ...base,
         ...checks,
-        resume: entry.resume,
+        resume,
         elapsedMs: Date.now() - startedAt,
       })}\n`,
     );
@@ -273,12 +252,12 @@ async function main(): Promise<void> {
 
   if (inconclusive.length > 0) {
     process.stderr.write(
-      `Inconclusive (first turn failed: check key, quota or model): ${inconclusive.join(', ')}\n`,
+      `Inconclusive (first turn failed, or no thinking to strip): ${inconclusive.join(', ')}\n`,
     );
     process.exitCode = 1;
   }
 
-  if (!args.has('--dry-run') && entries.length > 0) {
+  if (!stripMode && !args.has('--dry-run') && entries.length > 0) {
     writeResumeMatrixEntries(entries);
     process.stdout.write('Matrix updated.\n');
   }
