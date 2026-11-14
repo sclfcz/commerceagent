@@ -55,7 +55,8 @@
     "bench:selftest": "npm --prefix benchmarks run selftest --",
     "bench:review": "npm --prefix benchmarks run review --",
     "dist:chaos:im": "node scripts/dist-chaos-im.mjs",
-    "dist:demo": "node --import tsx scripts/dist-demo.mjs"
+    "dist:demo": "node --import tsx scripts/dist-demo.mjs",
+    "e2e:session-continuity": "tsx scripts/e2e-session-continuity.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.205",

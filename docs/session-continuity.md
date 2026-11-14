@@ -59,6 +59,19 @@ npm run probe:session-continuity
 同一上游自身的组合是基线（`from === to`），也会写入矩阵：它决定模型目录能否信任
 这个上游，基线失败时脚本以非零状态退出。
 
+探测脚本直接调用 SDK。要经过产品自己的 Host Runner 链路（`runHostAgent` →
+`container/agent-runner`）端到端验证，运行：
+
+```bash
+npm run e2e:session-continuity
+```
+
+它在临时 `COMMERCEAGENT_DATA_DIR` 中只复制 provider 配置、密钥和续接矩阵（0600，
+结束即删除），依次检查三种场景：Agent 配置变更（同一 sessionId + 刷新提示）、切到
+矩阵已验证的上游（同一 sessionId）、切到未验证的上游（剥离 thinking 后换新
+sessionId），每种都要求模型记得上一轮的信息。输出只有场景名和通过与否，同样会产生
+真实请求和费用。`--only A,C` 选择场景，`--from`/`--to` 指定上游 id。
+
 ## 模型目录准入
 
 上游的续接状态由基线结果决定，指纹（id + Base URL + 模型）不匹配的旧结论自动失效：
