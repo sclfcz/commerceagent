@@ -19,10 +19,11 @@ vi.mock('../src/logger.js', () => ({
 const runtimeConfig = await import('../src/runtime-config.js');
 const db = await import('../src/db.js');
 const {
-  closeRunnerAfterRotatingProviderTurn,
+  shouldRotatePoolProviderAfterTurn,
   trySelectPoolProvider,
   willClearSessionOnProviderSwitch,
 } = await import('../src/container-runner.js');
+const continuity = await import('../src/session-continuity.js');
 const { providerPool } = await import('../src/provider-pool.js');
 
 beforeAll(() => {
@@ -78,35 +79,71 @@ describe('default model configuration vs. balancing pool', () => {
     expect(picked.size).toBeGreaterThan(1);
   });
 
-  test('a completed warm turn closes before the next request and reselects with history reset', () => {
+  test('round-robin keeps an established session on its account', () => {
     runtimeConfig.saveBalancingConfig({ strategy: 'round-robin' });
     const groupFolder = 'warm-turn-rotation';
     const first = trySelectPoolProvider(groupFolder, null, null);
     expect(first).not.toBeNull();
-
-    const closeRunner = vi.fn();
-    expect(
-      closeRunnerAfterRotatingProviderTurn(
-        true,
-        false,
-        { providerFailure: false, inputTurnCompleted: true },
-        closeRunner,
-      ),
-    ).toBe(true);
-    expect(closeRunner).toHaveBeenCalledOnce();
-    // Host shutdown drops the resumable SDK session but retains the previous
-    // provider binding, so prompt construction predicts the switch and injects
-    // persisted history before the next cold runner starts.
-    db.deleteSession(groupFolder, null);
+    db.setSession(groupFolder, 'sdk-session-1', null);
     db.setSessionProviderId(groupFolder, null, first!.profileId);
-    expect(willClearSessionOnProviderSwitch(groupFolder, null, null)).toBe(
-      true,
-    );
 
-    const second = trySelectPoolProvider(groupFolder, null, null);
-    expect(second).not.toBeNull();
-    expect(second!.profileId).not.toBe(first!.profileId);
-    expect(second!.resetSession).toBe(true);
+    // No verified resume-compatible pair: the runner is not closed per turn
+    // and the next turn resumes the same session on the same account.
+    expect(shouldRotatePoolProviderAfterTurn(groupFolder, null)).toBe(false);
+    expect(willClearSessionOnProviderSwitch(groupFolder, null, null)).toBe(
+      false,
+    );
+    for (let i = 0; i < 3; i += 1) {
+      const next = trySelectPoolProvider(groupFolder, null, null);
+      expect(next?.profileId).toBe(first!.profileId);
+      expect(next?.resetSession ?? false).toBe(false);
+    }
+    expect(db.getSession(groupFolder)).toBe('sdk-session-1');
+  });
+
+  test('round-robin rotates a session only across verified resume-compatible accounts', () => {
+    runtimeConfig.saveBalancingConfig({ strategy: 'round-robin' });
+    const providers = runtimeConfig
+      .getProviders()
+      .filter((p) => created.includes(p.id));
+    const [a, b] = providers;
+    continuity.writeResumeMatrixEntries(
+      [
+        [a, b],
+        [b, a],
+      ].map(([from, to]) => ({
+        fromFingerprint: continuity.providerContinuityFingerprint(from),
+        toFingerprint: continuity.providerContinuityFingerprint(to),
+        fromName: from.name,
+        toName: to.name,
+        checks: {
+          resumed: true,
+          recalledToolResult: true,
+          toolCallAfterResume: true,
+          streamed: true,
+        },
+        resume: true,
+        checkedAt: new Date().toISOString(),
+      })),
+    );
+    try {
+      const groupFolder = 'verified-rotation';
+      db.setSession(groupFolder, 'sdk-session-2', null);
+      db.setSessionProviderId(groupFolder, null, a.id);
+      expect(shouldRotatePoolProviderAfterTurn(groupFolder, null)).toBe(true);
+
+      const seen = new Set<string>();
+      for (let i = 0; i < 9; i += 1) {
+        const next = trySelectPoolProvider(groupFolder, null, null);
+        expect(next?.resetSession ?? false).toBe(false);
+        seen.add(next!.profileId);
+      }
+      // Moves only between the verified pair, never to the third account.
+      expect([...seen].every((id) => id === a.id || id === b.id)).toBe(true);
+      expect(db.getSession(groupFolder)).toBe('sdk-session-2');
+    } finally {
+      fs.rmSync(continuity.SESSION_CONTINUITY_MATRIX_FILE, { force: true });
+    }
   });
 
   test('an explicit Agent model configuration still pins selection', () => {

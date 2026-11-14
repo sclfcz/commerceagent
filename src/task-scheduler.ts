@@ -214,32 +214,6 @@ function toRunnerAgentProfile(profile: AgentProfile | undefined) {
   };
 }
 
-function taskSessionNeedsAgentProfileReset(
-  groupFolder: string,
-  profile: AgentProfile | undefined,
-  sessionAgentId?: string | null,
-): boolean {
-  if (!profile) return false;
-  const current = getSessionAgentIdentity(groupFolder, sessionAgentId);
-  if (!current) return false;
-  if (
-    !current.agent_profile_id &&
-    !current.identity_hash &&
-    !hasAgentProfilePrompts(profile) &&
-    profile.prompt_mode === 'append'
-  ) {
-    return false;
-  }
-  if (current.identity_hash !== profile.identity_hash) return true;
-  if (
-    current.agent_profile_version != null &&
-    current.agent_profile_version !== profile.version
-  ) {
-    return true;
-  }
-  return !!current.agent_profile_id && current.agent_profile_id !== profile.id;
-}
-
 function resolveTaskWorkspace(
   task: ScheduledTask,
   deps: SchedulerDependencies,
@@ -1248,24 +1222,8 @@ async function runTaskInner(
   const agentProfile = resolveEffectiveAgentProfile(
     getAgentProfileForWorkspace(workspace.folder, workspaceOwnerId),
   );
-  if (
-    taskSessionNeedsAgentProfileReset(
-      workspace.folder,
-      agentProfile,
-      taskSessionAgentId,
-    )
-  ) {
-    deleteSession(workspace.folder, taskSessionAgentId);
-    logger.info(
-      {
-        taskId: task.id,
-        groupFolder: workspace.folder,
-        sessionAgentId: taskSessionAgentId,
-        agentProfileId: agentProfile?.id,
-      },
-      'Cleared scheduled task Claude session after AgentProfile identity changed',
-    );
-  }
+  // AgentProfile changes keep the task's Claude session; the runner is
+  // spawned per run, so it always starts with the current configuration.
   const sessionId = getSession(workspace.folder, taskSessionAgentId);
 
   // Idle timer: writes _close sentinel after idleTimeout of no output,

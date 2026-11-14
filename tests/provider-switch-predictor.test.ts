@@ -95,14 +95,14 @@ describe('willClearSessionOnProviderSwitch', () => {
     expect(willClearSessionOnProviderSwitch('grp', null)).toBe(false);
   });
 
-  test('rotating strategies predict a switch even on a healthy binding', () => {
-    // round-robin/weighted-round-robin move accounts on every request, so the
-    // bound session will be cleared next turn and needs its history injected.
+  test('rotating strategies keep a healthy binding and its session', () => {
+    // Rotation must not cost the conversation: without a verified
+    // resume-compatible account pair, the session stays on its account.
     for (const strategy of ['round-robin', 'weighted-round-robin'] as const) {
       mocks.strategy = strategy;
       setProviders('A', 'B');
       mocks.boundId = 'A';
-      expect(willClearSessionOnProviderSwitch('grp', null)).toBe(true);
+      expect(willClearSessionOnProviderSwitch('grp', null)).toBe(false);
     }
   });
 

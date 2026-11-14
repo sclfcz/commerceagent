@@ -128,6 +128,10 @@ import {
 import { assertValidWorkspaceFolderName } from './workspace-folder.js';
 import { resolveRunnerLivenessTimeouts } from './runner-liveness.js';
 import {
+  canResumeAcrossProviders,
+  type ContinuityProviderRef,
+} from './session-continuity.js';
+import {
   removeProviderEffortEnv,
   resolveAgentSdkEffort,
 } from './agent-effort.js';
@@ -925,6 +929,40 @@ function resolvePinnedModelConfigId(
   return getDefaultProviderId();
 }
 
+function continuityRef(
+  providerId: string | null | undefined,
+): ContinuityProviderRef | undefined {
+  if (!providerId) return undefined;
+  return getProviders().find((provider) => provider.id === providerId);
+}
+
+/**
+ * Whether moving a bound session to `nextId` forces a fresh SDK session.
+ * Only provider pairs verified by the continuity probe may share a session.
+ */
+function providerSwitchDropsSession(
+  boundId: string | null | undefined,
+  nextId: string,
+): boolean {
+  if (!boundId || boundId === nextId) return false;
+  return !canResumeAcrossProviders(
+    continuityRef(boundId),
+    continuityRef(nextId),
+  );
+}
+
+/** Whether any two enabled providers may resume each other's sessions. */
+function poolHasResumeCompatiblePair(
+  enabledProviders: ContinuityProviderRef[],
+): boolean {
+  for (const from of enabledProviders) {
+    for (const to of enabledProviders) {
+      if (from.id !== to.id && canResumeAcrossProviders(from, to)) return true;
+    }
+  }
+  return false;
+}
+
 /** Whether a completed user turn must release its runner for the next pick. */
 export function shouldRotatePoolProviderAfterTurn(
   groupFolder: string,
@@ -939,9 +977,13 @@ export function shouldRotatePoolProviderAfterTurn(
   ) {
     return false;
   }
+  const enabledProviders = getEnabledProviders();
+  // Rotating only helps when the next account can resume this session.
+  // Otherwise the session stays on its account and the runner stays warm.
   return (
-    getEnabledProviders().length > 1 &&
-    getBalancingConfig().strategy !== 'failover'
+    enabledProviders.length > 1 &&
+    getBalancingConfig().strategy !== 'failover' &&
+    poolHasResumeCompatiblePair(enabledProviders)
   );
 }
 
@@ -987,7 +1029,7 @@ export function willClearSessionOnProviderSwitch(
   const selectedModelConfigId = resolvePinnedModelConfigId(modelConfigId);
   const boundId = getSessionProviderId(groupFolder, agentId);
   if (selectedModelConfigId) {
-    return !!boundId && boundId !== selectedModelConfigId;
+    return providerSwitchDropsSession(boundId, selectedModelConfigId);
   }
 
   // Env-level provider override means the pool is bypassed entirely — no
@@ -1012,7 +1054,7 @@ export function willClearSessionOnProviderSwitch(
 
   // Single enabled provider equal to the binding → sticky, no reset.
   if (enabledProviders.length === 1) {
-    return enabledProviders[0].id !== boundId;
+    return providerSwitchDropsSession(boundId, enabledProviders[0].id);
   }
 
   // Multiple providers: sticky reuse only when the binding is still healthy.
@@ -1020,11 +1062,8 @@ export function willClearSessionOnProviderSwitch(
   // different healthy provider → reset.
   const balancing = getBalancingConfig();
   providerPool.refreshFromConfig(enabledProviders, balancing);
-  // The round-robin strategies rotate on every request, so a bound session is
-  // very likely to move to a different account next turn. Predicting a switch
-  // is the conservative side of this call: a false positive only injects
-  // recent history the fresh session would otherwise be missing.
-  if (providerPool.rotatesPerRequest) return true;
+  // Rotating strategies keep a healthy binding unless the next account can
+  // resume the session, so rotation itself never drops it.
   // Keep the prediction in lockstep with trySelectPoolProvider: apply the
   // time-based recovery rule before reading health, or an expired quarantine
   // predicts a switch that the actual selection no longer performs.
@@ -1091,7 +1130,7 @@ export function trySelectPoolProvider(
       profileId: selected.id,
       resolved: { config: resolved.config, customEnv: resolved.customEnv },
       previousProviderId: existingBoundId,
-      resetSession: !!existingBoundId && existingBoundId !== selected.id,
+      resetSession: providerSwitchDropsSession(existingBoundId, selected.id),
     };
   }
 
@@ -1125,11 +1164,10 @@ export function trySelectPoolProvider(
       enabledProviders.map((p) => [p.id, providerModelTier(p.anthropicModel)]),
     );
 
-  // Sticky path: respect previous session→provider binding when the bound
-  // provider is still enabled. Only the failover strategy is sticky — the
-  // round-robin strategies are expected to rotate on every request, so a
-  // binding must not pin them to one account.
-  if (enabledProviders.length > 1 && !providerPool.rotatesPerRequest) {
+  // Sticky path: a session stays on the account it was created on while that
+  // account is healthy. Round-robin strategies may still move it, but only to
+  // an account verified to resume the same session (see session-continuity).
+  if (enabledProviders.length > 1) {
     if (boundId && enabledProviders.some((p) => p.id === boundId)) {
       const boundHealth = providerPool.getHealthStatus(boundId);
       if (!boundHealth.healthy) {
@@ -1153,6 +1191,34 @@ export function trySelectPoolProvider(
           'Sticky provider cannot serve this model tier, falling back to pool selection',
         );
       } else {
+        if (providerPool.rotatesPerRequest) {
+          try {
+            const rotated = providerPool.selectProvider(tier);
+            if (
+              rotated !== boundId &&
+              !providerSwitchDropsSession(boundId, rotated)
+            ) {
+              const resolved = resolveProviderById(rotated);
+              providerPool.acquireSession(rotated);
+              setSessionProviderId(groupFolder, agentId, rotated);
+              return {
+                profileId: rotated,
+                resolved: {
+                  config: resolved.config,
+                  customEnv: resolved.customEnv,
+                },
+                previousProviderId: boundId,
+                resetSession: false,
+                ...(tierModel ? { modelOverride: tierModel } : {}),
+              };
+            }
+          } catch (err) {
+            logger.warn(
+              { err, providerId: boundId },
+              'Session-compatible rotation failed, keeping sticky provider',
+            );
+          }
+        }
         try {
           const resolved = resolveProviderById(boundId);
           providerPool.acquireSession(boundId);
@@ -1196,7 +1262,10 @@ export function trySelectPoolProvider(
         profileId: enabledProviders[0].id,
         resolved: { config: resolved.config, customEnv: resolved.customEnv },
         previousProviderId: boundId,
-        resetSession: !!boundId && boundId !== enabledProviders[0].id,
+        resetSession: providerSwitchDropsSession(
+          boundId,
+          enabledProviders[0].id,
+        ),
         ...(tierModel ? { modelOverride: tierModel } : {}),
       };
     } catch {
@@ -1213,7 +1282,7 @@ export function trySelectPoolProvider(
       profileId,
       resolved: { config: resolved.config, customEnv: resolved.customEnv },
       previousProviderId: boundId,
-      resetSession: !!boundId && boundId !== profileId,
+      resetSession: providerSwitchDropsSession(boundId, profileId),
       ...(tierModel ? { modelOverride: tierModel } : {}),
     };
   } catch (err) {
