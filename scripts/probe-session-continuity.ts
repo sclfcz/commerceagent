@@ -157,7 +157,7 @@ async function runTurn(opts: {
 async function probePair(
   from: UnifiedProvider,
   to: UnifiedProvider,
-): Promise<ResumeCheckResult> {
+): Promise<ResumeCheckResult | null> {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ca-continuity-'));
   const configDir = path.join(workDir, '.claude');
   const cwd = path.join(workDir, 'workspace');
@@ -165,12 +165,6 @@ async function probePair(
   fs.mkdirSync(cwd, { recursive: true });
   const firstCode = `C${crypto.randomInt(100000, 999999)}`;
   const secondCode = `D${crypto.randomInt(100000, 999999)}`;
-  const failed: ResumeCheckResult = {
-    resumed: false,
-    recalledToolResult: false,
-    toolCallAfterResume: false,
-    streamed: false,
-  };
   try {
     const first = await runTurn({
       provider: from,
@@ -180,7 +174,11 @@ async function probePair(
       prompt:
         '请调用 lookup_order 工具查询订单 A-1，然后只回复“已查询”，不要复述验证码。',
     });
-    if (!first.ok || !first.sessionId || first.toolCalls === 0) return failed;
+    // The first turn says nothing about resuming: an expired key, quota or
+    // a model that never calls the tool must not be recorded as a resume
+    // failure, or the model catalog would refuse a provider for the wrong
+    // reason. Such pairs are reported as inconclusive and left unwritten.
+    if (!first.ok || !first.sessionId || first.toolCalls === 0) return null;
 
     const second = await runTurn({
       provider: to,
@@ -220,9 +218,22 @@ async function main(): Promise<void> {
   }
 
   const entries: ResumeMatrixEntry[] = [];
+  const inconclusive: string[] = [];
   for (const [from, to] of pairs) {
     const startedAt = Date.now();
     const checks = await probePair(from, to);
+    if (!checks) {
+      inconclusive.push(`${from.name} → ${to.name}`);
+      process.stdout.write(
+        `${JSON.stringify({
+          from: from.name,
+          to: to.name,
+          inconclusive: true,
+          elapsedMs: Date.now() - startedAt,
+        })}\n`,
+      );
+      continue;
+    }
     const entry: ResumeMatrixEntry = {
       fromFingerprint: providerContinuityFingerprint(from),
       toFingerprint: providerContinuityFingerprint(to),
@@ -260,7 +271,14 @@ async function main(): Promise<void> {
     process.exitCode = 1;
   }
 
-  if (!args.has('--dry-run')) {
+  if (inconclusive.length > 0) {
+    process.stderr.write(
+      `Inconclusive (first turn failed: check key, quota or model): ${inconclusive.join(', ')}\n`,
+    );
+    process.exitCode = 1;
+  }
+
+  if (!args.has('--dry-run') && entries.length > 0) {
     writeResumeMatrixEntries(entries);
     process.stdout.write('Matrix updated.\n');
   }
