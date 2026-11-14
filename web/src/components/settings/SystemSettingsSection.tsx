@@ -276,6 +276,8 @@ export function SystemSettingsSection({
   // fallbackModel 是自由字符串，独立于数值 field 抽象；仅在 runtime scope 展示。
   const [fallbackModel, setFallbackModel] = useState('');
   const [initialFallbackModel, setInitialFallbackModel] = useState('');
+  const [blockUnverifiedModelConfigs, setBlockUnverifiedModelConfigs] =
+    useState(false);
   const [observabilityEnabled, setObservabilityEnabled] = useState(false);
   const [observabilityEndpoint, setObservabilityEndpoint] = useState('');
   const [observabilityPublicKey, setObservabilityPublicKey] = useState('');
@@ -298,6 +300,7 @@ export function SystemSettingsSection({
       setInitialValues(nextValues);
       setFallbackModel(data.fallbackModel ?? '');
       setInitialFallbackModel(data.fallbackModel ?? '');
+      setBlockUnverifiedModelConfigs(data.blockUnverifiedModelConfigs ?? false);
       setObservabilityEnabled(data.observabilityEnabled ?? false);
       setObservabilityEndpoint(data.observabilityEndpoint ?? '');
       setObservabilityPublicKey(data.observabilityPublicKey ?? '');
@@ -340,6 +343,9 @@ export function SystemSettingsSection({
 
   const fallbackModelDirty =
     scope === 'runtime' && fallbackModel.trim() !== initialFallbackModel.trim();
+  const modelContinuityGateDirty =
+    scope === 'runtime' &&
+    blockUnverifiedModelConfigs !== !!settings?.blockUnverifiedModelConfigs;
   const observabilityDirty =
     scope === 'runtime' &&
     (!!observabilityEnabled !== !!settings?.observabilityEnabled ||
@@ -360,12 +366,14 @@ export function SystemSettingsSection({
           (field) => values[field.key] !== initialValues[field.key],
         )) ||
       fallbackModelDirty ||
+      modelContinuityGateDirty ||
       observabilityDirty,
     [
       activeFields,
       initialValues,
       values,
       fallbackModelDirty,
+      modelContinuityGateDirty,
       observabilityDirty,
     ],
   );
@@ -391,6 +399,7 @@ export function SystemSettingsSection({
     }
     if (scope === 'runtime') {
       payload.fallbackModel = fallbackModel.trim();
+      payload.blockUnverifiedModelConfigs = blockUnverifiedModelConfigs;
       payload.observabilityEnabled = observabilityEnabled;
       payload.observabilityEndpoint = observabilityEndpoint.trim();
       payload.observabilityPublicKey = observabilityPublicKey.trim();
@@ -410,6 +419,7 @@ export function SystemSettingsSection({
       setInitialValues(nextValues);
       setFallbackModel(data.fallbackModel ?? '');
       setInitialFallbackModel(data.fallbackModel ?? '');
+      setBlockUnverifiedModelConfigs(data.blockUnverifiedModelConfigs ?? false);
       setObservabilityEnabled(data.observabilityEnabled ?? false);
       setObservabilityEndpoint(data.observabilityEndpoint ?? '');
       setObservabilityPublicKey(data.observabilityPublicKey ?? '');
@@ -498,6 +508,39 @@ export function SystemSettingsSection({
           </section>
         ))}
       </div>
+
+      {scope === 'runtime' && (
+        <section className="border-t border-border py-6">
+          <header className="mb-5 max-w-2xl">
+            <h2 className="text-base font-semibold text-foreground">
+              模型续接准入
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              智能体切换模型配置时，已有对话要由新的上游继续。
+              未通过续接基线验证的上游始终不能被选为智能体的模型配置；
+              开启下面这项后，尚未验证的上游也会被拒绝，租户只能在已验证续接的模型之间切换。
+              验证由管理员在服务器上运行{' '}
+              <code>npm run probe:session-continuity</code> 完成并写入续接矩阵。
+            </p>
+          </header>
+          <div className="flex items-start justify-between gap-4 max-w-2xl">
+            <div>
+              <Label htmlFor="block-unverified-model-configs">
+                要求模型配置必须先通过续接验证
+              </Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                默认关闭：未验证的上游仍可选择，保存时会在响应里给出提示。
+                开启后，只有续接基线已验证的上游可以作为 Agent 的模型配置。
+              </p>
+            </div>
+            <Switch
+              id="block-unverified-model-configs"
+              checked={blockUnverifiedModelConfigs}
+              onCheckedChange={setBlockUnverifiedModelConfigs}
+            />
+          </div>
+        </section>
+      )}
 
       {scope === 'runtime' && (
         <section className="border-t border-border py-6">

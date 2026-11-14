@@ -194,6 +194,14 @@ export function formatChannelTurnContextForPrompt(
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  /**
+   * How the host wants this run's SDK session rebuilt before resuming.
+   * `strip_thinking`: copy the transcript under a new session id without
+   * `thinking`/`redacted_thinking` blocks. The host asks for this when the
+   * upstream behind the session changed, since those blocks carry signatures
+   * bound to the account that produced them. Omitted means plain resume.
+   */
+  sessionResumeMode?: 'strip_thinking';
   turnId?: string;
   /** Exact GroupQueue query attempt for Web stream fencing. */
   queryRunId?: string;

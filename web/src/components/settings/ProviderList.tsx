@@ -13,6 +13,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { SessionContinuityBadge } from '@/components/common/SessionContinuityBadge';
 import type { ProviderWithHealth, ProviderHealthStatus } from './types';
 import { UsageBars } from './UsageBars';
 
@@ -300,6 +301,9 @@ export function ProviderList({
                       </span>
                     )}
                     <CredentialBadges provider={provider} />
+                    <SessionContinuityBadge
+                      continuity={provider.sessionContinuity}
+                    />
                   </div>
 
                   {/* 第三行：健康异常信息（仅异常时显示） */}

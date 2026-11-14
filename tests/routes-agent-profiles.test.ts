@@ -54,6 +54,7 @@ vi.mock('../src/middleware/auth.ts', () => ({
 
 const db = await import('../src/db.js');
 const runtimeConfig = await import('../src/runtime-config.js');
+const continuity = await import('../src/session-continuity.js');
 const webContext = await import('../src/web-context.js');
 const agentProfileRuntime = await import('../src/agent-profile-runtime.js');
 const routeModule = await import('../src/routes/agent-profiles.js');
@@ -1719,5 +1720,184 @@ describe('/api/agent-profiles routes', () => {
       db.getAgentProfileForUser(profile.id, 'routes-agent-user'),
     ).toBeDefined();
     expect(db.getWorkspaceAgentProfileId(folder)).toBe(profile.id);
+  });
+});
+
+describe('模型配置续接准入', () => {
+  type Provider = ReturnType<typeof runtimeConfig.createProvider>;
+
+  function createTestProvider(name: string, slug: string): Provider {
+    return runtimeConfig.createProvider({
+      name,
+      type: 'third_party',
+      anthropicBaseUrl: `https://${slug}.models.example.test`,
+      anthropicAuthToken: `synthetic-${slug}-token`,
+      anthropicModel: `model-${slug}`,
+      enabled: true,
+    });
+  }
+
+  function writeBaseline(provider: Provider, pass: boolean): void {
+    const fingerprint = continuity.providerContinuityFingerprint(provider);
+    const checks = {
+      resumed: pass,
+      recalledToolResult: pass,
+      toolCallAfterResume: pass,
+      streamed: pass,
+    };
+    continuity.writeResumeMatrixEntries([
+      {
+        fromFingerprint: fingerprint,
+        toFingerprint: fingerprint,
+        fromName: provider.name,
+        toName: provider.name,
+        checks,
+        resume: continuity.resumeChecksPass(checks),
+        checkedAt: '2026-11-01T00:00:00.000Z',
+      },
+    ]);
+  }
+
+  test('GET 暴露续接状态且不泄露 endpoint 或密钥', async () => {
+    const verified = createTestProvider('Verified upstream', 'verified');
+    const failed = createTestProvider('Failed upstream', 'failed');
+    const unverified = createTestProvider('Unverified upstream', 'unverified');
+    writeBaseline(verified, true);
+    writeBaseline(failed, false);
+
+    const res = await routes.request('/', { method: 'GET' });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const byId = Object.fromEntries(
+      (body.model_configs as Array<Record<string, unknown>>).map((item) => [
+        item.id,
+        item,
+      ]),
+    );
+
+    expect(byId[verified.id].session_continuity).toEqual({
+      status: 'verified',
+      checkedAt: '2026-11-01T00:00:00.000Z',
+      bidirectionalProviderIds: [],
+    });
+    expect(byId[failed.id].session_continuity).toMatchObject({
+      status: 'failed',
+    });
+    expect(byId[unverified.id].session_continuity).toEqual({
+      status: 'unverified',
+      checkedAt: null,
+      bidirectionalProviderIds: [],
+    });
+    for (const config of body.model_configs) {
+      const serialized = JSON.stringify(config.session_continuity);
+      expect(serialized).not.toContain('models.example.test');
+      expect(serialized).not.toContain('synthetic-');
+    }
+  });
+
+  test('POST 拒绝续接基线失败的上游', async () => {
+    const failed = createTestProvider(
+      'Failed baseline upstream',
+      'failed-base',
+    );
+    writeBaseline(failed, false);
+
+    const res = await routes.request('/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Blocked Agent',
+        model_config_id: failed.id,
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe('session_continuity_failed');
+    expect(body.error).toContain('Failed baseline upstream');
+    expect(body.session_continuity.status).toBe('failed');
+  });
+
+  test('POST 允许未验证的上游并返回提示', async () => {
+    const unverified = createTestProvider(
+      'Never probed upstream',
+      'never-probed',
+    );
+
+    const res = await routes.request('/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Unverified model Agent',
+        model_config_id: unverified.id,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.profile.model_config_id).toBe(unverified.id);
+    expect(body.warnings).toEqual([
+      expect.objectContaining({ code: 'session_continuity_unverified' }),
+    ]);
+    expect(body.warnings[0].message).toContain('Never probed upstream');
+
+    const patchRes = await routes.request(`/${body.profile.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model_config_id: unverified.id, name: 'Renamed' }),
+    });
+    expect(patchRes.status).toBe(200);
+    expect((await patchRes.json()).warnings).toEqual([
+      expect.objectContaining({ code: 'session_continuity_unverified' }),
+    ]);
+  });
+
+  test('严格模式下拒绝未验证的上游', async () => {
+    const unverified = createTestProvider('Strict upstream', 'strict-mode');
+    runtimeConfig.saveSystemSettings({ blockUnverifiedModelConfigs: true });
+    try {
+      const res = await routes.request('/', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Strict Agent',
+          model_config_id: unverified.id,
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe('session_continuity_unverified');
+      expect(body.error).toContain('Strict upstream');
+    } finally {
+      runtimeConfig.saveSystemSettings({ blockUnverifiedModelConfigs: false });
+    }
+  });
+
+  test('PATCH 拒绝把已有智能体改到不可续接的上游', async () => {
+    const verified = createTestProvider('Verified for patch', 'patch-ok');
+    const failed = createTestProvider('Failed for patch', 'patch-failed');
+    writeBaseline(verified, true);
+    writeBaseline(failed, false);
+
+    const created = await routes.request('/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Patch target Agent',
+        model_config_id: verified.id,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const profile = (await created.json()).profile;
+
+    const res = await routes.request(`/${profile.id}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model_config_id: failed.id }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe('session_continuity_failed');
+    expect(
+      db.getAgentProfileForUser(profile.id, 'routes-agent-user')
+        ?.model_config_id,
+    ).toBe(verified.id);
   });
 });

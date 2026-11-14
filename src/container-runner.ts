@@ -63,7 +63,7 @@ import {
 } from './workspace-memory-capability.js';
 import { releaseCommerceAgentOwnerIntroductionLease } from './owner-profile-store.js';
 import {
-  deleteSession,
+  getSessionResumeStripThinking,
   getUserById,
   getSessionProviderId,
   setSessionProviderId,
@@ -127,6 +127,10 @@ import {
 } from './feishu-cli-runtime.js';
 import { assertValidWorkspaceFolderName } from './workspace-folder.js';
 import { resolveRunnerLivenessTimeouts } from './runner-liveness.js';
+import {
+  canResumeAcrossProviders,
+  type ContinuityProviderRef,
+} from './session-continuity.js';
 import {
   removeProviderEffortEnv,
   resolveAgentSdkEffort,
@@ -354,6 +358,14 @@ function ensureSettingsJson(
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  /**
+   * How the runner must rebuild `sessionId` before resuming it.
+   * `strip_thinking`: copy the transcript under a new session id without
+   * `thinking`/`redacted_thinking` blocks, then resume that copy. Set when the
+   * upstream behind the session changed and its thinking signatures no longer
+   * validate. Omitted means a plain resume.
+   */
+  sessionResumeMode?: 'strip_thinking';
   /** Exact GroupQueue query attempt for Web stream fencing. */
   queryRunId?: string;
   groupFolder: string;
@@ -901,8 +913,7 @@ function resolvePoolTierModel(
  * that — so the sticky fast-path must consult both dimensions, or it hands the
  * turn straight back to the walled (account, model) pair every time.
  *
- * Shared by trySelectPoolProvider and willClearSessionOnProviderSwitch so the
- * prediction cannot drift from the selection it mirrors.
+ * Used by the sticky fast-path in trySelectPoolProvider.
  */
 function stickyBindingCanServeTier(
   boundId: string,
@@ -925,6 +936,64 @@ function resolvePinnedModelConfigId(
   return getDefaultProviderId();
 }
 
+function continuityRef(
+  providerId: string | null | undefined,
+): ContinuityProviderRef | undefined {
+  if (!providerId) return undefined;
+  return getProviders().find((provider) => provider.id === providerId);
+}
+
+/**
+ * Whether moving a bound session to `nextId` requires rebuilding its
+ * transcript without thinking blocks. Only provider pairs verified by the
+ * continuity probe may hand a session over as-is; everything else resumes the
+ * conversation with the unverifiable thinking blocks removed.
+ */
+function providerSwitchNeedsThinkingStrip(
+  boundId: string | null | undefined,
+  nextId: string,
+): boolean {
+  if (!boundId || boundId === nextId) return false;
+  return !canResumeAcrossProviders(
+    continuityRef(boundId),
+    continuityRef(nextId),
+  );
+}
+
+/**
+ * Decide how this turn should resume its SDK session.
+ *
+ * - `strip_thinking`: the session is kept, but its transcript carries thinking
+ *   blocks signed by a different upstream and must be rebuilt without them.
+ * - `undefined`: plain resume.
+ *
+ * Two independent causes request the strip: a pool selection that moves the
+ * session across providers the continuity probe has not verified, and a durable
+ * marker recorded when the bound provider's own protocol-level config changed.
+ */
+export function resolveSessionResumeMode(params: {
+  sessionId?: string | null;
+  stripSessionThinking?: boolean;
+  durableStripMarker?: boolean;
+}): 'strip_thinking' | undefined {
+  if (!params.sessionId) return undefined;
+  return params.stripSessionThinking || params.durableStripMarker
+    ? 'strip_thinking'
+    : undefined;
+}
+
+/** Whether any two enabled providers may resume each other's sessions. */
+function poolHasResumeCompatiblePair(
+  enabledProviders: ContinuityProviderRef[],
+): boolean {
+  for (const from of enabledProviders) {
+    for (const to of enabledProviders) {
+      if (from.id !== to.id && canResumeAcrossProviders(from, to)) return true;
+    }
+  }
+  return false;
+}
+
 /** Whether a completed user turn must release its runner for the next pick. */
 export function shouldRotatePoolProviderAfterTurn(
   groupFolder: string,
@@ -939,9 +1008,13 @@ export function shouldRotatePoolProviderAfterTurn(
   ) {
     return false;
   }
+  const enabledProviders = getEnabledProviders();
+  // Rotating only helps when the next account can resume this session.
+  // Otherwise the session stays on its account and the runner stays warm.
   return (
-    getEnabledProviders().length > 1 &&
-    getBalancingConfig().strategy !== 'failover'
+    enabledProviders.length > 1 &&
+    getBalancingConfig().strategy !== 'failover' &&
+    poolHasResumeCompatiblePair(enabledProviders)
   );
 }
 
@@ -965,82 +1038,6 @@ export function closeRunnerAfterRotatingProviderTurn(
 }
 
 /**
- * Read-only prediction of whether the next provider selection will *clear* the
- * resumable Claude session because it has to switch away from the bound
- * provider (the binding is unhealthy or no longer enabled). Mirrors the
- * `resetSession` conditions in trySelectPoolProvider without mutating sticky
- * bindings.
- *
- * The orchestration layer calls this *before* building the prompt so a
- * proactive provider switch injects recent conversation history into the fresh
- * session — matching the reactive (mid-stream provider-failure) path. Without
- * this, the first turn under the new provider would see an empty conversation.
- *
- * Conservative by design: a false positive only injects redundant history
- * (harmless), never the reverse.
- */
-export function willClearSessionOnProviderSwitch(
-  groupFolder: string,
-  agentId?: string | null,
-  modelConfigId?: string | null,
-): boolean {
-  const selectedModelConfigId = resolvePinnedModelConfigId(modelConfigId);
-  const boundId = getSessionProviderId(groupFolder, agentId);
-  if (selectedModelConfigId) {
-    return !!boundId && boundId !== selectedModelConfigId;
-  }
-
-  // Env-level provider override means the pool is bypassed entirely — no
-  // pool-driven switch, so the session is never cleared on this account.
-  const override = getContainerEnvConfig(groupFolder);
-  if (
-    override.anthropicApiKey ||
-    override.anthropicAuthToken ||
-    override.anthropicBaseUrl
-  ) {
-    return false;
-  }
-
-  if (!boundId) return false;
-
-  const enabledProviders = getEnabledProviders();
-  if (enabledProviders.length === 0) return false;
-
-  // Bound provider removed/disabled → a fresh one gets picked → reset.
-  const stillEnabled = enabledProviders.some((p) => p.id === boundId);
-  if (!stillEnabled) return true;
-
-  // Single enabled provider equal to the binding → sticky, no reset.
-  if (enabledProviders.length === 1) {
-    return enabledProviders[0].id !== boundId;
-  }
-
-  // Multiple providers: sticky reuse only when the binding is still healthy.
-  // Unhealthy binding falls through to pool selection, which prefers a
-  // different healthy provider → reset.
-  const balancing = getBalancingConfig();
-  providerPool.refreshFromConfig(enabledProviders, balancing);
-  // The round-robin strategies rotate on every request, so a bound session is
-  // very likely to move to a different account next turn. Predicting a switch
-  // is the conservative side of this call: a false positive only injects
-  // recent history the fresh session would otherwise be missing.
-  if (providerPool.rotatesPerRequest) return true;
-  // Keep the prediction in lockstep with trySelectPoolProvider: apply the
-  // time-based recovery rule before reading health, or an expired quarantine
-  // predicts a switch that the actual selection no longer performs.
-  providerPool.refreshRecoveryState();
-  if (!providerPool.getHealthStatus(boundId).healthy) return true;
-  // Same second dimension the sticky path checks: a walled model tier moves
-  // the session off a still-healthy account, and that switch must inject
-  // history like any other.
-  return !stickyBindingCanServeTier(
-    boundId,
-    enabledProviders,
-    resolvePoolTierModel(enabledProviders),
-  );
-}
-
-/**
  * Try to select a provider from the pool. Returns profileId + resolved config,
  * or null if no providers are enabled / group has env-level provider override / selection fails.
  * For single-provider setups, returns the provider for display without pool balancing.
@@ -1060,7 +1057,12 @@ export function trySelectPoolProvider(
   profileId: string;
   resolved: ResolvedProvider;
   previousProviderId?: string;
-  resetSession?: boolean;
+  /**
+   * True when this selection moves the session to an upstream pair the
+   * continuity probe has not verified. The session is kept, but its transcript
+   * must be rebuilt without thinking blocks before the runner resumes it.
+   */
+  stripSessionThinking?: boolean;
   /**
    * Set when the pool escalated past the primary tier: every account had its
    * configured model walled, so this turn must run on the fallback model.
@@ -1091,7 +1093,10 @@ export function trySelectPoolProvider(
       profileId: selected.id,
       resolved: { config: resolved.config, customEnv: resolved.customEnv },
       previousProviderId: existingBoundId,
-      resetSession: !!existingBoundId && existingBoundId !== selected.id,
+      stripSessionThinking: providerSwitchNeedsThinkingStrip(
+        existingBoundId,
+        selected.id,
+      ),
     };
   }
 
@@ -1125,11 +1130,10 @@ export function trySelectPoolProvider(
       enabledProviders.map((p) => [p.id, providerModelTier(p.anthropicModel)]),
     );
 
-  // Sticky path: respect previous session→provider binding when the bound
-  // provider is still enabled. Only the failover strategy is sticky — the
-  // round-robin strategies are expected to rotate on every request, so a
-  // binding must not pin them to one account.
-  if (enabledProviders.length > 1 && !providerPool.rotatesPerRequest) {
+  // Sticky path: a session stays on the account it was created on while that
+  // account is healthy. Round-robin strategies may still move it, but only to
+  // an account verified to resume the same session (see session-continuity).
+  if (enabledProviders.length > 1) {
     if (boundId && enabledProviders.some((p) => p.id === boundId)) {
       const boundHealth = providerPool.getHealthStatus(boundId);
       if (!boundHealth.healthy) {
@@ -1153,6 +1157,34 @@ export function trySelectPoolProvider(
           'Sticky provider cannot serve this model tier, falling back to pool selection',
         );
       } else {
+        if (providerPool.rotatesPerRequest) {
+          try {
+            const rotated = providerPool.selectProvider(tier);
+            if (
+              rotated !== boundId &&
+              !providerSwitchNeedsThinkingStrip(boundId, rotated)
+            ) {
+              const resolved = resolveProviderById(rotated);
+              providerPool.acquireSession(rotated);
+              setSessionProviderId(groupFolder, agentId, rotated);
+              return {
+                profileId: rotated,
+                resolved: {
+                  config: resolved.config,
+                  customEnv: resolved.customEnv,
+                },
+                previousProviderId: boundId,
+                stripSessionThinking: false,
+                ...(tierModel ? { modelOverride: tierModel } : {}),
+              };
+            }
+          } catch (err) {
+            logger.warn(
+              { err, providerId: boundId },
+              'Session-compatible rotation failed, keeping sticky provider',
+            );
+          }
+        }
         try {
           const resolved = resolveProviderById(boundId);
           providerPool.acquireSession(boundId);
@@ -1196,7 +1228,10 @@ export function trySelectPoolProvider(
         profileId: enabledProviders[0].id,
         resolved: { config: resolved.config, customEnv: resolved.customEnv },
         previousProviderId: boundId,
-        resetSession: !!boundId && boundId !== enabledProviders[0].id,
+        stripSessionThinking: providerSwitchNeedsThinkingStrip(
+          boundId,
+          enabledProviders[0].id,
+        ),
         ...(tierModel ? { modelOverride: tierModel } : {}),
       };
     } catch {
@@ -1213,7 +1248,10 @@ export function trySelectPoolProvider(
       profileId,
       resolved: { config: resolved.config, customEnv: resolved.customEnv },
       previousProviderId: boundId,
-      resetSession: !!boundId && boundId !== profileId,
+      stripSessionThinking: providerSwitchNeedsThinkingStrip(
+        boundId,
+        profileId,
+      ),
       ...(tierModel ? { modelOverride: tierModel } : {}),
     };
   } catch (err) {
@@ -2133,25 +2171,28 @@ export async function runContainerAgent(
   let providerFailureTerminal: boolean | undefined;
   let providerFailureMaintenance = false;
   let healthyInputTurnCompleted = false;
-  if (poolResult?.resetSession && input.sessionId) {
+  const containerResumeMode = resolveSessionResumeMode({
+    sessionId: input.sessionId,
+    stripSessionThinking: poolResult?.stripSessionThinking,
+    durableStripMarker: getSessionResumeStripThinking(
+      group.folder,
+      sessionAgentId,
+    ),
+  });
+  if (containerResumeMode) {
     logger.info(
       {
         groupFolder: group.folder,
         agentId: sessionAgentId || null,
-        previousProviderId: poolResult.previousProviderId,
+        previousProviderId: poolResult?.previousProviderId ?? null,
         providerId: selectedProfileId,
       },
-      'Clearing Claude session after switching providers',
+      'Resuming Claude session with thinking blocks stripped after provider change',
     );
-    // deleteSession removes the whole sessions row, including the provider_id
-    // binding trySelectPoolProvider just wrote. Re-bind the freshly-selected
-    // provider so the next turn stays sticky to it instead of degrading to a
-    // fresh pool pick.
-    deleteSession(group.folder, sessionAgentId);
-    if (selectedProfileId) {
-      setSessionProviderId(group.folder, sessionAgentId, selectedProfileId);
-    }
-    input = { ...input, sessionId: undefined };
+    // The session (and its provider binding) is kept: the runner copies the
+    // transcript under a new session id without the blocks the new upstream
+    // cannot verify, then resumes that copy.
+    input = { ...input, sessionResumeMode: containerResumeMode };
   }
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
@@ -2985,24 +3026,26 @@ export async function runHostAgent(
   let hostProviderFailureTerminal: boolean | undefined;
   let hostProviderFailureMaintenance = false;
   let hostHealthyInputTurnCompleted = false;
-  if (hostPoolResult?.resetSession && input.sessionId) {
+  const hostResumeMode = resolveSessionResumeMode({
+    sessionId: input.sessionId,
+    stripSessionThinking: hostPoolResult?.stripSessionThinking,
+    durableStripMarker: getSessionResumeStripThinking(
+      group.folder,
+      sessionAgentId,
+    ),
+  });
+  if (hostResumeMode) {
     logger.info(
       {
         groupFolder: group.folder,
         agentId: sessionAgentId || null,
-        previousProviderId: hostPoolResult.previousProviderId,
+        previousProviderId: hostPoolResult?.previousProviderId ?? null,
         providerId: hostSelectedProfileId,
       },
-      'Clearing Claude session after switching providers',
+      'Resuming Claude session with thinking blocks stripped after provider change',
     );
-    // deleteSession removes the whole sessions row, including the provider_id
-    // binding trySelectPoolProvider just wrote. Re-bind so the next turn stays
-    // sticky to the freshly-selected provider (mirrors the container path).
-    deleteSession(group.folder, sessionAgentId);
-    if (hostSelectedProfileId) {
-      setSessionProviderId(group.folder, sessionAgentId, hostSelectedProfileId);
-    }
-    input = { ...input, sessionId: undefined };
+    // Mirrors the container path: keep the session, resume a thinking-free copy.
+    input = { ...input, sessionResumeMode: hostResumeMode };
   }
 
   const workspaceMemoryCapabilityScope: WorkspaceMemoryCapabilityScope = {
