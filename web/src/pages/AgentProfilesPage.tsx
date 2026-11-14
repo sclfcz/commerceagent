@@ -31,6 +31,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { SessionContinuityBadge } from '@/components/common/SessionContinuityBadge';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
@@ -68,6 +69,7 @@ import {
   type AgentProfilePromptMode,
   type AgentContextSource,
   type AgentProfileRuntimePolicy,
+  type ProviderSessionContinuity,
 } from '../types';
 import { getCustomAgentProfiles } from '../utils/agent-product';
 import {
@@ -182,6 +184,44 @@ function asApiError(error: unknown): ApiError | null {
     typeof candidate.message === 'string'
     ? (candidate as ApiError)
     : null;
+}
+
+/**
+ * 当前模型配置的续接状态说明。选择器里已用标签标记每个上游，这里再对
+ * 已经选中的那个给出后果说明，避免用户把一个“未验证”的上游当成可无缝切换。
+ */
+function ModelConfigContinuityNote({
+  continuity,
+}: {
+  continuity?: ProviderSessionContinuity;
+}) {
+  if (!continuity) return null;
+  const checkedAt = continuity.checkedAt
+    ? new Date(continuity.checkedAt).toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      })
+    : null;
+  const message =
+    continuity.status === 'verified'
+      ? `该上游已验证可以接续自己产生的会话${checkedAt ? `（最近检查 ${checkedAt}）` : ''}。`
+      : continuity.status === 'failed'
+        ? '该上游未通过续接验证，不能作为智能体的模型配置；请先修复该上游，或在服务器上运行 npm run probe:session-continuity 重新验证。'
+        : '该上游尚未验证续接：切换到其他模型配置时，会话会以新会话继续。可在服务器上运行 npm run probe:session-continuity 完成验证。';
+
+  return (
+    <div
+      className="mt-2 flex flex-wrap items-center gap-2 text-xs leading-5 text-muted-foreground"
+      data-testid="agent-model-continuity"
+    >
+      <SessionContinuityBadge continuity={continuity} />
+      <span>{message}</span>
+    </div>
+  );
 }
 
 export function AgentProfilesPage() {
@@ -370,6 +410,13 @@ export function AgentProfilesPage() {
     [customProfiles, selectedId],
   );
   selectedIdRef.current = selectedId;
+  const activeModelConfig = useMemo(
+    () =>
+      modelConfigId === 'inherit'
+        ? null
+        : (modelConfigs.find((item) => item.id === modelConfigId) ?? null),
+    [modelConfigId, modelConfigs],
+  );
 
   useEffect(() => {
     if (!selected || location.hash !== '#agent-capabilities') return;
@@ -1542,16 +1589,32 @@ export function AgentProfilesPage() {
                                 : '（尚未配置）'}
                             </SelectItem>
                             {modelConfigs.map((model) => (
-                              <SelectItem key={model.id} value={model.id}>
-                                {model.name}
-                                {model.anthropic_model
-                                  ? ` · ${model.anthropic_model}`
-                                  : ''}
-                                {!model.enabled ? '（仅显式使用）' : ''}
+                              <SelectItem
+                                key={model.id}
+                                value={model.id}
+                                disabled={
+                                  model.session_continuity?.status === 'failed'
+                                }
+                              >
+                                <span className="inline-flex items-center gap-2">
+                                  <span>
+                                    {model.name}
+                                    {model.anthropic_model
+                                      ? ` · ${model.anthropic_model}`
+                                      : ''}
+                                    {!model.enabled ? '（仅显式使用）' : ''}
+                                  </span>
+                                  <SessionContinuityBadge
+                                    continuity={model.session_continuity}
+                                  />
+                                </span>
                               </SelectItem>
                             ))}
                           </SelectContent>
                         </Select>
+                        <ModelConfigContinuityNote
+                          continuity={activeModelConfig?.session_continuity}
+                        />
                         <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
                           该智能体所属的所有工作区、会话和定时任务都会使用这里解析出的完整模型网关环境。未启用的配置不会参与系统自动选择，但仍可由智能体显式使用。
                         </p>

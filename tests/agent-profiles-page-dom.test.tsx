@@ -59,6 +59,7 @@ const mocks = vi.hoisted(() => {
     profile,
     otherProfile,
     profiles: [profile],
+    modelConfigs: [] as Array<Record<string, unknown>>,
     governanceByProfile: {} as Record<string, unknown>,
     userRole: 'admin' as 'admin' | 'member',
     updateProfile: vi.fn(async () => ({
@@ -89,6 +90,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('../web/src/stores/agent-profiles', () => ({
   useAgentProfilesStore: () => ({
     profiles: mocks.profiles,
+    modelConfigs: mocks.modelConfigs,
     loading: false,
     profilesError: null,
     loadProfiles: mocks.loadProfiles,
@@ -198,6 +200,7 @@ afterEach(() => {
   container = null;
   currentLocation = '';
   mocks.profiles = [mocks.profile];
+  mocks.modelConfigs = [];
   mocks.governanceByProfile = {};
   mocks.userRole = 'admin';
   vi.restoreAllMocks();
@@ -538,4 +541,74 @@ describe('智能体宿主机 Skills 自动保存', () => {
     expect(disabled?.getAttribute('aria-checked')).toBe('true');
     expect(container?.textContent).not.toContain('保存失败，当前选择尚未生效');
   });
+});
+
+describe('模型选择器显示会话续接状态', () => {
+  const continuityCases = [
+    {
+      status: 'verified' as const,
+      expectedLabel: '已验证续接',
+      expectedText: '该上游已验证可以接续自己产生的会话',
+    },
+    {
+      status: 'unverified' as const,
+      expectedLabel: '续接未验证',
+      expectedText: '该上游尚未验证续接',
+    },
+    {
+      status: 'failed' as const,
+      expectedLabel: '不可续接',
+      expectedText: '不能作为智能体的模型配置',
+    },
+  ];
+
+  for (const item of continuityCases) {
+    test(`${item.status} 状态在选择器下方给出说明`, async () => {
+      mocks.modelConfigs = [
+        {
+          id: 'model-a',
+          name: 'Model A',
+          type: 'third_party',
+          enabled: true,
+          anthropic_model: 'model-a-2026',
+          is_default: false,
+          session_continuity: {
+            status: item.status,
+            checkedAt:
+              item.status === 'unverified' ? null : '2026-11-02T03:04:05.000Z',
+            bidirectionalProviderIds: [],
+          },
+        },
+      ];
+      mocks.profiles = [{ ...mocks.profile, model_config_id: 'model-a' }];
+
+      container = document.createElement('div');
+      document.body.append(container);
+      root = createRoot(container);
+      const router = createMemoryRouter(
+        [
+          {
+            path: '/agent-profiles',
+            element: <AgentProfilesPage />,
+          },
+        ],
+        { initialEntries: ['/agent-profiles?agent=research-profile'] },
+      );
+      await act(async () => {
+        root?.render(<RouterProvider router={router} />);
+      });
+
+      const note = await vi.waitFor(() => {
+        const match = container?.querySelector(
+          '[data-testid="agent-model-continuity"]',
+        );
+        expect(match).not.toBeNull();
+        return match as HTMLElement;
+      });
+      expect(note.querySelector('[data-continuity-status]')?.textContent).toBe(
+        item.expectedLabel,
+      );
+      expect(note.textContent).toContain(item.expectedText);
+    });
+  }
 });

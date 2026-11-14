@@ -12,8 +12,11 @@
  *
  * Passing pairs are written to data/config/session-continuity-matrix.json,
  * which the provider pool reads to decide whether a session may move between
- * accounts or models without being dropped. Output contains provider names and
- * booleans only, never endpoints, models, credentials or response text.
+ * accounts or models without being dropped. Same-provider pairs are written as
+ * baselines (`from === to`): they tell the model catalog whether an upstream
+ * can even continue the session it produced itself, and cross-provider results
+ * are only meaningful while that baseline holds. Output contains provider names
+ * and booleans only, never endpoints, models, credentials or response text.
  *
  * Usage:
  *   npm run probe:session-continuity              # all enabled providers
@@ -243,6 +246,8 @@ async function main(): Promise<void> {
 
   // Same-provider pairs are a baseline: if they fail, the probe itself (or
   // that provider) is broken and cross-provider results are not trustworthy.
+  // Baselines are persisted as well so the model catalog can tell a provider
+  // that continues its own sessions from one that was simply never probed.
   const baselineFailures = entries.filter(
     (e) => e.fromFingerprint === e.toFingerprint && !e.resume,
   );
@@ -256,9 +261,7 @@ async function main(): Promise<void> {
   }
 
   if (!args.has('--dry-run')) {
-    writeResumeMatrixEntries(
-      entries.filter((e) => e.fromFingerprint !== e.toFingerprint),
-    );
+    writeResumeMatrixEntries(entries);
     process.stdout.write('Matrix updated.\n');
   }
 }

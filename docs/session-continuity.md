@@ -33,11 +33,33 @@ npm run probe:session-continuity
 
 脚本会产生真实请求和费用。对每个有序组合，它检查四项行为：恢复成功、记得只出现在
 工具结果里的信息、恢复后还能调用工具、流式输出。四项都通过才算可续接。
-同一上游自身的组合作为基线，基线失败时脚本以非零状态退出。
+同一上游自身的组合是基线（`from === to`），也会写入矩阵：它决定模型目录能否信任
+这个上游，基线失败时脚本以非零状态退出。
+
+## 模型目录准入
+
+上游的续接状态由基线结果决定，指纹（id + Base URL + 模型）不匹配的旧结论自动失效：
+
+| 状态         | 含义                           | Agent 能否选为模型配置               |
+| ------------ | ------------------------------ | ------------------------------------ |
+| `verified`   | 基线通过，能接续自己产生的会话 | 可以                                 |
+| `unverified` | 没有匹配当前指纹的实测结果     | 默认可以，响应带提示；严格模式下拒绝 |
+| `failed`     | 基线实测未通过                 | 拒绝                                 |
+
+- `GET /api/config/claude/providers` 的每个上游带
+  `sessionContinuity: { status, checkedAt, bidirectionalProviderIds }`；
+  `GET /api/agent-profiles` 的 `model_configs[]` 带同义的 `session_continuity`。
+  两者都只包含状态、检查时间和上游 id，不包含 Base URL、模型名或凭据。
+- `blockUnverifiedModelConfigs` 是系统设置（默认 `false`）。开启后
+  `unverified` 也会被拒绝，租户只能在已验证续接的上游之间切换；这需要
+  `manage_system_config` 权限。
+- 验证始终由管理员在服务器上运行 `npm run probe:session-continuity` 完成。
+  Web 不能触发探测，避免租户发起真实模型请求或产生费用。
+- 上游设置页和 Agent 编辑页会显示“已验证续接 / 续接未验证 / 不可续接”，
+  上游设置页同时给出上面的命令。
 
 ## 待完成
 
 - 不可续接的组合：把 thinking 块剥离后续接，替代整段丢弃。
 - 必须新建会话时：基于 transcript 的结构化迁移（含工具结果和任务状态），
   替代当前最近 30 条、每条截断 700 字的聊天历史。
-- 模型目录：只把验证通过的模型作为“可无缝切换”的选项开放给租户。

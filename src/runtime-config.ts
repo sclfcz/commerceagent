@@ -5,6 +5,10 @@ import os from 'os';
 
 import { ASSISTANT_NAME, DATA_DIR } from './config.js';
 import { logger } from './logger.js';
+import {
+  summarizeProviderContinuity,
+  type ProviderContinuitySummary,
+} from './session-continuity.js';
 
 const MAX_FIELD_LENGTH = 2000;
 const CURRENT_CONFIG_VERSION = 3;
@@ -499,6 +503,12 @@ export interface UnifiedProviderPublic {
   claudeOAuthCredentialsAccessTokenMasked: string | null;
   customEnv: Record<string, string>;
   updatedAt: string;
+  /**
+   * 会话续接状态：该上游能否接续自己产生的会话（基线），以及它与哪些
+   * 上游可以双向续接。只含状态、检查时间和上游 id，不含 endpoint、模型
+   * 或任何凭据。
+   */
+  sessionContinuity: ProviderContinuitySummary;
 }
 
 const MAX_PROVIDERS = 20;
@@ -1688,6 +1698,7 @@ export function providerToConfig(
 /** Convert UnifiedProvider to public (masked) representation */
 export function toPublicProvider(
   provider: UnifiedProvider,
+  allProviders: UnifiedProvider[] = getProviders(),
 ): UnifiedProviderPublic {
   return {
     id: provider.id,
@@ -1711,6 +1722,7 @@ export function toPublicProvider(
       : null,
     customEnv: provider.customEnv || {},
     updatedAt: provider.updatedAt,
+    sessionContinuity: summarizeProviderContinuity(provider, allProviders),
   };
 }
 
@@ -3952,6 +3964,10 @@ export interface SystemSettings {
   // 空 = 关闭（保留原行为：把上限通知直接回给用户）。同一 OAuth 账号下不同模型有
   // 独立额度桶，因此 fable→opus 这类回退无需再配置第二个 provider。
   fallbackModel: string;
+  // 模型目录准入：true = Agent 只能选择续接基线已验证的上游；
+  // false（默认）= 未验证的上游仍可选，只在响应里带提示。基线失败的上游
+  // 无论该开关如何都不能被选为 Agent 的模型配置。
+  blockUnverifiedModelConfigs: boolean;
   // Plugin catalog 自动扫描：true（默认）= 启动 5s 后扫一次 + 每小时一次；
   // false = 关闭定时扫描，admin 仍可手点 POST /api/plugins/catalog/scan。
   // 适用于不希望本机私有 plugin 自动入共享 catalog 的环境。
@@ -3989,6 +4005,7 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   mainAgentAutoCompactWindow: 0,
   mainAgentAutoCompactPercentage: 0,
   fallbackModel: '',
+  blockUnverifiedModelConfigs: false,
   pluginAutoScan: true,
   observabilityEnabled: false,
   observabilityEndpoint: '',
@@ -4233,6 +4250,10 @@ function normalizeSystemSettings(
       mainAgentAutoCompactPercentage > 0 ? 0 : mainAgentAutoCompactWindow,
     mainAgentAutoCompactPercentage,
     fallbackModel,
+    blockUnverifiedModelConfigs: booleanField(
+      'blockUnverifiedModelConfigs',
+      DEFAULT_SYSTEM_SETTINGS.blockUnverifiedModelConfigs,
+    ),
     pluginAutoScan: booleanField(
       'pluginAutoScan',
       DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,

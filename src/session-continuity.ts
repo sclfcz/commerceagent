@@ -131,6 +131,11 @@ export interface ResumeMatrixEntry {
 
 interface ResumeMatrixFile {
   version: 1;
+  /**
+   * Keyed by `from>to`. `from === to` entries are baselines: they record that
+   * an upstream could resume the session it produced itself, which is what
+   * makes cross-provider results trustworthy in the first place.
+   */
   pairs: Record<string, ResumeMatrixEntry>;
 }
 
@@ -209,6 +214,65 @@ export function resumeChecksPass(checks: ResumeCheckResult): boolean {
     checks.toolCallAfterResume &&
     checks.streamed
   );
+}
+
+// ─── Provider continuity catalog ────────────────────────────────
+
+export type SessionContinuityStatus = 'unverified' | 'verified' | 'failed';
+
+export interface ProviderContinuitySummary {
+  /**
+   * `verified`: the provider resumed its own session and passed every check.
+   * `failed`: the baseline probe ran and did not pass, so sessions on this
+   * upstream cannot be trusted to continue.
+   * `unverified`: no baseline probe result matches the current upstream
+   * fingerprint (never probed, or the endpoint/model changed since).
+   */
+  status: SessionContinuityStatus;
+  /** ISO time of the baseline probe that produced `status`, if any. */
+  checkedAt: string | null;
+  /** Providers that can take a session from this one *and* hand it back. */
+  bidirectionalProviderIds: string[];
+}
+
+function baselineStatus(
+  matrix: ResumeMatrixFile,
+  fingerprint: string,
+): { status: SessionContinuityStatus; checkedAt: string | null } {
+  const entry = matrix.pairs[pairKey(fingerprint, fingerprint)];
+  if (!entry) return { status: 'unverified', checkedAt: null };
+  return {
+    status: entry.resume ? 'verified' : 'failed',
+    checkedAt: entry.checkedAt,
+  };
+}
+
+/**
+ * Continuity standing of one upstream: whether its own baseline passed and
+ * which other upstreams it can swap sessions with in both directions.
+ *
+ * Only fingerprints and provider ids leave this function; endpoints, models
+ * and credentials never do, so the result is safe for public API payloads.
+ */
+export function summarizeProviderContinuity(
+  provider: ContinuityProviderRef,
+  candidates: ContinuityProviderRef[] = [],
+  file = SESSION_CONTINUITY_MATRIX_FILE,
+): ProviderContinuitySummary {
+  const matrix = readResumeMatrix(file);
+  const fingerprint = providerContinuityFingerprint(provider);
+  const { status, checkedAt } = baselineStatus(matrix, fingerprint);
+  const bidirectionalProviderIds: string[] = [];
+  for (const candidate of candidates) {
+    if (candidate.id === provider.id) continue;
+    const candidateFingerprint = providerContinuityFingerprint(candidate);
+    const outbound = matrix.pairs[pairKey(fingerprint, candidateFingerprint)];
+    const inbound = matrix.pairs[pairKey(candidateFingerprint, fingerprint)];
+    if (outbound?.resume === true && inbound?.resume === true) {
+      bidirectionalProviderIds.push(candidate.id);
+    }
+  }
+  return { status, checkedAt, bidirectionalProviderIds };
 }
 
 /**
