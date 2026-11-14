@@ -18,11 +18,8 @@ vi.mock('../src/logger.js', () => ({
 
 const runtimeConfig = await import('../src/runtime-config.js');
 const db = await import('../src/db.js');
-const {
-  shouldRotatePoolProviderAfterTurn,
-  trySelectPoolProvider,
-  willClearSessionOnProviderSwitch,
-} = await import('../src/container-runner.js');
+const { shouldRotatePoolProviderAfterTurn, trySelectPoolProvider } =
+  await import('../src/container-runner.js');
 const continuity = await import('../src/session-continuity.js');
 const { providerPool } = await import('../src/provider-pool.js');
 
@@ -90,13 +87,10 @@ describe('default model configuration vs. balancing pool', () => {
     // No verified resume-compatible pair: the runner is not closed per turn
     // and the next turn resumes the same session on the same account.
     expect(shouldRotatePoolProviderAfterTurn(groupFolder, null)).toBe(false);
-    expect(willClearSessionOnProviderSwitch(groupFolder, null, null)).toBe(
-      false,
-    );
     for (let i = 0; i < 3; i += 1) {
       const next = trySelectPoolProvider(groupFolder, null, null);
       expect(next?.profileId).toBe(first!.profileId);
-      expect(next?.resetSession ?? false).toBe(false);
+      expect(next?.stripSessionThinking ?? false).toBe(false);
     }
     expect(db.getSession(groupFolder)).toBe('sdk-session-1');
   });
@@ -135,7 +129,7 @@ describe('default model configuration vs. balancing pool', () => {
       const seen = new Set<string>();
       for (let i = 0; i < 9; i += 1) {
         const next = trySelectPoolProvider(groupFolder, null, null);
-        expect(next?.resetSession ?? false).toBe(false);
+        expect(next?.stripSessionThinking ?? false).toBe(false);
         seen.add(next!.profileId);
       }
       // Moves only between the verified pair, never to the third account.
@@ -171,8 +165,8 @@ describe('default model configuration vs. balancing pool', () => {
    * interval has elapsed. selectProvider() applies the time-based recovery
    * rule internally, but the sticky-health read happens before that call, so
    * without an explicit refresh a long-idle group keeps switching away from a
-   * provider that recovered ages ago — clearing the session and reinjecting
-   * history for nothing.
+   * provider that recovered ages ago — rebuilding the transcript (and stripping
+   * thinking blocks) for nothing.
    */
   test('sticky binding is reused after the recovery interval expires', () => {
     vi.useFakeTimers();
@@ -193,14 +187,14 @@ describe('default model configuration vs. balancing pool', () => {
         null,
       );
       expect(during?.profileId).toBe(created[0]);
-      expect(during?.resetSession).toBe(true);
+      expect(during?.stripSessionThinking).toBe(true);
 
       db.setSessionProviderId('sticky-recovered-group', null, created[2]);
       vi.setSystemTime(Date.now() + 300_000 + 1);
 
       const after = trySelectPoolProvider('sticky-recovered-group', null, null);
       expect(after?.profileId).toBe(created[2]);
-      expect(after?.resetSession ?? false).toBe(false);
+      expect(after?.stripSessionThinking ?? false).toBe(false);
     } finally {
       vi.useRealTimers();
       runtimeConfig.saveBalancingConfig({ strategy: 'round-robin' });

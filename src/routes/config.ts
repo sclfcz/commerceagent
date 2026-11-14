@@ -29,8 +29,7 @@ import {
   getUserById,
   logAuthEvent,
   deleteWorkspaceSessions,
-  deleteSessionsByProviderIdAroundCommit,
-  getSession,
+  markSessionsForThinkingStripByProviderIdAroundCommit,
   getRouterState,
   getRouterStateByPrefix,
   setRouterState,
@@ -236,7 +235,7 @@ interface ClaudeApplyResultPayload {
   success: boolean;
   stoppedCount: number;
   failedCount: number;
-  clearedSessionsCount?: number;
+  invalidatedSessionsCount?: number;
   /** Whether the config mutation itself was durably written. */
   persisted?: boolean;
   phase?: 'pre_commit' | 'post_commit';
@@ -245,11 +244,12 @@ interface ClaudeApplyResultPayload {
 
 interface ApplyOptions {
   /**
-   * If set, drop only sticky session bindings that point to this provider —
-   * preserves bindings to unrelated providers. Used when a provider's
-   * protocol-level fields (anthropicBaseUrl / anthropicModel) change.
+   * If set, mark only the sessions bound to this provider for a
+   * thinking-stripped resume — sessions bound to unrelated providers keep
+   * resuming untouched. Used when a provider's protocol-level fields
+   * (anthropicBaseUrl / anthropicModel / credentials) change.
    */
-  clearSessionsForProviderId?: string;
+  invalidateSessionsForProviderId?: string;
   sessionInvalidation?: {
     modelChanged: boolean;
     baseUrlChanged: boolean;
@@ -370,12 +370,12 @@ function restorePendingProviderRuntimeSafetyBlocks(): void {
   for (const providerId of pendingProviderIds) {
     if (providerId && configuredProviderIds.has(providerId)) continue;
     if (providerId) {
-      const cleanup = deleteSessionsByProviderIdAroundCommit(
+      // The rows stay: the marker only changes how the next turn resumes them.
+      markSessionsForThinkingStripByProviderIdAroundCommit(
         providerId,
         undefined,
         () => undefined,
       );
-      syncProviderSessionCaches(cleanup.affectedFolders);
     }
     deleteRouterState(providerInvalidationStateKey(providerId));
     volatilePendingProviderSessionInvalidations.delete(providerId);
@@ -519,30 +519,17 @@ function getProviderSessionCleanupOptions(
   };
 }
 
-function syncProviderSessionCaches(affectedFolders: string[]): void {
-  if (!deps) return;
-  for (const folder of affectedFolders) {
-    const remainingMainSession = getSession(folder);
-    if (remainingMainSession !== undefined) {
-      deps.sessions[folder] = remainingMainSession;
-    } else {
-      delete deps.sessions[folder];
-    }
-  }
-}
-
 function commitProviderConfigWithSessionInvalidation<T>(
   providerId: string,
   invalidation: ApplyOptions['sessionInvalidation'],
   commit: () => T,
-): { value: T; clearedSessionsCount: number } {
-  const result = deleteSessionsByProviderIdAroundCommit(
+): { value: T; invalidatedSessionsCount: number } {
+  const result = markSessionsForThinkingStripByProviderIdAroundCommit(
     providerId,
     getProviderSessionCleanupOptions(providerId, invalidation),
     commit,
   );
-  syncProviderSessionCaches(result.affectedFolders);
-  return { value: result.value, clearedSessionsCount: result.deletedCount };
+  return { value: result.value, invalidatedSessionsCount: result.markedCount };
 }
 
 function getClaudeRuntimeTargets(): Array<{
@@ -600,19 +587,19 @@ async function mutateClaudeConfigForAllGroups<T>(
             PROVIDER_RUNTIME_SAFETY_SOURCE,
           );
           if (
-            options?.clearSessionsForProviderId &&
+            options?.invalidateSessionsForProviderId &&
             options.sessionInvalidation
           ) {
             try {
               setPendingProviderSessionInvalidation({
-                providerId: options.clearSessionsForProviderId,
+                providerId: options.invalidateSessionsForProviderId,
                 ...options.sessionInvalidation,
               });
             } catch (error) {
               // The volatile marker was set before SQLite persistence, so an
               // exact retry in this process can still repair and unblock.
               logger.error(
-                { error, providerId: options.clearSessionsForProviderId },
+                { error, providerId: options.invalidateSessionsForProviderId },
                 'Failed to persist pending provider session invalidation',
               );
             }
@@ -621,16 +608,16 @@ async function mutateClaudeConfigForAllGroups<T>(
       },
       async () => {
         let value: T;
-        let clearedSessionsCount: number | undefined;
+        let invalidatedSessionsCount: number | undefined;
         try {
-          if (options?.clearSessionsForProviderId) {
+          if (options?.invalidateSessionsForProviderId) {
             const committed = commitProviderConfigWithSessionInvalidation(
-              options.clearSessionsForProviderId,
+              options.invalidateSessionsForProviderId,
               options.sessionInvalidation,
               commit,
             );
             value = committed.value;
-            clearedSessionsCount = committed.clearedSessionsCount;
+            invalidatedSessionsCount = committed.invalidatedSessionsCount;
           } else {
             value = commit();
           }
@@ -644,15 +631,15 @@ async function mutateClaudeConfigForAllGroups<T>(
           }
           throw error;
         }
-        return { value, clearedSessionsCount };
+        return { value, invalidatedSessionsCount };
       },
     );
     // A successful retry proves every runtime now observes the persisted
     // provider config, so it may repair a fail-closed gate left by an earlier
     // post-commit teardown failure.
-    if (options?.clearSessionsForProviderId) {
+    if (options?.invalidateSessionsForProviderId) {
       clearPendingProviderSessionInvalidation(
-        options.clearSessionsForProviderId,
+        options.invalidateSessionsForProviderId,
       );
     }
     if (!hasPendingProviderSessionInvalidations()) {
@@ -666,8 +653,8 @@ async function mutateClaudeConfigForAllGroups<T>(
       stoppedCount: result.runtimeJids.length,
       failedCount: 0,
       persisted: true,
-      ...(result.value.clearedSessionsCount !== undefined
-        ? { clearedSessionsCount: result.value.clearedSessionsCount }
+      ...(result.value.invalidatedSessionsCount !== undefined
+        ? { invalidatedSessionsCount: result.value.invalidatedSessionsCount }
         : {}),
     };
     appendClaudeConfigAuditBestEffort(
@@ -701,7 +688,7 @@ async function mutateClaudeConfigForAllGroups<T>(
     }
     if (!(err instanceof WorkspaceRuntimeQuiesceError)) throw err;
     const committed = err.committedValue as
-      | { value: T; clearedSessionsCount?: number }
+      | { value: T; invalidatedSessionsCount?: number }
       | undefined;
     const persisted = err.persisted;
     const applied: ClaudeApplyResultPayload = {
@@ -710,8 +697,8 @@ async function mutateClaudeConfigForAllGroups<T>(
       failedCount: err.failures.length,
       persisted,
       phase: err.phase,
-      ...(committed?.clearedSessionsCount !== undefined
-        ? { clearedSessionsCount: committed.clearedSessionsCount }
+      ...(committed?.invalidatedSessionsCount !== undefined
+        ? { invalidatedSessionsCount: committed.invalidatedSessionsCount }
         : {}),
       error: persisted
         ? 'Configuration was saved, but one or more runtimes failed to restart safely'
@@ -1069,7 +1056,7 @@ configRoutes.patch(
             commit,
             shouldClearSessions
               ? {
-                  clearSessionsForProviderId: id,
+                  invalidateSessionsForProviderId: id,
                   sessionInvalidation,
                 }
               : undefined,
@@ -1081,9 +1068,9 @@ configRoutes.patch(
                 sessionInvalidation,
                 commit,
               )
-            : { value: commit(), clearedSessionsCount: undefined };
+            : { value: commit(), invalidatedSessionsCount: undefined };
           const updated = committed.value;
-          const clearedSessionsCount = committed.clearedSessionsCount;
+          const invalidatedSessionsCount = committed.invalidatedSessionsCount;
           if (shouldClearSessions) {
             clearPendingProviderSessionInvalidation(id);
             if (!hasPendingProviderSessionInvalidations()) {
@@ -1100,8 +1087,8 @@ configRoutes.patch(
               stoppedCount: 0,
               failedCount: 0,
               persisted: true,
-              ...(clearedSessionsCount !== undefined
-                ? { clearedSessionsCount }
+              ...(invalidatedSessionsCount !== undefined
+                ? { invalidatedSessionsCount }
                 : {}),
             },
           };
@@ -1196,7 +1183,7 @@ configRoutes.put(
               },
               commit,
               {
-                clearSessionsForProviderId: id,
+                invalidateSessionsForProviderId: id,
                 sessionInvalidation: {
                   modelChanged: true,
                   baseUrlChanged: true,
@@ -1278,7 +1265,7 @@ configRoutes.delete(
             return { id };
           },
           {
-            clearSessionsForProviderId: id,
+            invalidateSessionsForProviderId: id,
             sessionInvalidation,
           },
         );
