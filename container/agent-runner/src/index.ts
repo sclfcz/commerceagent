@@ -33,6 +33,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { detectImageMimeTypeFromBase64Strict } from './image-detector.js';
 import { pruneProcessedHistoryImagesInTranscript as pruneProcessedHistoryImagesInTranscriptFile } from './history-image-prune.js';
+import { createThinkingStrippedSession } from './thinking-strip.js';
 import { getChannelFromJid } from './channel-prefixes.js';
 import {
   resolveAllowedTools,
@@ -3982,6 +3983,25 @@ async function main(): Promise<void> {
 
   let sessionId = containerInput.sessionId;
   latestSessionId = sessionId;
+  // Host-directed strip resume: the upstream behind this session changed
+  // (account rotation, edited Base URL/model), so the thinking signatures in the
+  // transcript no longer validate. Rebuild the transcript under a fresh session
+  // id without those blocks and resume that instead of dropping the session.
+  if (containerInput.sessionResumeMode === 'strip_thinking' && sessionId) {
+    const stripped = createThinkingStrippedSession({
+      transcriptDir: resolveTranscriptDir(),
+      sessionId,
+      log,
+    });
+    if (stripped.created) {
+      sessionId = stripped.sessionId;
+      latestSessionId = sessionId;
+    } else {
+      log(
+        `Thinking-strip resume requested but no copy was created (${stripped.reason}); resuming original session`,
+      );
+    }
+  }
   const { isHome, isAdminHome } = normalizeHomeFlags(containerInput);
   const agentBuilderEnabled = resolveAgentBuilderEnabled(
     containerInput,

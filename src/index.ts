@@ -72,7 +72,6 @@ import {
   runHostAgent,
   runAgentWithModelFallback,
   shouldRotatePoolProviderAfterTurn,
-  willClearSessionOnProviderSwitch,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
@@ -5717,33 +5716,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         'Recovery: injected recent conversation history into prompt',
       );
     }
-  } else if (
-    willClearSessionOnProviderSwitch(
-      effectiveGroup.folder,
-      undefined,
-      agentProfile?.model_config_id,
-    )
-  ) {
-    // Proactive provider switch (sticky binding unhealthy/disabled) will clear
-    // the SDK session inside the runner. Inject history so the new provider's
-    // first turn keeps context, matching the recovery + reactive-failure paths.
-    historyContext = buildRecentConversationHistoryContext(
-      chatJid,
-      new Set(missedMessages.map((m) => m.id)),
-      {
-        limit: 30,
-        maxMessageLength: 700,
-        intro:
-          '检测到本次因切换 provider 需要使用新的底层模型 session。以下是 CommerceAgent 保存的最近对话记录，供你延续上下文。',
-      },
-    );
-    if (historyContext) {
-      logger.info(
-        { group: group.name, historyCount: historyContext.count },
-        'Provider switch: injected recent conversation history into prompt',
-      );
-    }
   }
+  // A provider switch no longer clears the SDK session: the runner resumes a
+  // thinking-stripped copy of the transcript, so the conversation continues and
+  // injecting recent history here would duplicate it.
 
   const activeSessionReferencedMessageIds =
     !historyContext && sessions[effectiveGroup.folder]
@@ -14162,21 +14138,13 @@ async function processAgentConversationTurn(
   );
 
   // Get or use agent-specific session before building the prompt. If the
-  // session was cleared by provider/model switching, inject persisted CommerceAgent
-  // chat history so the new model does not mistake the fresh SDK session for
-  // an empty conversation.
+  // session is missing (first turn, or a resume that failed), inject persisted
+  // CommerceAgent chat history so the new model does not mistake the fresh SDK
+  // session for an empty conversation. A provider switch is not such a case:
+  // the runner resumes a thinking-stripped copy of the existing transcript.
   const sessionId = getSession(effectiveGroup.folder, agentId) || undefined;
   let currentAgentSessionId = sessionId;
-  // Inject history when the SDK session is fresh, or when a proactive provider
-  // switch (sticky binding unhealthy/disabled) will clear the existing session
-  // inside the runner — otherwise the new provider's first turn loses context.
-  const startsFreshSession =
-    !sessionId ||
-    willClearSessionOnProviderSwitch(
-      effectiveGroup.folder,
-      agentId,
-      agentProfile?.model_config_id,
-    );
+  const startsFreshSession = !sessionId;
   let historyContext: ReturnType<typeof buildRecentConversationHistoryContext> =
     null;
   if (startsFreshSession) {

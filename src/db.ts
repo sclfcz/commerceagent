@@ -103,7 +103,7 @@ let db: InstanceType<typeof Database>;
  * restating the number. Hardcoding it meant every schema bump edited a dozen
  * unrelated test files, which is churn that hides real assertion changes.
  */
-export const CURRENT_SCHEMA_VERSION = 69;
+export const CURRENT_SCHEMA_VERSION = 70;
 
 export function isDatabaseInitialized(): boolean {
   return Boolean(db?.open);
@@ -1964,6 +1964,17 @@ export function initDatabase(): void {
   ensureColumn('sessions', 'agent_profile_id', 'TEXT');
   ensureColumn('sessions', 'identity_hash', 'TEXT');
   ensureColumn('sessions', 'agent_profile_version', 'INTEGER');
+
+  // v69 → v70: resume an invalidated session by stripping thinking blocks
+  // instead of dropping it. The config route marks sessions bound to an
+  // upstream whose Base URL/model/credentials changed; the next turn rebuilds
+  // the transcript under a new session id without those blocks, which keeps the
+  // conversation while discarding signatures the new upstream cannot verify.
+  ensureColumn(
+    'sessions',
+    'resume_strip_thinking',
+    'INTEGER NOT NULL DEFAULT 0',
+  );
 
   // v40 → v41: Allow each AgentProfile to opt out of the Claude Code
   // built-in system prompt preset and use only CommerceAgent/Agent prompts.
@@ -7840,9 +7851,18 @@ export function setSession(
 ): void {
   const effectiveAgentId = agentId || '';
   db.transaction(() => {
+    // Persisting a different session id means a different transcript, so any
+    // pending "strip thinking before resume" marker is spent. An unchanged id
+    // keeps the marker: the runner may have had to resume the original session.
     db.prepare(
       `INSERT INTO sessions (group_folder, session_id, agent_id) VALUES (?, ?, ?)
-       ON CONFLICT(group_folder, agent_id) DO UPDATE SET session_id = excluded.session_id`,
+       ON CONFLICT(group_folder, agent_id) DO UPDATE SET
+         session_id = excluded.session_id,
+         resume_strip_thinking = CASE
+           WHEN sessions.session_id = excluded.session_id
+             THEN sessions.resume_strip_thinking
+           ELSE 0
+         END`,
     ).run(groupFolder, sessionId, effectiveAgentId);
     if (agentIdentity) {
       db.prepare(
@@ -7942,6 +7962,27 @@ export function setSessionProviderId(
     ).run(groupFolder, effectiveAgentId, providerId);
     syncWorkspaceRuntimeSessionProjection(groupFolder, effectiveAgentId);
   })();
+}
+
+/**
+ * Whether the next resume of this session must rebuild its transcript without
+ * thinking blocks. Set when the upstream the session is bound to changed its
+ * protocol-level configuration; cleared automatically by {@link setSession}
+ * once a new session id is persisted.
+ */
+export function getSessionResumeStripThinking(
+  groupFolder: string,
+  agentId?: string | null,
+): boolean {
+  const effectiveAgentId = agentId || '';
+  const row = db
+    .prepare(
+      'SELECT resume_strip_thinking FROM sessions WHERE group_folder = ? AND agent_id = ?',
+    )
+    .get(groupFolder, effectiveAgentId) as
+    | { resume_strip_thinking: number | null }
+    | undefined;
+  return row?.resume_strip_thinking === 1;
 }
 
 export function deleteAllSessionsForFolder(groupFolder: string): void {
@@ -9339,24 +9380,26 @@ export function backfillAgentProfileDefaultsAndWorkspaceMappings(): void {
 }
 
 /**
- * Delete all session rows bound to the given provider_id.
+ * Mark every session bound to the given provider_id for a thinking-stripped
+ * resume.
  *
  * Used when a provider's protocol-level fields (anthropicBaseUrl /
- * anthropicModel) change: any session whose history contains thinking blocks /
- * model-specific framing produced by this provider must restart fresh,
- * otherwise resuming under the new config can fail with "Invalid signature in
- * thinking block" or "model mismatch" errors. Sessions bound to *other*
- * providers are left intact so unrelated sticky bindings survive a partial
- * config update — see issue #476.
+ * anthropicModel / credentials) change: the thinking blocks in those sessions
+ * were signed by the previous upstream and cannot be replayed under the new
+ * one. Dropping the rows would throw away the whole conversation, so instead
+ * the next turn rebuilds the transcript without those blocks (see
+ * `container/agent-runner/src/thinking-strip.ts`) and resumes that copy.
+ * Sessions bound to *other* providers are left untouched so unrelated sticky
+ * bindings survive a partial config update — see issue #476.
  *
- * Returns the affected `group_folder` values so callers can also evict the
- * in-memory sessions cache and the row count for telemetry.
+ * Returns the affected `group_folder` values (for telemetry and cache
+ * bookkeeping) plus the number of marked rows.
  */
-function deleteSessionsByProviderIdInCurrentTransaction(
+function markSessionsForThinkingStripByProviderIdInCurrentTransaction(
   providerId: string,
   options?: { includeUnboundFolders?: string[] },
 ): {
-  deletedCount: number;
+  markedCount: number;
   affectedFolders: string[];
 } {
   const includeUnboundFolders = Array.from(
@@ -9376,50 +9419,54 @@ function deleteSessionsByProviderIdInCurrentTransaction(
       `SELECT DISTINCT group_folder FROM sessions WHERE provider_id = ?${unboundClause}`,
     )
     .all(...params) as Array<{ group_folder: string }>;
-  db.prepare(
-    `DELETE FROM workspace_runtime_sessions WHERE provider_id = ?${unboundClause}`,
-  ).run(...params);
   const result = db
-    .prepare(`DELETE FROM sessions WHERE provider_id = ?${unboundClause}`)
+    .prepare(
+      `UPDATE sessions SET resume_strip_thinking = 1
+       WHERE provider_id = ?${unboundClause}`,
+    )
     .run(...params);
   return {
-    deletedCount: result.changes,
+    markedCount: result.changes,
     affectedFolders: rows.map((r) => r.group_folder),
   };
 }
 
-export function deleteSessionsByProviderId(
+export function markSessionsForThinkingStripByProviderId(
   providerId: string,
   options?: { includeUnboundFolders?: string[] },
 ): {
-  deletedCount: number;
+  markedCount: number;
   affectedFolders: string[];
 } {
   return db.transaction(() =>
-    deleteSessionsByProviderIdInCurrentTransaction(providerId, options),
+    markSessionsForThinkingStripByProviderIdInCurrentTransaction(
+      providerId,
+      options,
+    ),
   )();
 }
 
 /**
- * Delete attributable provider sessions and execute a synchronous config
- * commit in one SQLite transaction. If config validation/persistence throws,
- * session deletion rolls back, so an invalid provider PATCH cannot destroy a
- * still-valid resume token.
+ * Mark attributable provider sessions and execute a synchronous config commit
+ * in one SQLite transaction. If config validation/persistence throws, the marks
+ * roll back, so an invalid provider PATCH cannot invalidate still-valid resume
+ * tokens.
  */
-export function deleteSessionsByProviderIdAroundCommit<T>(
+export function markSessionsForThinkingStripByProviderIdAroundCommit<T>(
   providerId: string,
   options: { includeUnboundFolders?: string[] } | undefined,
   commit: () => T,
 ): {
   value: T;
-  deletedCount: number;
+  markedCount: number;
   affectedFolders: string[];
 } {
   return db.transaction(() => {
-    const cleanup = deleteSessionsByProviderIdInCurrentTransaction(
-      providerId,
-      options,
-    );
+    const cleanup =
+      markSessionsForThinkingStripByProviderIdInCurrentTransaction(
+        providerId,
+        options,
+      );
     const value = commit();
     return { value, ...cleanup };
   })();
