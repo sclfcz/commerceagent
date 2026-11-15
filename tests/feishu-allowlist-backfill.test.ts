@@ -37,11 +37,11 @@ const {
   getAgentChannelMount,
 } = await import('../src/db.js');
 
-beforeAll(() => {
+beforeAll(async () => {
   initDatabase();
 });
 
-afterAll(() => {
+afterAll(async () => {
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   } catch {
@@ -54,7 +54,7 @@ const USER_B = 'user-b';
 const OWNER_A = 'ou_aaaaaaaaaaaaaaaaaaaaaa';
 const OWNER_B = 'ou_bbbbbbbbbbbbbbbbbbbbbb';
 
-beforeEach(() => {
+beforeEach(async () => {
   // Wipe registered_groups via the public delete API for any jids the tests touch
   for (const jid of [
     'feishu:locked-1',
@@ -68,7 +68,7 @@ beforeEach(() => {
     'telegram:also-locked',
     'wechat:also-locked',
   ]) {
-    deleteRegisteredGroup(jid);
+    await deleteRegisteredGroup(jid);
   }
 });
 

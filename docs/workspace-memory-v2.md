@@ -10,7 +10,7 @@ CommerceAgent 的相关数据分成三个彼此独立的层次：
 | 层次                   | 用途                                     | 生命周期                         |
 | ---------------------- | ---------------------------------------- | -------------------------------- |
 | 平台/AgentProfile 身份 | Agent 是谁、平台规则和能力策略           | 配置或代码版本管理，不可被忘记   |
-| Home Owner Profile     | 内置 CommerceAgent 如何称呼实际 owner        | Home 跨 Session，专用 API 管理   |
+| Home Owner Profile     | 内置 CommerceAgent 如何称呼实际 owner    | Home 跨 Session，专用 API 管理   |
 | Session 历史           | 一段对话的消息、工具轨迹与即时上下文     | 由 Session/消息管理功能单独处理  |
 | Workspace Memory       | 同一 Workspace 跨 Session 复用的提炼知识 | 忘记后不再检索，但保留修订审计线 |
 
@@ -68,8 +68,29 @@ Session 历史中即可。
 
 ## 数据与一致性
 
-Workspace Memory v2 的 canonical store 位于 CommerceAgent SQLite 主数据库。每个
-Workspace 有独立的 store revision，每个 item 有单独的 revision：
+### 存储后端
+
+Workspace Memory v2 的 canonical store 位于独立的 PostgreSQL 数据库，不再存放在
+SQLite 主数据库。后端由 `MEMORY_DATABASE_URL` 选择：
+
+| 条件                         | 后端                                                                                   |
+| ---------------------------- | -------------------------------------------------------------------------------------- |
+| `MEMORY_DATABASE_URL` 已设置 | 外部 PostgreSQL（`pg` 连接池），用于 SaaS 部署                                         |
+| 未设置                       | `@electric-sql/pglite` 嵌入式 PostgreSQL，数据落在 `data/memory-pg/`，用于零配置自托管 |
+
+两种后端实现同一小组接口（`query` / `transaction`），store 层只依赖该接口，因此
+两条路径的行为一致；SQLite 实现已删除，`workspace_memory_*` 表也不再由 SQLite
+迁移重建。运行时元数据（Workspace、Session、Onboarding、任务）仍在 SQLite，
+Memory 之外的功能不受影响。
+
+Memory schema 使用独立的版本表 `workspace_memory_schema_migrations`，迁移文件按
+编号放在 `src/memory-pg/migrations/`，一个编号一个文件、各自一个事务。数据库版本
+高于代码期望版本时拒绝启动（不降级执行）。当前只有 001 基线，002/003/004 预留给
+后续阶段。
+
+### 修订与并发
+
+每个 Workspace 有独立的 store revision，每个 item 有单独的 revision：
 
 - 每次创建、编辑或忘记都会递增 item revision 和 store revision。
 - 版本记录保存当时的值、`changeType`、actor 和 provenance，按新到旧读取。
@@ -84,6 +105,48 @@ Workspace 有独立的 store revision，每个 item 有单独的 revision：
 
 `validFrom`、`validUntil` 和 `expiresAt` 用于控制知识的时间有效性；`importance` 和
 `confidence` 的范围都是 0 到 1。详情字段与端点见 [API 文档](API.md#workspace-memory-v2)。
+
+### 全文检索
+
+`workspace_memory_items.search_vector` 是生成的 `tsvector` 列，使用 `simple`
+词典，并按旧 bm25 权重分配字段权重：title = A、`canonical_key` = B、
+content = D；查询时 `ts_rank` 使用 `{0.3333, 0, 0.6667, 1}`。每次检索同时执行
+tsvector 匹配与 `ILIKE` 子串匹配，因此中文短语（`simple` 词典不分词）仍能召回，
+召回率不低于 SQLite FTS 时期。`pg_trgm` 及其 GIN 索引只是可选加速：外部
+PostgreSQL 角色没有建扩展权限时只记录 warning，`ILIKE` 兜底结果仍然正确。
+
+### 跨库一致性
+
+Memory 在 PostgreSQL、Workspace/Onboarding/任务在 SQLite，两者不能共享事务。
+所有跨库写入都采用“Memory 先提交，SQLite 后提交”的固定顺序，并把失败语义写进
+调用点注释：
+
+- 删除 Workspace（`deleteRegisteredGroup`、`deleteGroupData`）：先删除该
+  Workspace 的 Memory（幂等，可重复执行），再提交 SQLite 删除事务。中途崩溃只会
+  留下“Memory 已空、Workspace/Group 仍在”，重试同一删除即收敛；不会出现
+  “Workspace 已删但 Memory 残留并可能被他人读到”的状态。
+- 重建 Workspace（`POST /api/groups/:jid/clear-history`）：先做预检（Workspace
+  归属、活跃 Task Run）并让预检错误原样返回，再重置 Memory，最后用一个 SQLite
+  事务重置 onboarding 行、回收任务、清理会话与聊天。SQLite 事务失败时会话与任务
+  按原快照回滚、暂存文件恢复原位；Memory 已经重置且无法回滚，这是有意的取舍——
+  重试重建是幂等的，而“已重建的 Workspace 仍能读到旧 Memory”不可接受。
+- Owner Profile：先写 Memory 中的保留 item（唯一真相源），再在 SQLite 中把
+  onboarding 置为 completed/skipped。第二步失败时 Memory 已生效而 onboarding
+  仍为旧状态，下一次 claim/set 会幂等收敛；onboarding 行自身仍是单个 SQLite 事务，
+  lease、`firstWakeAt` 与 revision 不会半更新。
+
+### 旧 SQLite 数据导入
+
+启动时如果 Memory 数据库为空、而 SQLite 主库仍有旧的 `workspace_memory_*` 数据，
+会一次性把 items、versions、provenance、tombstones、audit、mutation_requests、
+outbox 和 store revision 全部复制过去，并在 `workspace_memory_meta` 记录
+`legacy_sqlite_import` 完成标记。导入在一个批次事务内完成（分批 100 行，
+`ON CONFLICT DO NOTHING`），因此重复启动不会复制两次。导入完成后 Memory 只从
+PostgreSQL 读写，不回写、不双写；旧的 SQLite 表仅作为备份保留。
+
+保留键（owner preferred address）的去重与唯一索引在 bootstrap 中执行：先合并历史
+重复行，再创建 `idx_workspace_memory_owner_address_unique` 这个部分唯一索引，
+因此导入的旧库即使含重复也不会让启动失败。
 
 ## 来源与隐私
 

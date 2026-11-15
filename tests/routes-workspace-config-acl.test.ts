@@ -97,18 +97,18 @@ function asUser(userId: string, role: 'admin' | 'member' = 'member'): void {
   process.env.COMMERCEAGENT_TEST_USER_ROLE = role;
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   // Ensure tmp data + db dirs exist before initDatabase().
   fs.mkdirSync(path.join(tmpDataDir, 'db'), { recursive: true });
   fs.mkdirSync(path.join(tmpDataDir, 'groups'), { recursive: true });
   db.initDatabase();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   // Clear DB tables between tests instead of recreating the DB (WAL handle
   // would otherwise dangle). Reuse the singleton from beforeAll.
   try {
-    db.deleteRegisteredGroup(GROUP_JID);
+    await db.deleteRegisteredGroup(GROUP_JID);
   } catch {
     /* ignore */
   }
@@ -120,7 +120,7 @@ beforeEach(() => {
   fs.mkdirSync(groupsDir, { recursive: true });
 });
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env.COMMERCEAGENT_TEST_USER_ID;
   delete process.env.COMMERCEAGENT_TEST_USER_ROLE;
 });

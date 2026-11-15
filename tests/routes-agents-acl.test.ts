@@ -96,26 +96,26 @@ function asUser(userId: string, role: 'admin' | 'member' = 'member'): void {
   process.env.COMMERCEAGENT_TEST_USER_ROLE = role;
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   fs.mkdirSync(path.join(tmpDataDir, 'db'), { recursive: true });
   fs.mkdirSync(path.join(tmpDataDir, 'groups'), { recursive: true });
   db.initDatabase();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   try {
-    db.deleteRegisteredGroup(GROUP_JID);
+    await db.deleteRegisteredGroup(GROUP_JID);
   } catch {
     /* ignore */
   }
   try {
-    db.deleteRegisteredGroup('telegram:bound-session');
+    await db.deleteRegisteredGroup('telegram:bound-session');
   } catch {
     /* ignore */
   }
 });
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env.COMMERCEAGENT_TEST_USER_ID;
   delete process.env.COMMERCEAGENT_TEST_USER_ROLE;
 });
@@ -1234,7 +1234,7 @@ describe('agents IM-binding ACL (owner-only, mirrors CRUD)', () => {
     expect(db.getRegisteredGroup(secondJid)?.target_agent_id).toBe(sessionId);
   });
 
-  test('multiple native-context containers can share one workspace', () => {
+  test('multiple native-context containers can share one workspace', async () => {
     asUser(OWNER_ID);
     const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const workspaceJid = `web:native-upgrade-${suffix}`;
@@ -1273,9 +1273,9 @@ describe('agents IM-binding ACL (owner-only, mirrors CRUD)', () => {
     expect(db.getRegisteredGroup(firstJid)?.binding_mode).toBe('thread_map');
     expect(db.getRegisteredGroup(secondJid)?.binding_mode).toBe('thread_map');
 
-    db.deleteRegisteredGroup(firstJid);
-    db.deleteRegisteredGroup(secondJid);
-    db.deleteRegisteredGroup(workspaceJid);
+    await db.deleteRegisteredGroup(firstJid);
+    await db.deleteRegisteredGroup(secondJid);
+    await db.deleteRegisteredGroup(workspaceJid);
   });
 
   test('REST restore detaches native navigation only after the last source leaves', async () => {
@@ -1354,7 +1354,8 @@ describe('agents IM-binding ACL (owner-only, mirrors CRUD)', () => {
       conversation_nav_mode: 'vertical_threads',
     });
 
-    for (const sourceJid of sourceJids) db.deleteRegisteredGroup(sourceJid);
-    db.deleteRegisteredGroup(defaultWorkspaceJid);
+    for (const sourceJid of sourceJids)
+      await db.deleteRegisteredGroup(sourceJid);
+    await db.deleteRegisteredGroup(defaultWorkspaceJid);
   });
 });

@@ -223,6 +223,7 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 ```text
 data/
 ├── db/messages.db
+├── memory-pg/
 ├── config/
 ├── groups/{folder}/
 ├── sessions/{folder}/.claude/
@@ -241,6 +242,12 @@ data/
 
 主要数据库当前 Schema 版本以 `src/db.ts` 的 `CURRENT_SCHEMA_VERSION` 为准。
 不要在文档中复制版本号；迁移必须同时具备备份、前向升级和拒绝降级保护。
+
+Workspace Memory v2 不在 SQLite：它使用独立 PostgreSQL 库（`MEMORY_DATABASE_URL`
+或 `data/memory-pg/` 的 PGlite），schema 版本在
+`workspace_memory_schema_migrations` 中管理，迁移文件位于
+`src/memory-pg/migrations/`。Memory 与 SQLite 不能共享事务，跨库写入固定为
+“Memory 先提交、SQLite 后提交”，详见 `docs/workspace-memory-v2.md`。
 
 核心表族：
 
@@ -281,18 +288,19 @@ Web 持久设置 > 环境变量 > 代码默认值
 
 常用环境变量：
 
-| 变量                        | 默认值                            | 说明                              |
-| --------------------------- | --------------------------------- | --------------------------------- |
-| `WEB_PORT`                  | `3000`                            | HTTP、WebSocket 端口              |
-| `WEB_SESSION_SECRET`        | 自动生成并持久化                  | Cookie 签名                       |
-| `CONTAINER_IMAGE`           | `riba2534/happyclaw-agent:latest` | GitHub Actions 发布的 Runner 镜像 |
-| `CONTAINER_TIMEOUT`         | `1800000`                         | 默认运行超时                      |
-| `IDLE_TIMEOUT`              | `1800000`                         | 暖 Runner 空闲时间                |
-| `MAX_CONCURRENT_CONTAINERS` | `20`                              | Docker 并发                       |
-| `MAX_FILE_SIZE_MB`          | `50`                              | Web/IM 入站文件上限               |
-| `CORS_ALLOWED_ORIGINS`      | 仅 localhost                      | WebSocket Origin 白名单           |
-| `TRUST_PROXY`               | `false`                           | 是否信任反向代理来源头            |
-| `TZ`                        | 系统时区                          | 调度时区                          |
+| 变量                        | 默认值                            | 说明                                                                                         |
+| --------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------- |
+| `WEB_PORT`                  | `3000`                            | HTTP、WebSocket 端口                                                                         |
+| `WEB_SESSION_SECRET`        | 自动生成并持久化                  | Cookie 签名                                                                                  |
+| `CONTAINER_IMAGE`           | `riba2534/happyclaw-agent:latest` | GitHub Actions 发布的 Runner 镜像                                                            |
+| `MEMORY_DATABASE_URL`       | 未设置                            | Workspace Memory 的 PostgreSQL 连接串；未设置时使用 `data/memory-pg/` 下的 PGlite 嵌入式实例 |
+| `CONTAINER_TIMEOUT`         | `1800000`                         | 默认运行超时                                                                                 |
+| `IDLE_TIMEOUT`              | `1800000`                         | 暖 Runner 空闲时间                                                                           |
+| `MAX_CONCURRENT_CONTAINERS` | `20`                              | Docker 并发                                                                                  |
+| `MAX_FILE_SIZE_MB`          | `50`                              | Web/IM 入站文件上限                                                                          |
+| `CORS_ALLOWED_ORIGINS`      | 仅 localhost                      | WebSocket Origin 白名单                                                                      |
+| `TRUST_PROXY`               | `false`                           | 是否信任反向代理来源头                                                                       |
+| `TZ`                        | 系统时区                          | 调度时区                                                                                     |
 
 Provider 和渠道账号应优先通过 Web 配置。Legacy `/api/config/user-im/*` 只用于兼容，
 新功能统一使用 `/api/channel-accounts`。

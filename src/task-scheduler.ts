@@ -1561,11 +1561,11 @@ async function runTaskInner(
     task.workspace_folder &&
     task.workspace_folder.startsWith('task-')
   ) {
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
         const groups = deps.registeredGroups();
         if (groups[task.workspace_jid!]) {
-          deleteGroupData(task.workspace_jid!, task.workspace_folder!);
+          await deleteGroupData(task.workspace_jid!, task.workspace_folder!);
           delete groups[task.workspace_jid!];
           removeFlowArtifacts(task.workspace_folder!);
           logger.info(
@@ -3347,7 +3347,9 @@ export async function stopSchedulerLoop(
   schedulerDepsRef = null;
 }
 
-export function startSchedulerLoop(deps: SchedulerDependencies): void {
+export async function startSchedulerLoop(
+  deps: SchedulerDependencies,
+): Promise<void> {
   if (schedulerRunning) {
     logger.debug('Scheduler loop already running, skipping duplicate start');
     return;
@@ -3390,7 +3392,7 @@ export function startSchedulerLoop(deps: SchedulerDependencies): void {
         t.workspace_folder.startsWith('task-') &&
         groups[t.workspace_jid]
       ) {
-        deleteGroupData(t.workspace_jid, t.workspace_folder);
+        await deleteGroupData(t.workspace_jid, t.workspace_folder);
         delete groups[t.workspace_jid];
         removeFlowArtifacts(t.workspace_folder);
         cleaned++;

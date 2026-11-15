@@ -199,26 +199,26 @@ async function postFollowUpAction(
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   fs.mkdirSync(path.join(tmpDataDir, 'db'), { recursive: true });
   fs.mkdirSync(path.join(tmpDataDir, 'groups'), { recursive: true });
   db.initDatabase();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   stopGroupCalls.length = 0;
   promoteFollowUpCalls.length = 0;
   editFollowUpCalls.length = 0;
   reorderFollowUpCalls.length = 0;
   activeQueryId = null;
   try {
-    db.deleteRegisteredGroup(GROUP_JID);
+    await db.deleteRegisteredGroup(GROUP_JID);
   } catch {
     /* ignore */
   }
 });
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env.COMMERCEAGENT_TEST_USER_ID;
   delete process.env.COMMERCEAGENT_TEST_USER_ROLE;
 });

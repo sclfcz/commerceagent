@@ -987,54 +987,57 @@ groupRoutes.post('/', authMiddleware, async (c) => {
     publishedAgentProfile = await withCapabilityScopeLocks(
       [SYSTEM_CAPABILITY_LOCK_KEY],
       async () => {
-        const profile = await withAgentProfileLocks([agentProfile.id], () => {
-          // The target may have been archived while the request performed its
-          // filesystem/network validation. Recheck under the same lock used by
-          // Agent DELETE/PATCH and workspace migration.
-          const lockedProfile = getAgentProfileForUser(
-            agentProfile.id,
-            authUser.id,
-          );
-          if (!lockedProfile) return undefined;
-          const currentOwner = getUserById(authUser.id);
-          if (
-            group.executionMode !== 'host' &&
-            currentOwner?.role === 'admin' &&
-            currentOwner.status === 'active' &&
-            getSystemSettings().adminHostOnlyMode
-          ) {
-            hostOnlyPolicyChangedDuringCreate = true;
-            return undefined;
-          }
-
-          try {
-            // Mapping first and registered-group publication immediately after
-            // it occur in one synchronous critical section. Agent PATCH cannot
-            // snapshot between them: it holds this same profile lock.
-            assignWorkspaceAgentProfile(
-              folder,
-              lockedProfile.id,
-              interactionMode,
+        const profile = await withAgentProfileLocks(
+          [agentProfile.id],
+          async () => {
+            // The target may have been archived while the request performed its
+            // filesystem/network validation. Recheck under the same lock used by
+            // Agent DELETE/PATCH and workspace migration.
+            const lockedProfile = getAgentProfileForUser(
+              agentProfile.id,
+              authUser.id,
             );
-            setRegisteredGroup(jid, group);
-            updateChatName(jid, name);
-            deps.getRegisteredGroups()[jid] = group;
-            return lockedProfile;
-          } catch (err) {
-            // setRegisteredGroup may fail after the mapping write. Clear both
-            // sides before releasing the profile lock so no partial membership
-            // can become visible to the next mutation.
-            try {
-              deleteRegisteredGroup(jid);
-            } catch {
-              /* best-effort cleanup continues below */
+            if (!lockedProfile) return undefined;
+            const currentOwner = getUserById(authUser.id);
+            if (
+              group.executionMode !== 'host' &&
+              currentOwner?.role === 'admin' &&
+              currentOwner.status === 'active' &&
+              getSystemSettings().adminHostOnlyMode
+            ) {
+              hostOnlyPolicyChangedDuringCreate = true;
+              return undefined;
             }
-            deleteWorkspaceAgentProfile(folder);
-            deleteChatHistory(jid);
-            delete deps.getRegisteredGroups()[jid];
-            throw err;
-          }
-        });
+
+            try {
+              // Mapping first and registered-group publication immediately after
+              // it occur in one synchronous critical section. Agent PATCH cannot
+              // snapshot between them: it holds this same profile lock.
+              assignWorkspaceAgentProfile(
+                folder,
+                lockedProfile.id,
+                interactionMode,
+              );
+              setRegisteredGroup(jid, group);
+              updateChatName(jid, name);
+              deps.getRegisteredGroups()[jid] = group;
+              return lockedProfile;
+            } catch (err) {
+              // setRegisteredGroup may fail after the mapping write. Clear both
+              // sides before releasing the profile lock so no partial membership
+              // can become visible to the next mutation.
+              try {
+                await deleteRegisteredGroup(jid);
+              } catch {
+                /* best-effort cleanup continues below */
+              }
+              deleteWorkspaceAgentProfile(folder);
+              deleteChatHistory(jid);
+              delete deps.getRegisteredGroups()[jid];
+              throw err;
+            }
+          },
+        );
         // Hold the system policy lock through container prewarm. If host-only
         // mode is enabled concurrently, its snapshot can only run after this
         // workspace is fully published and will therefore quiesce the new
@@ -1820,7 +1823,7 @@ groupRoutes.delete('/:jid', authMiddleware, async (c) => {
       }
     }
 
-    deleteGroupData(jid, freshExisting.folder, { channelUpdates });
+    await deleteGroupData(jid, freshExisting.folder, { channelUpdates });
     deleteCommitted = true;
 
     const registeredGroups = deps.getRegisteredGroups();
@@ -2198,7 +2201,7 @@ groupRoutes.post('/:jid/clear-history', authMiddleware, async (c) => {
     // either commits the whole rebuild or leaves the database untouched, in
     // which case catch restores these exact directories.
     stagedReset = stageWorkspaceResetForGroup(group.folder);
-    const result = rebuildWorkspacePersistentState({
+    const result = await rebuildWorkspacePersistentState({
       groupFolder: group.folder,
       workspaceJids,
       siblingJids,

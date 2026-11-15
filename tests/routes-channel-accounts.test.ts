@@ -41,13 +41,13 @@ routeModule.injectChannelAccountDeps({
   testChannelAccount: async () => ({ success: true }),
 });
 
-beforeAll(() => {
+beforeAll(async () => {
   fs.mkdirSync(path.join(tmp, 'db'), { recursive: true });
   fs.mkdirSync(path.join(tmp, 'groups'), { recursive: true });
   db.initDatabase();
 });
 
-afterAll(() => {
+afterAll(async () => {
   db.closeDatabase();
   fs.rmSync(tmp, { recursive: true, force: true });
   delete process.env.CHANNEL_TEST_USER;
@@ -177,7 +177,7 @@ describe('channel account routes', () => {
     expect(blocked.status).toBe(409);
     expect(await blocked.json()).toMatchObject({ binding_count: 1 });
 
-    db.deleteRegisteredGroup(jid);
+    await db.deleteRegisteredGroup(jid);
     const removed = await routes.request(`/${accountId}`, { method: 'DELETE' });
     expect(removed.status).toBe(200);
     expect(db.getChannelAccount(accountId)).toBeUndefined();

@@ -34,7 +34,7 @@ const pairing = await import('../src/telegram-pairing.js');
 const routeModule = await import('../src/routes/channel-accounts.js');
 const routes = routeModule.default;
 const removeImGroupRecord = vi.fn(async (jid: string) => {
-  db.deleteRegisteredGroup(jid);
+  await db.deleteRegisteredGroup(jid);
   db.deleteChatHistory(jid);
 });
 routeModule.injectChannelAccountDeps({
@@ -43,13 +43,13 @@ routeModule.injectChannelAccountDeps({
   removeImGroupRecord,
 });
 
-beforeAll(() => {
+beforeAll(async () => {
   fs.mkdirSync(path.join(tmp, 'db'), { recursive: true });
   fs.mkdirSync(path.join(tmp, 'groups'), { recursive: true });
   db.initDatabase();
 });
 
-afterAll(() => {
+afterAll(async () => {
   db.closeDatabase();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -104,7 +104,7 @@ function register(jid: string, accountId: string, name: string) {
 }
 
 describe('account-scoped channel pairing', () => {
-  test('codes are independent between accounts, rotate per account, and are single-use', () => {
+  test('codes are independent between accounts, rotate per account, and are single-use', async () => {
     const first = pairing.generatePairingCode('pair-owner', 'bot-a');
     const second = pairing.generatePairingCode('pair-owner', 'bot-b');
     expect(first.code).not.toBe(second.code);
@@ -196,7 +196,7 @@ describe('account-scoped channel pairing', () => {
     expect(db.getRegisteredGroup(secondJid)).toBeDefined();
   });
 
-  test('paired-chat removal delegates cache and database cleanup to the lifecycle service', () => {
+  test('paired-chat removal delegates cache and database cleanup to the lifecycle service', async () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), 'src/routes/channel-accounts.ts'),
       'utf8',
@@ -206,7 +206,7 @@ describe('account-scoped channel pairing', () => {
       source.indexOf("routes.post('/:id/disconnect'"),
     );
     expect(endpoint).toContain('deps.removeImGroupRecord');
-    expect(endpoint).not.toContain('deleteRegisteredGroup(');
+    expect(endpoint).not.toContain('await deleteRegisteredGroup(');
     expect(endpoint).not.toContain('deleteChatHistory(');
   });
 

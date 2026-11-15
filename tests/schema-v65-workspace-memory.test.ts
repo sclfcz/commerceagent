@@ -23,6 +23,7 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const db = await import('../src/db.js');
+const memoryStore = await import('../src/memory-store.js');
 
 beforeAll(() => {
   db.initDatabase();
@@ -67,14 +68,16 @@ beforeAll(() => {
   );
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await memoryStore.closeWorkspaceMemoryStore();
   db.closeDatabase();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe('schema v65 Workspace Memory migration', () => {
-  test('creates one empty store per workspace without importing global/date files', () => {
+  test('provisions PostgreSQL stores without importing global/date files', async () => {
     db.initDatabase();
+    await memoryStore.initWorkspaceMemoryStore();
     expect(db.getRouterState('schema_version')).toBe(
       String(db.CURRENT_SCHEMA_VERSION),
     );
@@ -84,42 +87,38 @@ describe('schema v65 Workspace Memory migration', () => {
         path.join(groupsDir, 'user-global', 'new-user', 'CLAUDE.md'),
       ),
     ).toBe(false);
-    db.closeDatabase();
 
+    // Workspace Memory no longer lives in SQLite at all: the legacy tables are
+    // not recreated by the SQLite migrations.
     const raw = new Database(databasePath, { readonly: true });
-    const store = raw
-      .prepare(
-        `SELECT workspace_jid, revision
-         FROM workspace_memory_stores
-         WHERE workspace_jid = 'web:legacy-project'`,
-      )
-      .get() as { workspace_jid: string; revision: number };
-    expect(store).toEqual({
-      workspace_jid: 'web:legacy-project',
+    expect(
+      raw
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'workspace_memory_%'",
+        )
+        .all(),
+    ).toEqual([]);
+    raw.close();
+
+    const store =
+      await memoryStore.getWorkspaceMemoryStore('web:legacy-project');
+    expect(store).toMatchObject({
+      workspaceJid: 'web:legacy-project',
       revision: 0,
     });
+    const items = await memoryStore.queryWorkspaceMemoryStoreDatabase(
+      'SELECT COUNT(*)::int AS count FROM workspace_memory_items',
+    );
+    expect(items.rows[0]?.count).toBe(0);
+
+    // A workspace created after bootstrap gets its store on first use.
+    await memoryStore.searchWorkspaceMemoryItems({
+      workspaceJid: 'web:home-new-user',
+      query: 'remember',
+      limit: 5,
+    });
     expect(
-      (
-        raw
-          .prepare('SELECT COUNT(*) AS count FROM workspace_memory_items')
-          .get() as { count: number }
-      ).count,
-    ).toBe(0);
-    expect(
-      raw
-        .prepare(
-          `SELECT 1 FROM workspace_memory_stores
-           WHERE workspace_jid = 'web:home-new-user'`,
-        )
-        .get(),
-    ).toBeTruthy();
-    expect(
-      raw
-        .prepare(
-          "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_memory_fts'",
-        )
-        .get(),
-    ).toBeTruthy();
-    raw.close();
+      await memoryStore.getWorkspaceMemoryStore('web:home-new-user'),
+    ).toMatchObject({ workspaceJid: 'web:home-new-user', revision: 0 });
   });
 });

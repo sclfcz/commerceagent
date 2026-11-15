@@ -283,7 +283,7 @@ function requestHash(value: unknown): string {
     .digest('hex');
 }
 
-export function listWorkspaceMemory(
+export async function listWorkspaceMemory(
   input: WorkspaceMemoryBaseRequest & {
     status?: WorkspaceMemoryStatus;
     kind?: WorkspaceMemoryKind;
@@ -308,7 +308,7 @@ export function listWorkspaceMemory(
     invalid('Invalid list cursor');
   }
   try {
-    const result = listWorkspaceMemoryItems({
+    const result = await listWorkspaceMemoryItems({
       workspaceJid: input.workspaceJid,
       status: input.status,
       kind: input.kind,
@@ -331,7 +331,7 @@ export function listWorkspaceMemory(
   }
 }
 
-export function searchWorkspaceMemory(
+export async function searchWorkspaceMemory(
   input: WorkspaceMemoryBaseRequest & {
     query: string;
     kind?: WorkspaceMemoryKind;
@@ -345,7 +345,7 @@ export function searchWorkspaceMemory(
   }
   if (input.kind && !KINDS.has(input.kind)) invalid('Invalid kind');
   try {
-    const result = searchWorkspaceMemoryItems({
+    const result = await searchWorkspaceMemoryItems({
       workspaceJid: input.workspaceJid,
       query,
       kind: input.kind,
@@ -360,14 +360,17 @@ export function searchWorkspaceMemory(
   }
 }
 
-export function getWorkspaceMemory(
+export async function getWorkspaceMemory(
   input: WorkspaceMemoryBaseRequest & {
     itemId: string;
   },
 ) {
   authorizeWorkspace(input, 'read');
   try {
-    const result = getWorkspaceMemoryItem(input.workspaceJid, input.itemId);
+    const result = await getWorkspaceMemoryItem(
+      input.workspaceJid,
+      input.itemId,
+    );
     return {
       storeRevision: result.store.revision,
       item: result.item,
@@ -377,7 +380,7 @@ export function getWorkspaceMemory(
   }
 }
 
-export function createWorkspaceMemory(
+export async function createWorkspaceMemory(
   input: WorkspaceMemoryMutationRequest &
     WorkspaceMemoryValue & {
       idempotencyKey?: string | null;
@@ -403,7 +406,7 @@ export function createWorkspaceMemory(
     expiresAt: input.expiresAt,
   };
   try {
-    const result = createWorkspaceMemoryItem({
+    const result = await createWorkspaceMemoryItem({
       workspaceJid: input.workspaceJid,
       value,
       context: mutationContext(input),
@@ -422,7 +425,7 @@ export function createWorkspaceMemory(
 
 type WorkspaceMemoryPatch = Partial<WorkspaceMemoryValue>;
 
-export function updateWorkspaceMemory(
+export async function updateWorkspaceMemory(
   input: WorkspaceMemoryMutationRequest &
     WorkspaceMemoryPatch & {
       itemId: string;
@@ -459,9 +462,8 @@ export function updateWorkspaceMemory(
   if (Object.keys(patch).length === 0) invalid('No memory fields to update');
   validateValue(patch, false);
   try {
-    const current = getMutableWorkspaceMemoryItem(
-      input.workspaceJid,
-      input.itemId,
+    const current = (
+      await getMutableWorkspaceMemoryItem(input.workspaceJid, input.itemId)
     ).item;
     validateValue(
       {
@@ -478,7 +480,7 @@ export function updateWorkspaceMemory(
     translateStoreError(error);
   }
   try {
-    const result = updateWorkspaceMemoryItem({
+    const result = await updateWorkspaceMemoryItem({
       workspaceJid: input.workspaceJid,
       itemId: input.itemId,
       expectedRevision: input.expectedRevision,
@@ -501,7 +503,7 @@ export function updateWorkspaceMemory(
   }
 }
 
-export function forgetWorkspaceMemory(
+export async function forgetWorkspaceMemory(
   input: WorkspaceMemoryMutationRequest & {
     itemId: string;
     expectedRevision: number;
@@ -520,7 +522,7 @@ export function forgetWorkspaceMemory(
     MAX_IDEMPOTENCY_KEY_LENGTH,
   );
   try {
-    const result = forgetWorkspaceMemoryItem({
+    const result = await forgetWorkspaceMemoryItem({
       workspaceJid: input.workspaceJid,
       itemId: input.itemId,
       expectedRevision: input.expectedRevision,
@@ -543,7 +545,7 @@ export function forgetWorkspaceMemory(
   }
 }
 
-export function listWorkspaceMemoryVersions(
+export async function listWorkspaceMemoryVersions(
   input: WorkspaceMemoryBaseRequest & {
     itemId: string;
     limit?: number;
@@ -560,7 +562,7 @@ export function listWorkspaceMemoryVersions(
     invalid('Invalid version cursor');
   }
   try {
-    const result = listVersionsFromStore({
+    const result = await listVersionsFromStore({
       workspaceJid: input.workspaceJid,
       itemId: input.itemId,
       limit: limit + 1,
@@ -590,7 +592,7 @@ function xmlEscape(value: string): string {
     .replaceAll("'", '&apos;');
 }
 
-export function getWorkspaceMemorySnapshot(
+export async function getWorkspaceMemorySnapshot(
   input: WorkspaceMemoryBaseRequest & {
     query?: string | null;
     kind?: WorkspaceMemoryKind;
@@ -606,7 +608,7 @@ export function getWorkspaceMemorySnapshot(
   let storeRevision: number;
   let items: WorkspaceMemoryItem[];
   if (input.query?.trim()) {
-    const searched = searchWorkspaceMemory({
+    const searched = await searchWorkspaceMemory({
       ...input,
       query: input.query,
       kind: input.kind,
@@ -621,7 +623,7 @@ export function getWorkspaceMemorySnapshot(
       // relevance hits first, then fill the remaining budget with the most
       // important currently-valid memories.
       try {
-        const recalled = listRecallableWorkspaceMemoryItems({
+        const recalled = await listRecallableWorkspaceMemoryItems({
           workspaceJid: input.workspaceJid,
           kind: input.kind,
           limit,
@@ -641,7 +643,7 @@ export function getWorkspaceMemorySnapshot(
   } else {
     authorizeWorkspace(input, 'read');
     try {
-      const recalled = listRecallableWorkspaceMemoryItems({
+      const recalled = await listRecallableWorkspaceMemoryItems({
         workspaceJid: input.workspaceJid,
         kind: input.kind,
         limit,

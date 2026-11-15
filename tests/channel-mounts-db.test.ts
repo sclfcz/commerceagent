@@ -73,18 +73,18 @@ const {
 
 let probeDb: InstanceType<typeof Database>;
 
-beforeAll(() => {
+beforeAll(async () => {
   initDatabase();
   probeDb = new Database(dbPath, { readonly: true });
 });
 
-afterAll(() => {
+afterAll(async () => {
   probeDb?.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe('channel_mounts compatibility model', () => {
-  test('provider chat avatars persist across ordinary group updates', () => {
+  test('provider chat avatars persist across ordinary group updates', async () => {
     const jid = 'feishu:avatar-cache';
     const now = new Date().toISOString();
     setRegisteredGroup(jid, {
@@ -115,7 +115,7 @@ describe('channel_mounts compatibility model', () => {
     );
   });
 
-  test('updating a registered group preserves its SQLite row identity', () => {
+  test('updating a registered group preserves its SQLite row identity', async () => {
     const jid = 'telegram:stable-row';
     const now = new Date().toISOString();
     setRegisteredGroup(jid, {
@@ -141,7 +141,7 @@ describe('channel_mounts compatibility model', () => {
     expect(after).toEqual({ rowid: before.rowid, name: 'After' });
   });
 
-  test('startup preserves orphaned user balances for operator review', () => {
+  test('startup preserves orphaned user balances for operator review', async () => {
     const row = probeDb
       .prepare('SELECT COUNT(*) as cnt FROM user_balances WHERE user_id = ?')
       .get('deleted-user') as { cnt: number };
@@ -163,7 +163,7 @@ describe('channel_mounts compatibility model', () => {
     );
   });
 
-  test('session binding written to registered_groups is mirrored to channel_mounts', () => {
+  test('session binding written to registered_groups is mirrored to channel_mounts', async () => {
     const now = new Date().toISOString();
     setRegisteredGroup('web:workspace-a', {
       name: 'Workspace A',
@@ -209,7 +209,7 @@ describe('channel_mounts compatibility model', () => {
     expect(listChannelMountsByWorkspace('web:workspace-a')).toHaveLength(1);
   });
 
-  test('workspace thread-map binding and unbind update channel_mounts', () => {
+  test('workspace thread-map binding and unbind update channel_mounts', async () => {
     const now = new Date().toISOString();
     setRegisteredGroup('web:workspace-b', {
       name: 'Workspace B',
@@ -245,7 +245,7 @@ describe('channel_mounts compatibility model', () => {
     expect(getChannelMount('feishu:topic-b')).toBeUndefined();
   });
 
-  test('deleting an IM registered group removes its channel mount', () => {
+  test('deleting an IM registered group removes its channel mount', async () => {
     const now = new Date().toISOString();
     setRegisteredGroup('web:workspace-c', {
       name: 'Workspace C',
@@ -260,7 +260,7 @@ describe('channel_mounts compatibility model', () => {
     });
 
     expect(getChannelMount('qq:chat-c')).toBeTruthy();
-    deleteRegisteredGroup('qq:chat-c');
+    await deleteRegisteredGroup('qq:chat-c');
     expect(getChannelMount('qq:chat-c')).toBeUndefined();
   });
 });

@@ -90,12 +90,13 @@ beforeEach(() => {
   } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
 });
 
-afterAll(() => {
+afterAll(async () => {
   try {
-    db.deleteRegisteredGroup(JID);
+    await db.deleteRegisteredGroup(JID);
   } catch {
     // absent
   }
+  await memoryStore.closeWorkspaceMemoryStore();
   db.closeDatabase();
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -117,7 +118,7 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
       sourceId: 'message-before-rebuild',
       sessionId: 'session-before-rebuild',
     };
-    const active = memoryStore.createWorkspaceMemoryItem({
+    const active = await memoryStore.createWorkspaceMemoryItem({
       workspaceJid: JID,
       value: {
         kind: 'fact',
@@ -126,7 +127,7 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
       },
       context,
     });
-    const forgotten = memoryStore.createWorkspaceMemoryItem({
+    const forgotten = await memoryStore.createWorkspaceMemoryItem({
       workspaceJid: JID,
       value: {
         kind: 'open_loop',
@@ -135,23 +136,25 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
       },
       context,
     });
-    memoryStore.forgetWorkspaceMemoryItem({
+    await memoryStore.forgetWorkspaceMemoryItem({
       workspaceJid: JID,
       itemId: forgotten.item.id,
       expectedRevision: 1,
       reason: 'Prepare a tombstone for the regression test',
       context,
     });
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid: JID,
       preferredAddress: '小何',
       expectedRevision: 0,
       context,
     });
 
-    const oldStore = memoryStore.getWorkspaceMemoryStore(JID);
+    const oldStore = await memoryStore.getWorkspaceMemoryStore(JID);
     expect(oldStore?.revision).toBeGreaterThan(0);
-    expect(ownerProfile.getCommerceAgentOwnerProfileProjection(JID)).toMatchObject({
+    expect(
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(JID),
+    ).toMatchObject({
       preferredAddress: '小何',
       onboarding: { state: 'completed' },
     });
@@ -232,23 +235,27 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
     expect(resumeGroupsAfterMutation).toHaveBeenCalledWith(pauseToken);
     expect(db.getRegisteredGroup(JID)).toBeDefined();
 
-    const newStore = memoryStore.getWorkspaceMemoryStore(JID);
+    const newStore = await memoryStore.getWorkspaceMemoryStore(JID);
     expect(newStore).toMatchObject({ workspaceJid: JID, revision: 0 });
     expect(newStore?.id).not.toBe(oldStore?.id);
     expect(
-      memoryStore.listWorkspaceMemoryItems({
-        workspaceJid: JID,
-        limit: 100,
-      }).items,
+      (
+        await memoryStore.listWorkspaceMemoryItems({
+          workspaceJid: JID,
+          limit: 100,
+        })
+      ).items,
     ).toEqual([]);
-    expect(() =>
+    await expect(
       memoryStore.getWorkspaceMemoryItem(JID, active.item.id),
-    ).toThrowError(
+    ).rejects.toThrowError(
       expect.objectContaining({
         code: 'item_not_found',
       }),
     );
-    expect(ownerProfile.getCommerceAgentOwnerProfileProjection(JID)).toMatchObject({
+    expect(
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(JID),
+    ).toMatchObject({
       preferredAddress: null,
       revision: null,
       onboarding: {
@@ -269,25 +276,30 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
       status: 'cancelled',
     });
 
-    const raw = new Database(path.join(storeDir, 'messages.db'), {
-      readonly: true,
-    });
-    const counts = raw
-      .prepare(
+    const counts = (
+      await memoryStore.queryWorkspaceMemoryStoreDatabase<{
+        stores: number;
+        items: number;
+        versions: number;
+        provenance: number;
+        tombstones: number;
+        outbox: number;
+        audits: number;
+      }>(
         `SELECT
-          (SELECT COUNT(*) FROM workspace_memory_stores WHERE workspace_jid = ?) AS stores,
-          (SELECT COUNT(*) FROM workspace_memory_items WHERE workspace_jid = ?) AS items,
-          (SELECT COUNT(*) FROM workspace_memory_versions WHERE workspace_jid = ?) AS versions,
-          (SELECT COUNT(*) FROM workspace_memory_provenance
+          (SELECT COUNT(*)::int FROM workspace_memory_stores WHERE workspace_jid = $1) AS stores,
+          (SELECT COUNT(*)::int FROM workspace_memory_items WHERE workspace_jid = $2) AS items,
+          (SELECT COUNT(*)::int FROM workspace_memory_versions WHERE workspace_jid = $3) AS versions,
+          (SELECT COUNT(*)::int FROM workspace_memory_provenance
              WHERE item_id IN (
-               SELECT id FROM workspace_memory_items WHERE workspace_jid = ?
+               SELECT id FROM workspace_memory_items WHERE workspace_jid = $4
              )) AS provenance,
-          (SELECT COUNT(*) FROM workspace_memory_tombstones WHERE workspace_jid = ?) AS tombstones,
-          (SELECT COUNT(*) FROM workspace_memory_outbox WHERE workspace_jid = ?) AS outbox,
-          (SELECT COUNT(*) FROM workspace_memory_audit_events WHERE workspace_jid = ?) AS audits,
-          (SELECT COUNT(*) FROM workspace_memory_fts WHERE workspace_jid = ?) AS fts`,
+          (SELECT COUNT(*)::int FROM workspace_memory_tombstones WHERE workspace_jid = $5) AS tombstones,
+          (SELECT COUNT(*)::int FROM workspace_memory_outbox WHERE workspace_jid = $6) AS outbox,
+          (SELECT COUNT(*)::int FROM workspace_memory_audit_events WHERE workspace_jid = $7) AS audits`,
+        [JID, JID, JID, JID, JID, JID, JID],
       )
-      .get(JID, JID, JID, JID, JID, JID, JID, JID);
+    ).rows[0];
     expect(counts).toEqual({
       stores: 1,
       items: 0,
@@ -296,9 +308,7 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
       tombstones: 0,
       outbox: 0,
       audits: 0,
-      fts: 0,
     });
-    raw.close();
 
     expect(fs.readdirSync(workspaceDir)).toEqual([]);
     expect(fs.existsSync(legacyMemoryDir)).toBe(false);
@@ -318,7 +328,7 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
       created_by: 'alice',
       is_home: false,
     });
-    const memory = memoryStore.createWorkspaceMemoryItem({
+    const memory = await memoryStore.createWorkspaceMemoryItem({
       workspaceJid: jid,
       value: {
         kind: 'decision',
@@ -332,7 +342,7 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
         sessionId: 'rollback-session',
       },
     });
-    const originalStore = memoryStore.getWorkspaceMemoryStore(jid)!;
+    const originalStore = (await memoryStore.getWorkspaceMemoryStore(jid))!;
     const originalNextRun = new Date(Date.now() + 120_000).toISOString();
     db.createTask({
       id: 'rebuild-rollback-task',
@@ -381,10 +391,14 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
     }
 
     const raw = new Database(path.join(storeDir, 'messages.db'));
+    // Fail inside the rebuild's SQLite transaction, after Workspace Memory has
+    // already been reset, so the test covers the documented cross-database
+    // ordering rather than the task pause that precedes it.
     raw.exec(`
-      CREATE TRIGGER fail_workspace_rebuild_memory
-      BEFORE DELETE ON workspace_memory_stores
-      WHEN OLD.workspace_jid = 'web:rebuild-memory-rollback'
+      CREATE TRIGGER fail_workspace_rebuild_tasks
+      BEFORE UPDATE ON scheduled_tasks
+      WHEN OLD.group_folder = 'rebuild-memory-rollback'
+        AND NEW.deleted_at IS NOT NULL
       BEGIN
         SELECT RAISE(ABORT, 'injected workspace rebuild failure');
       END;
@@ -399,14 +413,20 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
         error: 'Workspace rebuild failed; original data was restored',
       });
     } finally {
-      raw.exec('DROP TRIGGER IF EXISTS fail_workspace_rebuild_memory');
+      raw.exec('DROP TRIGGER IF EXISTS fail_workspace_rebuild_tasks');
       raw.close();
     }
 
-    expect(memoryStore.getWorkspaceMemoryStore(jid)).toEqual(originalStore);
-    expect(
-      memoryStore.getWorkspaceMemoryItem(jid, memory.item.id).item.content,
-    ).toContain('preserve this Memory');
+    // Workspace Memory lives in PostgreSQL and is reset before the SQLite
+    // transaction commits, so a failed SQLite commit cannot roll it back. The
+    // reset is idempotent: the retry below completes the rebuild.
+    const resetStore = await memoryStore.getWorkspaceMemoryStore(jid);
+    expect(resetStore).toMatchObject({ workspaceJid: jid, revision: 0 });
+    expect(resetStore?.id).not.toBe(originalStore.id);
+    await expect(
+      memoryStore.getWorkspaceMemoryItem(jid, memory.item.id),
+    ).rejects.toMatchObject({ code: 'item_not_found' });
+
     expect(db.getTaskById('rebuild-rollback-task')).toMatchObject({
       status: 'active',
       next_run: originalNextRun,
@@ -426,6 +446,20 @@ describe('POST /:jid/clear-history workspace rebuild', () => {
       ).toBe(false);
     }
     expect(resumeGroupsAfterMutation).toHaveBeenCalledWith(pauseToken);
-    db.deleteRegisteredGroup(jid);
+
+    const retry = await groupRoutes.request(
+      `/${encodeURIComponent(jid)}/clear-history`,
+      { method: 'POST' },
+    );
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual({ success: true });
+    expect(db.getTaskById('rebuild-rollback-task')?.deleted_at).not.toBeNull();
+    expect(
+      await memoryStore.listWorkspaceMemoryItems({
+        workspaceJid: jid,
+        limit: 10,
+      }),
+    ).toMatchObject({ items: [] });
+    await db.deleteRegisteredGroup(jid);
   });
 });

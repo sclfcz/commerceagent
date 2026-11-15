@@ -72,13 +72,13 @@ memoryRoutes.use(
   }),
 );
 
-memoryRoutes.get('/workspaces/:workspaceJid/items/search', (c) => {
+memoryRoutes.get('/workspaces/:workspaceJid/items/search', async (c) => {
   const parsed = WorkspaceMemorySearchQuerySchema.safeParse(c.req.query());
   if (!parsed.success) return validationError(c, parsed.error.format());
   try {
     const user = c.get('user') as AuthUser;
     return c.json(
-      searchWorkspaceMemory({
+      await searchWorkspaceMemory({
         actor: actor(user),
         workspaceJid: c.req.param('workspaceJid'),
         query: parsed.data.q,
@@ -91,18 +91,36 @@ memoryRoutes.get('/workspaces/:workspaceJid/items/search', (c) => {
   }
 });
 
-memoryRoutes.get('/workspaces/:workspaceJid/items/:itemId/versions', (c) => {
-  const parsed = WorkspaceMemoryVersionsQuerySchema.safeParse(c.req.query());
-  if (!parsed.success) return validationError(c, parsed.error.format());
+memoryRoutes.get(
+  '/workspaces/:workspaceJid/items/:itemId/versions',
+  async (c) => {
+    const parsed = WorkspaceMemoryVersionsQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) return validationError(c, parsed.error.format());
+    try {
+      const user = c.get('user') as AuthUser;
+      return c.json(
+        await listWorkspaceMemoryVersions({
+          actor: actor(user),
+          workspaceJid: c.req.param('workspaceJid'),
+          itemId: c.req.param('itemId'),
+          limit: parsed.data.limit,
+          cursor: parsed.data.cursor,
+        }),
+      );
+    } catch (error) {
+      return serviceError(c, error);
+    }
+  },
+);
+
+memoryRoutes.get('/workspaces/:workspaceJid/items/:itemId', async (c) => {
   try {
     const user = c.get('user') as AuthUser;
     return c.json(
-      listWorkspaceMemoryVersions({
+      await getWorkspaceMemory({
         actor: actor(user),
         workspaceJid: c.req.param('workspaceJid'),
         itemId: c.req.param('itemId'),
-        limit: parsed.data.limit,
-        cursor: parsed.data.cursor,
       }),
     );
   } catch (error) {
@@ -110,28 +128,13 @@ memoryRoutes.get('/workspaces/:workspaceJid/items/:itemId/versions', (c) => {
   }
 });
 
-memoryRoutes.get('/workspaces/:workspaceJid/items/:itemId', (c) => {
-  try {
-    const user = c.get('user') as AuthUser;
-    return c.json(
-      getWorkspaceMemory({
-        actor: actor(user),
-        workspaceJid: c.req.param('workspaceJid'),
-        itemId: c.req.param('itemId'),
-      }),
-    );
-  } catch (error) {
-    return serviceError(c, error);
-  }
-});
-
-memoryRoutes.get('/workspaces/:workspaceJid/items', (c) => {
+memoryRoutes.get('/workspaces/:workspaceJid/items', async (c) => {
   const parsed = WorkspaceMemoryListQuerySchema.safeParse(c.req.query());
   if (!parsed.success) return validationError(c, parsed.error.format());
   try {
     const user = c.get('user') as AuthUser;
     return c.json(
-      listWorkspaceMemory({
+      await listWorkspaceMemory({
         actor: actor(user),
         workspaceJid: c.req.param('workspaceJid'),
         status: parsed.data.status,
@@ -151,7 +154,7 @@ memoryRoutes.post('/workspaces/:workspaceJid/items', async (c) => {
   if (!parsed.success) return validationError(c, parsed.error.format());
   try {
     const user = c.get('user') as AuthUser;
-    const result = createWorkspaceMemory({
+    const result = await createWorkspaceMemory({
       actor: actor(user),
       workspaceJid: c.req.param('workspaceJid'),
       sourceType: 'web_user',
@@ -170,7 +173,7 @@ memoryRoutes.patch('/workspaces/:workspaceJid/items/:itemId', async (c) => {
   try {
     const user = c.get('user') as AuthUser;
     return c.json(
-      updateWorkspaceMemory({
+      await updateWorkspaceMemory({
         actor: actor(user),
         workspaceJid: c.req.param('workspaceJid'),
         itemId: c.req.param('itemId'),
@@ -190,7 +193,7 @@ memoryRoutes.delete('/workspaces/:workspaceJid/items/:itemId', async (c) => {
   try {
     const user = c.get('user') as AuthUser;
     return c.json(
-      forgetWorkspaceMemory({
+      await forgetWorkspaceMemory({
         actor: actor(user),
         workspaceJid: c.req.param('workspaceJid'),
         itemId: c.req.param('itemId'),

@@ -205,7 +205,11 @@ import {
   updateWorkspaceMemory,
   WorkspaceMemoryServiceError,
 } from './memory-service.js';
-import { type WorkspaceMemoryMutationContext } from './memory-store.js';
+import {
+  closeWorkspaceMemoryStore,
+  initWorkspaceMemoryStore,
+  type WorkspaceMemoryMutationContext,
+} from './memory-store.js';
 import {
   isCommerceAgentBootstrapTurn,
   isCommerceAgentOwnerProfileRuntimeStructurallyEligible,
@@ -2230,14 +2234,14 @@ function toContainerAgentProfile(
   };
 }
 
-function resolveCommerceAgentOwnerProfileForTurn(input: {
+async function resolveCommerceAgentOwnerProfileForTurn(input: {
   group: RegisteredGroup;
   profile: AgentProfile | undefined;
   turnId?: string;
   isScheduledTask?: boolean;
   runtimeAgentId?: string | null;
   runtimeAgentKind?: 'task' | 'conversation' | 'spawn' | null;
-}): CommerceAgentOwnerProfileProjection | undefined {
+}): Promise<CommerceAgentOwnerProfileProjection | undefined> {
   if (
     !isCommerceAgentBootstrapTurn({
       turnId: input.turnId,
@@ -2274,7 +2278,7 @@ function resolveCommerceAgentOwnerProfileForTurn(input: {
   );
   if (!workspaceJid) return undefined;
   try {
-    return getCommerceAgentOwnerProfileProjection(workspaceJid);
+    return await getCommerceAgentOwnerProfileProjection(workspaceJid);
   } catch {
     return undefined;
   }
@@ -9466,12 +9470,13 @@ async function runAgentTurn(
   );
   let rotatingTurnCompleted = false;
   let selectedProviderIdForRun: string | null = null;
-  const commerceAgentOwnerProfile = resolveCommerceAgentOwnerProfileForTurn({
-    group,
-    profile: resolvedAgentProfile,
-    turnId,
-    isScheduledTask: Boolean(messageTaskId),
-  });
+  const commerceAgentOwnerProfile =
+    await resolveCommerceAgentOwnerProfileForTurn({
+      group,
+      profile: resolvedAgentProfile,
+      turnId,
+      isScheduledTask: Boolean(messageTaskId),
+    });
   const commerceAgentBootstrapPending =
     commerceAgentOwnerProfile?.onboarding.state === 'pending' ||
     commerceAgentOwnerProfile?.onboarding.state === 'claimed';
@@ -11869,7 +11874,7 @@ async function processTaskIpc(
                 'Owner Profile runner identity is required',
               );
             }
-            const claim = claimCommerceAgentOwnerIntroduction({
+            const claim = await claimCommerceAgentOwnerIntroduction({
               workspaceJid: principal.workspaceJid,
               leaseOwner: data.runnerInstanceId,
             });
@@ -11904,7 +11909,7 @@ async function processTaskIpc(
                 'Owner Profile lease token is required',
               );
             }
-            result = acknowledgeCommerceAgentOwnerIntroduction({
+            result = await acknowledgeCommerceAgentOwnerIntroduction({
               workspaceJid: principal.workspaceJid,
               leaseOwner: data.runnerInstanceId,
               leaseToken: data.leaseToken!,
@@ -11912,7 +11917,7 @@ async function processTaskIpc(
             break;
           }
           case 'set':
-            result = setCommerceAgentOwnerPreferredAddress({
+            result = await setCommerceAgentOwnerPreferredAddress({
               workspaceJid: principal.workspaceJid,
               preferredAddress: data.preferredAddress ?? '',
               expectedRevision: data.expectedRevision,
@@ -11927,7 +11932,7 @@ async function processTaskIpc(
                 'expectedRevision is required to clear the Owner Profile',
               );
             }
-            result = clearCommerceAgentOwnerPreferredAddress({
+            result = await clearCommerceAgentOwnerPreferredAddress({
               workspaceJid: principal.workspaceJid,
               expectedRevision: data.expectedRevision!,
               idempotencyKey: data.idempotencyKey,
@@ -11935,7 +11940,7 @@ async function processTaskIpc(
             });
             break;
           case 'skip':
-            result = skipCommerceAgentOwnerIntroduction({
+            result = await skipCommerceAgentOwnerIntroduction({
               workspaceJid: principal.workspaceJid,
               expectedOnboardingRevision: data.expectedOnboardingRevision,
               context: principal.context,
@@ -12063,7 +12068,7 @@ async function processTaskIpc(
         let result: Record<string, unknown>;
         switch (data.operation) {
           case 'snapshot': {
-            const snapshot = getWorkspaceMemorySnapshot({
+            const snapshot = await getWorkspaceMemorySnapshot({
               ...base,
               query: data.query,
               kind: data.kind as
@@ -12088,7 +12093,7 @@ async function processTaskIpc(
             break;
           }
           case 'search':
-            result = searchWorkspaceMemory({
+            result = await searchWorkspaceMemory({
               ...base,
               query: data.query ?? '',
               kind: data.kind as
@@ -12101,13 +12106,13 @@ async function processTaskIpc(
             });
             break;
           case 'get':
-            result = getWorkspaceMemory({
+            result = await getWorkspaceMemory({
               ...base,
               itemId: data.itemId ?? '',
             });
             break;
           case 'create':
-            result = createWorkspaceMemory({
+            result = await createWorkspaceMemory({
               ...base,
               ...mutation,
               kind: data.kind as 'fact' | 'decision' | 'lesson' | 'open_loop',
@@ -12123,7 +12128,7 @@ async function processTaskIpc(
             });
             break;
           case 'update': {
-            result = updateWorkspaceMemory(
+            result = await updateWorkspaceMemory(
               buildWorkspaceMemoryUpdateInput(data, {
                 ...base,
                 ...mutation,
@@ -12132,7 +12137,7 @@ async function processTaskIpc(
             break;
           }
           case 'delete':
-            result = forgetWorkspaceMemory({
+            result = await forgetWorkspaceMemory({
               ...base,
               ...mutation,
               itemId: data.itemId ?? '',
@@ -16399,14 +16404,15 @@ async function processAgentConversationTurn(
       });
     };
 
-    const commerceAgentOwnerProfile = resolveCommerceAgentOwnerProfileForTurn({
-      group: effectiveGroup,
-      profile: agentProfile,
-      turnId: lastProcessed.id,
-      isScheduledTask: Boolean(lastProcessed.task_id),
-      runtimeAgentId: agentId,
-      runtimeAgentKind: agent.kind,
-    });
+    const commerceAgentOwnerProfile =
+      await resolveCommerceAgentOwnerProfileForTurn({
+        group: effectiveGroup,
+        profile: agentProfile,
+        turnId: lastProcessed.id,
+        isScheduledTask: Boolean(lastProcessed.task_id),
+        runtimeAgentId: agentId,
+        runtimeAgentKind: agent.kind,
+      });
     const commerceAgentOwnerProfileEnabled =
       isCommerceAgentOwnerProfileRuntimeEligible({
         group: effectiveGroup,
@@ -19794,6 +19800,10 @@ function migrateDataDirectories(): void {
 async function main(): Promise<void> {
   migrateDataDirectories();
   initDatabase();
+  // Workspace Memory lives in PostgreSQL. Open, migrate, import any legacy
+  // SQLite memory and reconcile it now, so a broken Memory database fails the
+  // boot instead of the first user request.
+  await initWorkspaceMemoryStore();
   logger.info('Database initialized');
 
   const migratedAutoCompactProfiles = migrateAgentProfileAutoCompactWindow(
@@ -20080,6 +20090,12 @@ async function main(): Promise<void> {
       );
 
     clearTimeout(forceExitTimer);
+
+    try {
+      await closeWorkspaceMemoryStore();
+    } catch (err) {
+      logger.warn({ err }, 'Error closing Workspace Memory database');
+    }
 
     try {
       closeDatabase();
@@ -21282,7 +21298,7 @@ async function main(): Promise<void> {
     }
   }
 
-  startSchedulerLoop(schedulerDeps);
+  await startSchedulerLoop(schedulerDeps);
 
   // Inject triggerTaskRun into WebDeps (schedulerDeps must exist first)
   const webDeps = getWebDeps();

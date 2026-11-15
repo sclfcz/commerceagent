@@ -200,13 +200,15 @@ workspaceRoutes.get('/mounts', authMiddleware, (c) => {
   return c.json({ channel_mounts: channelMounts });
 });
 
-workspaceRoutes.get('/:jid/owner-profile', authMiddleware, (c) => {
+workspaceRoutes.get('/:jid/owner-profile', authMiddleware, async (c) => {
   const user = c.get('user') as AuthUser;
   const access = resolveOwnerProfileAccess(user, c.req.param('jid'));
   if (!access) return c.json({ error: 'Owner Profile not found' }, 404);
   try {
     return c.json({
-      profile: getCommerceAgentOwnerProfileProjection(access.workspace.jid),
+      profile: await getCommerceAgentOwnerProfileProjection(
+        access.workspace.jid,
+      ),
     });
   } catch (error) {
     return ownerProfileError(c, error);
@@ -235,7 +237,7 @@ workspaceRoutes.patch('/:jid/owner-profile', authMiddleware, async (c) => {
     switch (parsed.data.action) {
       case 'set':
         return c.json(
-          setCommerceAgentOwnerPreferredAddress({
+          await setCommerceAgentOwnerPreferredAddress({
             workspaceJid: access.workspace.jid,
             preferredAddress: parsed.data.preferredAddress,
             expectedRevision: parsed.data.expectedRevision,
@@ -245,7 +247,7 @@ workspaceRoutes.patch('/:jid/owner-profile', authMiddleware, async (c) => {
         );
       case 'clear':
         return c.json(
-          clearCommerceAgentOwnerPreferredAddress({
+          await clearCommerceAgentOwnerPreferredAddress({
             workspaceJid: access.workspace.jid,
             expectedRevision: parsed.data.expectedRevision,
             idempotencyKey: parsed.data.idempotencyKey,
@@ -254,7 +256,7 @@ workspaceRoutes.patch('/:jid/owner-profile', authMiddleware, async (c) => {
         );
       case 'skip':
         return c.json(
-          skipCommerceAgentOwnerIntroduction({
+          await skipCommerceAgentOwnerIntroduction({
             workspaceJid: access.workspace.jid,
             expectedOnboardingRevision: parsed.data.expectedOnboardingRevision,
             context,

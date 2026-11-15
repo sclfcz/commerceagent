@@ -18,16 +18,16 @@ vi.mock('../src/config.js', async () => ({
 
 const db = await import('../src/db.js');
 
-beforeAll(() => {
+beforeAll(async () => {
   db.initDatabase();
 });
 
-afterAll(() => {
+afterAll(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 describe('canonical workspace compatibility mirrors', () => {
-  test('registered web workspaces are mirrored into workspaces', () => {
+  test('registered web workspaces are mirrored into workspaces', async () => {
     db.setRegisteredGroup('web:mirror-workspace-a', {
       name: 'Workspace A',
       folder: 'mirror-workspace-a',
@@ -45,11 +45,11 @@ describe('canonical workspace compatibility mirrors', () => {
       is_home: false,
     });
 
-    db.deleteRegisteredGroup('web:mirror-workspace-a');
+    await db.deleteRegisteredGroup('web:mirror-workspace-a');
     expect(db.getWorkspaceRecord('web:mirror-workspace-a')).toBeUndefined();
   });
 
-  test('sessions are mirrored with AgentProfile identity version metadata', () => {
+  test('sessions are mirrored with AgentProfile identity version metadata', async () => {
     db.setRegisteredGroup('web:mirror-workspace-b', {
       name: 'Workspace B',
       folder: 'mirror-workspace-b',
@@ -84,7 +84,7 @@ describe('canonical workspace compatibility mirrors', () => {
     ).toBeUndefined();
   });
 
-  test('creating a workspace projects pre-existing runtime state in the same write', () => {
+  test('creating a workspace projects pre-existing runtime state in the same write', async () => {
     db.setSession(
       'mirror-workspace-late-registration',
       'sdk-before-workspace',
@@ -112,7 +112,7 @@ describe('canonical workspace compatibility mirrors', () => {
     ).toMatchObject({ sdk_session_id: 'sdk-before-workspace' });
   });
 
-  test('channel mounts are mirrored into agent-owned mounts', () => {
+  test('channel mounts are mirrored into agent-owned mounts', async () => {
     db.setRegisteredGroup('web:mirror-workspace-c', {
       name: 'Workspace C',
       folder: 'mirror-workspace-c',
@@ -173,11 +173,11 @@ describe('canonical workspace compatibility mirrors', () => {
       workspace_folder: 'mirror-workspace-c',
     });
 
-    db.deleteRegisteredGroup('telegram:mirror-chat-c');
+    await db.deleteRegisteredGroup('telegram:mirror-chat-c');
     expect(db.getAgentChannelMount('telegram:mirror-chat-c')).toBeUndefined();
   });
 
-  test('provider session deletion removes runtime-session projections atomically', () => {
+  test('provider session deletion removes runtime-session projections atomically', async () => {
     db.setRegisteredGroup('web:mirror-workspace-provider', {
       name: 'Provider Workspace',
       folder: 'mirror-workspace-provider',
@@ -213,7 +213,7 @@ describe('canonical workspace compatibility mirrors', () => {
     ).toBeUndefined();
   });
 
-  test('deleting a product Session clears its runtime state and channel projection', () => {
+  test('deleting a product Session clears its runtime state and channel projection', async () => {
     db.setRegisteredGroup('web:mirror-workspace-delete-agent', {
       name: 'Delete Agent Workspace',
       folder: 'mirror-workspace-delete-agent',
@@ -268,7 +268,7 @@ describe('canonical workspace compatibility mirrors', () => {
     ).toBeUndefined();
   });
 
-  test('deleting a workspace clears dependent channel projections and assignment ghosts', () => {
+  test('deleting a workspace clears dependent channel projections and assignment ghosts', async () => {
     db.setRegisteredGroup('web:mirror-delete-workspace', {
       name: 'Delete Workspace',
       folder: 'mirror-delete-workspace',
@@ -288,7 +288,7 @@ describe('canonical workspace compatibility mirrors', () => {
       target_main_jid: 'web:mirror-delete-workspace',
     });
 
-    db.deleteRegisteredGroup('web:mirror-delete-workspace');
+    await db.deleteRegisteredGroup('web:mirror-delete-workspace');
 
     expect(
       db.getWorkspaceRecord('web:mirror-delete-workspace'),
