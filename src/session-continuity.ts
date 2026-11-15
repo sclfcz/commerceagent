@@ -145,7 +145,15 @@ export const SESSION_CONTINUITY_MATRIX_FILE = path.join(
   'session-continuity-matrix.json',
 );
 
-let matrixCache: { mtimeMs: number; data: ResumeMatrixFile } | null = null;
+// Keyed by path and file identity, not mtime alone: callers pass different
+// matrix files, and two writes can land within the same mtime tick.
+let matrixCache: {
+  file: string;
+  mtimeMs: number;
+  size: number;
+  ino: number;
+  data: ResumeMatrixFile;
+} | null = null;
 
 function pairKey(fromFingerprint: string, toFingerprint: string): string {
   return `${fromFingerprint}>${toFingerprint}`;
@@ -164,7 +172,14 @@ export function readResumeMatrix(
   } catch {
     return emptyMatrix();
   }
-  if (matrixCache && matrixCache.mtimeMs === stat.mtimeMs) {
+  const resolvedFile = path.resolve(file);
+  if (
+    matrixCache &&
+    matrixCache.file === resolvedFile &&
+    matrixCache.mtimeMs === stat.mtimeMs &&
+    matrixCache.size === stat.size &&
+    matrixCache.ino === stat.ino
+  ) {
     return matrixCache.data;
   }
   try {
@@ -176,7 +191,13 @@ export function readResumeMatrix(
       typeof (parsed as ResumeMatrixFile).pairs === 'object'
         ? (parsed as ResumeMatrixFile)
         : emptyMatrix();
-    matrixCache = { mtimeMs: stat.mtimeMs, data };
+    matrixCache = {
+      file: resolvedFile,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      ino: stat.ino,
+      data,
+    };
     return data;
   } catch (err) {
     logger.warn(
@@ -201,9 +222,17 @@ export function writeResumeMatrixEntries(
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
-  fs.renameSync(tmp, file);
-  matrixCache = null;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n', {
+      mode: 0o600,
+    });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  } finally {
+    matrixCache = null;
+  }
 }
 
 /** A resume entry passes only when every behavior check passed. */

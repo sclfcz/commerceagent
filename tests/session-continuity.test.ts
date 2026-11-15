@@ -142,6 +142,72 @@ describe('canResumeAcrossProviders', () => {
   });
 });
 
+describe('readResumeMatrix cache', () => {
+  const a = { id: 'a', anthropicBaseUrl: '', anthropicModel: 'claude-x' };
+  const b = { id: 'b', anthropicBaseUrl: '', anthropicModel: 'claude-x' };
+  const key = `${continuity.providerContinuityFingerprint(a)}>${continuity.providerContinuityFingerprint(b)}`;
+  const pairEntry = {
+    fromFingerprint: continuity.providerContinuityFingerprint(a),
+    toFingerprint: continuity.providerContinuityFingerprint(b),
+    fromName: 'A',
+    toName: 'B',
+    checks: {
+      resumed: true,
+      recalledToolResult: true,
+      toolCallAfterResume: true,
+      streamed: true,
+    },
+    resume: true,
+    checkedAt: '2026-01-01T00:00:00.000Z',
+  };
+  const fixedTime = new Date('2026-01-01T00:00:00.000Z');
+
+  test('does not serve one matrix file for another with the same mtime', () => {
+    const verified = path.join(root, 'cache-verified.json');
+    const empty = path.join(root, 'cache-empty.json');
+    fs.writeFileSync(
+      verified,
+      JSON.stringify({ version: 1, pairs: { [key]: pairEntry } }),
+    );
+    fs.writeFileSync(empty, JSON.stringify({ version: 1, pairs: {} }));
+    fs.utimesSync(verified, fixedTime, fixedTime);
+    fs.utimesSync(empty, fixedTime, fixedTime);
+
+    expect(continuity.canResumeAcrossProviders(a, b, verified)).toBe(true);
+    expect(continuity.canResumeAcrossProviders(a, b, empty)).toBe(false);
+  });
+
+  test('sees an external rewrite that keeps the same mtime', () => {
+    const file = path.join(root, 'cache-rewrite.json');
+    fs.writeFileSync(file, JSON.stringify({ version: 1, pairs: {} }));
+    fs.utimesSync(file, fixedTime, fixedTime);
+    expect(continuity.canResumeAcrossProviders(a, b, file)).toBe(false);
+
+    // Another process (the probe) replaces the file via rename.
+    const tmp = `${file}.other.tmp`;
+    fs.writeFileSync(
+      tmp,
+      JSON.stringify({ version: 1, pairs: { [key]: pairEntry } }),
+    );
+    fs.utimesSync(tmp, fixedTime, fixedTime);
+    fs.renameSync(tmp, file);
+
+    expect(continuity.canResumeAcrossProviders(a, b, file)).toBe(true);
+  });
+
+  test('removes its temp file when the write cannot be committed', () => {
+    const dir = path.join(root, 'cache-blocked');
+    // A non-empty directory at the target path makes rename fail.
+    const file = path.join(dir, 'matrix.json');
+    fs.mkdirSync(path.join(file, 'occupied'), { recursive: true });
+
+    expect(() =>
+      continuity.writeResumeMatrixEntries([pairEntry], file),
+    ).toThrow();
+    expect(fs.readdirSync(dir)).toEqual(['matrix.json']);
+  });
+});
+
 describe('summarizeProviderContinuity', () => {
   const a = { id: 'a', anthropicBaseUrl: '', anthropicModel: 'claude-x' };
   const b = { id: 'b', anthropicBaseUrl: '', anthropicModel: 'claude-x' };

@@ -259,6 +259,35 @@ describe('createThinkingStrippedSession', () => {
     });
   });
 
+  test('removes the temp copy when the new transcript cannot be committed', () => {
+    const dir = makeDir();
+    fs.writeFileSync(
+      path.join(dir, 'old-session.jsonl'),
+      assistant([{ type: 'thinking', thinking: 'x', signature: 's' }], {
+        uuid: 'a1',
+      }),
+    );
+    // A non-empty directory at the target path makes rename fail.
+    fs.mkdirSync(path.join(dir, `${NEW_SESSION}.jsonl`, 'occupied'), {
+      recursive: true,
+    });
+
+    const result = createThinkingStrippedSession({
+      transcriptDir: dir,
+      sessionId: 'old-session',
+      newSessionId: NEW_SESSION,
+    });
+
+    expect(result).toMatchObject({
+      created: false,
+      sessionId: 'old-session',
+      reason: 'write_failed',
+    });
+    expect(fs.readdirSync(dir).sort()).toEqual(
+      [`${NEW_SESSION}.jsonl`, 'old-session.jsonl'].sort(),
+    );
+  });
+
   test('returns the original id when the transcript is missing', () => {
     const dir = makeDir();
     const result = createThinkingStrippedSession({

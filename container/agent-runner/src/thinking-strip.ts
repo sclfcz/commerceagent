@@ -194,8 +194,13 @@ function copySessionsIndexEntry(
     };
     index.entries.push(cloned);
     const tempPath = `${indexPath}.strip-tmp`;
-    fs.writeFileSync(tempPath, JSON.stringify(index, null, 2));
-    fs.renameSync(tempPath, indexPath);
+    try {
+      fs.writeFileSync(tempPath, JSON.stringify(index, null, 2));
+      fs.renameSync(tempPath, indexPath);
+    } catch (err) {
+      fs.rmSync(tempPath, { force: true });
+      throw err;
+    }
   } catch {
     // Index maintenance is optional; the transcript copy is what resume needs.
   }
@@ -249,11 +254,17 @@ export function createThinkingStrippedSession(options: {
   const result = stripThinkingFromTranscriptContent(original, newSessionId);
   const targetPath = path.join(transcriptDir, `${newSessionId}.jsonl`);
 
+  const tempPath = `${targetPath}.strip-tmp`;
   try {
-    const tempPath = `${targetPath}.strip-tmp`;
     fs.writeFileSync(tempPath, result.content);
     fs.renameSync(tempPath, targetPath);
   } catch (err) {
+    // A half-written temp copy must not linger next to real transcripts.
+    try {
+      fs.rmSync(tempPath, { force: true });
+    } catch {
+      // Keep the original write failure as the reported outcome.
+    }
     log(
       `Thinking strip: failed to write ${targetPath}: ${err instanceof Error ? err.message : String(err)}`,
     );
