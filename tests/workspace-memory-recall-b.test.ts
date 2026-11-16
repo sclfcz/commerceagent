@@ -1,3 +1,4 @@
+import { createIsolatedTestMemoryDatabase } from './memory-pg/helpers.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,7 +22,6 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const db = await import('../src/db.js');
-const memoryPg = await import('../src/memory-pg/index.js');
 const migrations = await import('../src/memory-pg/migrations/index.js');
 const memoryStore = await import('../src/memory-store.js');
 const memoryService = await import('../src/memory-service.js');
@@ -507,11 +507,7 @@ describe('three-way snapshot', () => {
 describe('retrieval key backfill', () => {
   test('fills legacy rows once and never overwrites explicit keys', async () => {
     const dataDir = path.join(root, 'backfill-pglite');
-    const database = await memoryPg.createMemoryDatabase({
-      kind: 'pglite',
-      url: null,
-      dataDir,
-    });
+    const database = await createIsolatedTestMemoryDatabase(dataDir);
     try {
       await migrations.migrateMemoryDatabase(database);
       const at = '2026-05-01T00:00:00.000Z';

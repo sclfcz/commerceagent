@@ -351,6 +351,7 @@ npm run self-test
 - SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。
 - 容器以非 root 用户执行 Agent；修改 Dockerfile 或 entrypoint 后需要重建镜像。
 - 分布式层的测试需要 `DIST_MYSQL_TEST_URL` / `DIST_AMQP_TEST_URL` / `DIST_REDIS_TEST_URL`，未设置时自动跳过；本地环境用 `docker compose -f docker-compose.distributed.yml up -d`，一键演示用 `npm run dist:demo`。
+- Workspace Memory 外部 PG 测试用 `MEMORY_PG_TEST_URL` 开启：先运行 `docker compose -f docker-compose.distributed.yml up -d postgres`，再运行 `MEMORY_PG_TEST_URL=postgres://memtest:memtest@localhost:55432/memtest npm run test:memory-pg`。服务使用 PostgreSQL 18，宿主端口用 `MEMORY_PG_HOST_PORT` 覆盖；每个测试文件创建独立数据库并清理，测试账号需要 CREATEDB / CREATEROLE（Compose 默认账号满足）。不设置 URL 时真实 PG 用例自动跳过，`make test` 仍使用 PGlite；完整双后端验证需分别运行两条测试命令。详见 `docs/workspace-memory-v2.md` 的“真实 PostgreSQL 测试”。
 - 停止服务只能杀监听进程：`lsof -ti:PORT -sTCP:LISTEN | xargs kill`。
 - 不要使用会杀死连接方或 Docker 网络代理的宽泛端口 kill 命令。
 

@@ -235,6 +235,31 @@ export async function runMemoryConsolidation(
     owner?: string;
   } = { reason: 'manual' },
 ): Promise<ConsolidationRunSummary> {
+  return await withWorkspaceMemoryDatabase((db) =>
+    runMemoryConsolidationOnDatabase(db, options),
+  );
+}
+
+/**
+ * `runMemoryConsolidation` on a caller-provided database connection.
+ *
+ * Tests use this to run two consolidation workers, each with its own
+ * connection pool, over the same external PostgreSQL database — the deployment
+ * shape the lease protects. Product code goes through
+ * `runMemoryConsolidation`.
+ */
+export async function runMemoryConsolidationOnDatabase(
+  db: MemoryDatabase,
+  options: {
+    reason: ConsolidationRunReason;
+    now?: Date;
+    settings?: ConsolidationSettings;
+    /** Restrict the run (tests and manual triggers). */
+    workspaceJids?: string[];
+    clock?: () => Date;
+    owner?: string;
+  } = { reason: 'manual' },
+): Promise<ConsolidationRunSummary> {
   const clock = options.clock ?? (() => new Date());
   const settings = options.settings ?? resolveConsolidationSettings();
   const startedAt = (options.now ?? clock()).toISOString();
@@ -255,133 +280,155 @@ export async function runMemoryConsolidation(
     return summary;
   }
 
-  await withWorkspaceMemoryDatabase(async (db) => {
-    const stores = await db.query<{ workspace_jid: string; id: string }>(
-      `SELECT id, workspace_jid FROM workspace_memory_stores
-       ORDER BY workspace_jid`,
+  const stores = await db.query<{ workspace_jid: string; id: string }>(
+    `SELECT id, workspace_jid FROM workspace_memory_stores
+     ORDER BY workspace_jid`,
+  );
+  const wanted = options.workspaceJids ? new Set(options.workspaceJids) : null;
+  const states = new Map(
+    (await listConsolidationStates(db)).map((state) => [
+      state.workspaceJid,
+      state,
+    ]),
+  );
+  const trigramAvailable = await isTrigramSimilarityAvailable(db);
+  if (!trigramAvailable) {
+    logger.info(
+      'Workspace Memory consolidation runs without pg_trgm; similar-text duplicate groups are skipped and only exact duplicate arms are merged',
     );
-    const wanted = options.workspaceJids
-      ? new Set(options.workspaceJids)
-      : null;
-    const states = new Map(
-      (await listConsolidationStates(db)).map((state) => [
-        state.workspaceJid,
-        state,
-      ]),
-    );
-    const trigramAvailable = await isTrigramSimilarityAvailable(db);
+  }
 
-    for (const store of stores.rows) {
-      const workspaceJid = store.workspace_jid;
-      if (wanted && !wanted.has(workspaceJid)) continue;
-      if (!isConsolidationDue(states.get(workspaceJid), clock(), settings.time))
-        continue;
+  for (const store of stores.rows) {
+    const workspaceJid = store.workspace_jid;
+    if (wanted && !wanted.has(workspaceJid)) continue;
+    if (!isConsolidationDue(states.get(workspaceJid), clock(), settings.time))
+      continue;
 
-      const acquired = await acquireConsolidationLease(db, {
+    const acquired = await acquireConsolidationLease(db, {
+      workspaceJid,
+      owner,
+      now: clock(),
+      ttlMs: settings.maxRuntimeMs + 60_000,
+    });
+    if (!acquired) {
+      logger.info(
+        { workspaceJid },
+        'Workspace Memory consolidation skipped: another instance holds the lease',
+      );
+      summary.workspaces.push({
         workspaceJid,
-        owner,
-        now: clock(),
-        ttlMs: settings.maxRuntimeMs + 60_000,
+        status: 'success',
+        processed: 0,
+        merged: 0,
+        demoted: 0,
+        skippedGroups: 0,
+        error: null,
+        durationMs: 0,
+        leaseHeld: true,
       });
-      if (!acquired) {
-        logger.info(
-          { workspaceJid },
-          'Workspace Memory consolidation skipped: another instance holds the lease',
-        );
-        summary.workspaces.push({
-          workspaceJid,
-          status: 'success',
-          processed: 0,
-          merged: 0,
-          demoted: 0,
-          skippedGroups: 0,
-          error: null,
-          durationMs: 0,
-          leaseHeld: true,
-        });
-        continue;
-      }
+      continue;
+    }
 
-      const workspaceStartedAt = clock();
-      let result: WorkspaceConsolidationResult;
-      try {
-        const outcome = await consolidateWorkspace(db, {
-          workspaceJid,
-          storeId: store.id,
-          settings,
-          clock,
-          trigramAvailable,
-        });
-        result = {
-          workspaceJid,
-          status: outcome.partial ? 'partial' : 'success',
-          processed: outcome.processed,
-          merged: outcome.merged,
-          demoted: outcome.demoted,
-          skippedGroups: outcome.skippedGroups,
-          error: null,
-          durationMs: Math.max(
-            0,
-            clock().getTime() - workspaceStartedAt.getTime(),
-          ),
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger.warn(
-          { err: error, workspaceJid },
-          'Workspace Memory consolidation failed for workspace',
-        );
-        result = {
-          workspaceJid,
-          status: 'error',
-          processed: 0,
-          merged: 0,
-          demoted: 0,
-          skippedGroups: 0,
-          error: message,
-          durationMs: Math.max(
-            0,
-            clock().getTime() - workspaceStartedAt.getTime(),
-          ),
-        };
-      }
-      try {
-        await recordConsolidationRun(db, {
-          workspaceJid,
-          finishedAt: clock(),
-          status: result.status,
-          processed: result.processed,
-          merged: result.merged,
-          demoted: result.demoted,
-          skippedGroups: result.skippedGroups,
-          error: result.error,
-          durationMs: result.durationMs,
-        });
-      } catch (error) {
-        logger.warn(
-          { err: error, workspaceJid },
-          'Failed to record Workspace Memory consolidation result',
-        );
-      } finally {
+    const workspaceStartedAt = clock();
+    let result: WorkspaceConsolidationResult;
+    try {
+      // Another instance may have completed between the initial due snapshot
+      // and our lease acquisition. The lease serializes work, but does not by
+      // itself make that earlier snapshot current again.
+      const latest = await db.query<{ last_run_at: string | null }>(
+        `SELECT last_run_at FROM workspace_memory_consolidation_state
+         WHERE workspace_jid = $1`,
+        [workspaceJid],
+      );
+      if (
+        !isConsolidationDue(
+          { lastRunAt: latest.rows[0]?.last_run_at ?? null },
+          clock(),
+          settings.time,
+        )
+      ) {
         await releaseConsolidationLease(db, {
           workspaceJid,
           owner,
           now: clock(),
-        }).catch((error: unknown) =>
-          logger.warn(
-            { err: error, workspaceJid },
-            'Failed to release Workspace Memory consolidation lease',
-          ),
-        );
+        });
+        continue;
       }
-      summary.workspaces.push(result);
-      summary.processed += result.processed;
-      summary.merged += result.merged;
-      summary.demoted += result.demoted;
-      summary.skippedGroups += result.skippedGroups;
+      const outcome = await consolidateWorkspace(db, {
+        workspaceJid,
+        storeId: store.id,
+        settings,
+        clock,
+        trigramAvailable,
+      });
+      result = {
+        workspaceJid,
+        status: outcome.partial ? 'partial' : 'success',
+        processed: outcome.processed,
+        merged: outcome.merged,
+        demoted: outcome.demoted,
+        skippedGroups: outcome.skippedGroups,
+        error: null,
+        durationMs: Math.max(
+          0,
+          clock().getTime() - workspaceStartedAt.getTime(),
+        ),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(
+        { err: error, workspaceJid },
+        'Workspace Memory consolidation failed for workspace',
+      );
+      result = {
+        workspaceJid,
+        status: 'error',
+        processed: 0,
+        merged: 0,
+        demoted: 0,
+        skippedGroups: 0,
+        error: message,
+        durationMs: Math.max(
+          0,
+          clock().getTime() - workspaceStartedAt.getTime(),
+        ),
+      };
     }
-  });
-
+    try {
+      await recordConsolidationRun(db, {
+        workspaceJid,
+        finishedAt: clock(),
+        status: result.status,
+        processed: result.processed,
+        merged: result.merged,
+        demoted: result.demoted,
+        skippedGroups: result.skippedGroups,
+        error: result.error,
+        durationMs: result.durationMs,
+      });
+    } catch (error) {
+      logger.warn(
+        { err: error, workspaceJid },
+        'Failed to record Workspace Memory consolidation result',
+      );
+    } finally {
+      await releaseConsolidationLease(db, {
+        workspaceJid,
+        owner,
+        now: clock(),
+      }).catch((error: unknown) =>
+        logger.warn(
+          { err: error, workspaceJid },
+          'Failed to release Workspace Memory consolidation lease',
+        ),
+      );
+    }
+    summary.workspaces.push(result);
+    summary.processed += result.processed;
+    summary.merged += result.merged;
+    summary.demoted += result.demoted;
+    summary.skippedGroups += result.skippedGroups;
+  }
   summary.finishedAt = clock().toISOString();
   if (
     summary.merged > 0 ||

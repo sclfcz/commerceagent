@@ -46,6 +46,7 @@ export {
   nextDueInstant,
   resolveConsolidationSettings,
   runMemoryConsolidation,
+  runMemoryConsolidationOnDatabase,
   startMemoryConsolidationWorker,
   type ConsolidationRunReason,
   type ConsolidationRunSummary,

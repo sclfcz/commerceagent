@@ -384,6 +384,59 @@ Memory 页面采用 Workspace-first 流程：
 - 迁移流程必须明确目标 Workspace、kind 和 provenance，并使用 v2 写入接口。
 - 完成迁移后，SQLite 记录是唯一在线真相源，不能进行双写。
 
+## 真实 PostgreSQL 测试
+
+默认 `make test` 使用 PGlite，真实服务器用例在没有 `MEMORY_PG_TEST_URL` 时自动跳过，
+不依赖 Docker。验证两个后端时，先在未设置 `MEMORY_DATABASE_URL` 和
+`MEMORY_PG_TEST_URL` 的终端运行：
+
+```bash
+make test
+```
+
+启动 Compose 中的 PostgreSQL 18（与当前 PGlite 的 PG 主版本一致）：
+
+```bash
+docker compose -f docker-compose.distributed.yml up -d postgres --wait
+```
+
+也可以用 `docker compose -f docker-compose.distributed.yml up -d` 启动整个测试栈。
+宿主默认端口为 `55432`，通过 `MEMORY_PG_HOST_PORT` 覆盖；修改端口后需同步修改 URL。
+运行真实服务器用例和既有核心用例：
+
+```bash
+MEMORY_PG_TEST_URL=postgres://memtest:memtest@localhost:55432/memtest npm run test:memory-pg
+```
+
+`vitest.memory-pg.config.ts` 复用 routes、recall、三路召回、consolidation、extraction、
+E2E、integration-gaps 和 idempotency-race 用例。纯 `memory-recall.test.ts` 是内存中的
+算法测试，不访问数据库；其他文件通过 setup 启动真正的 `pg` 连接池，显式创建的
+迁移/回填测试库也跟随切换，不会在真实 PG 运行中混入 PGlite。这个独立配置不会改变
+普通 `make test` 的后端选择。
+
+`tests/memory-pg/helpers.ts` 为每个文件创建唯一的 `memory_test_*` 数据库，结束后
+关闭连接并删除；受限角色使用唯一的 `mem_limited_*` 名称，也在 teardown 删除。
+因此可并行运行多个文件，不清空或复用现有业务表。URL 应指向专用测试服务器，
+账号需要 CREATEDB 和 CREATEROLE；Compose 的默认测试账号满足要求。受限角色只获
+目标库的 CONNECT 和 public schema 的 CREATE/USAGE，没有数据库级 CREATE，
+从而实际触发 trusted extension `pg_trgm` 的安装权限错误。
+
+真实并发测试验证：
+
+- create/update/forget/Owner Profile 的同键同 hash 重放及不同 hash 冲突，至少 20 路
+  并发，只有一个非重放结果；不会向调用方抛出原始 23505。
+- 同一个 `expectedRevision` 的不同更新只有一个成功，其余 `revision_conflict`，
+  versions 连续；连接池 max=10 时 40 路请求仍能完成。
+- 两个独立 Worker 和连接池竞争同一个 Workspace，仅一个实际执行；包括租约被占用、
+  过期接管、旧 due 快照和单实例/多实例合并降级结果一致。
+- 缺少 `pg_trgm` 安装权限时迁移与启动成功，ILIKE 能匹配 FTS 无法命中的词内子串，
+  夜间整理继续按 canonical key 和归一化内容精确合并，跳过相似度合并并记录明确日志。
+
+外部库的 locale 也是部署约束：`pg_trgm` 如何识别中文字符取决于 `LC_CTYPE`。
+纯 `C` locale 可能不为中文生成 trigram，导致中文相似度合并与 PGlite/UTF-8 locale
+不同；中文 ILIKE 与关键词召回仍有效。需要中文相似度合并的部署应在创建数据库时
+选择支持 Unicode 字符分类的 UTF-8 locale（例如 `en_US.UTF-8`），并运行上述用例。
+
 ## 验收清单
 
 - 所有 Memory 请求都使用 `/api/workspaces` 返回的 JID，未使用 `folder`。

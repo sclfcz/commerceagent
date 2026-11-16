@@ -480,9 +480,19 @@ function isUniqueViolation(error: unknown): boolean {
  * request hash → `replayed: true`) or reports `idempotency_conflict` (different
  * hash) against the committed row, instead of returning a 500.
  *
- * Embedded PGlite serializes every statement on one connection, so the race
- * cannot happen there and the retry never triggers; it is exported so tests can
- * exercise the recovery branch that a single connection cannot produce.
+ * The same race reaches the revision compare-and-set of `update` / `forget` /
+ * the reserved Owner Profile path with a different symptom: both transactions
+ * read the same current revision, the winner commits, and the loser's CAS
+ * update matches zero rows and reports `revision_conflict` — even though the
+ * committed row it lost to is its own logical request. A single retry takes the
+ * replay branch (the failed CAS waited on the winner's row lock, so by the time
+ * it fails the winner's mutation request row is committed and visible). A
+ * genuine revision conflict — lost to a *different* request, or no winner at
+ * all — fails the retry the same way and still surfaces as `revision_conflict`.
+ *
+ * Embedded PGlite serializes every statement on one connection, so neither race
+ * can happen there and the retries never trigger; it is exported so tests can
+ * exercise the recovery branches that a single connection cannot produce.
  */
 export async function withIdempotencyRaceRecovery<T>(
   idempotencyKey: string | null | undefined,
@@ -491,11 +501,21 @@ export async function withIdempotencyRaceRecovery<T>(
   try {
     return await work();
   } catch (error) {
-    if (!normalizeNullable(idempotencyKey) || !isUniqueViolation(error)) {
+    if (
+      !normalizeNullable(idempotencyKey) ||
+      (!isUniqueViolation(error) && !isRevisionConflict(error))
+    ) {
       throw error;
     }
     return await work();
   }
+}
+
+function isRevisionConflict(error: unknown): boolean {
+  return (
+    error instanceof WorkspaceMemoryStoreError &&
+    error.code === 'revision_conflict'
+  );
 }
 
 function isReservedCanonicalKey(value: string | null | undefined): boolean {

@@ -1,3 +1,4 @@
+import { createIsolatedTestMemoryDatabase } from './memory-pg/helpers.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,7 +22,6 @@ vi.mock('../src/logger.js', () => ({
 }));
 
 const db = await import('../src/db.js');
-const memoryPg = await import('../src/memory-pg/index.js');
 const migrations = await import('../src/memory-pg/migrations/index.js');
 const memoryStore = await import('../src/memory-store.js');
 const memoryService = await import('../src/memory-service.js');
@@ -137,11 +137,9 @@ async function demoteOnce(workspaceJid: string, now: Date) {
 
 describe('migrations 1 → 2 → 3 → 4 on a fresh database', () => {
   test('the final provenance vocabulary keeps every phase’s values', async () => {
-    const database = await memoryPg.createMemoryDatabase({
-      kind: 'pglite',
-      url: null,
-      dataDir: path.join(root, 'fresh-pglite'),
-    });
+    const database = await createIsolatedTestMemoryDatabase(
+      path.join(root, 'fresh-memory'),
+    );
     try {
       const result = await migrations.migrateMemoryDatabase(database);
       expect(result.applied).toEqual([1, 2, 3, 4]);

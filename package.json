@@ -17,6 +17,7 @@
     "format:changed": "node scripts/check-format-changed.mjs --write",
     "docs:check": "node scripts/check-docs.mjs",
     "test": "vitest",
+    "test:memory-pg": "vitest run --config vitest.memory-pg.config.ts",
     "test:real-model": "tsx scripts/test-real-model-smoke.ts",
     "probe:session-continuity": "tsx scripts/probe-session-continuity.ts",
     "dist:worker": "tsx src/distributed/cli-worker.ts",

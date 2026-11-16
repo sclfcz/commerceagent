@@ -351,4 +351,67 @@ describe('withIdempotencyRaceRecovery', () => {
     ).rejects.toBe(failure);
     expect(calls).toBe(1);
   });
+
+  function revisionConflict(): memoryStore.WorkspaceMemoryStoreError {
+    return new memoryStore.WorkspaceMemoryStoreError(
+      'revision_conflict',
+      'Workspace memory item revision conflict',
+    );
+  }
+
+  test('retries once after a revision compare-and-set loss', async () => {
+    // On pooled external PostgreSQL two same-key updates can both read the
+    // same current revision; the loser's CAS update then matches zero rows
+    // (the winner's row lock was held until commit, so the winner's replay
+    // row is already visible) and the retry takes the replay branch.
+    let calls = 0;
+    const value = await memoryStore.withIdempotencyRaceRecovery(
+      'key',
+      async () => {
+        calls += 1;
+        if (calls === 1) throw revisionConflict();
+        return 'replayed';
+      },
+    );
+    expect(value).toBe('replayed');
+    expect(calls).toBe(2);
+  });
+
+  test('a genuine revision conflict still surfaces after one retry', async () => {
+    // Lost to a *different* request: the retry hits the same conflict.
+    let calls = 0;
+    await expect(
+      memoryStore.withIdempotencyRaceRecovery('key', async () => {
+        calls += 1;
+        throw revisionConflict();
+      }),
+    ).rejects.toMatchObject({ code: 'revision_conflict' });
+    expect(calls).toBe(2);
+  });
+
+  test('does not retry a revision conflict without an idempotency key', async () => {
+    let calls = 0;
+    await expect(
+      memoryStore.withIdempotencyRaceRecovery(null, async () => {
+        calls += 1;
+        throw revisionConflict();
+      }),
+    ).rejects.toMatchObject({ code: 'revision_conflict' });
+    expect(calls).toBe(1);
+  });
+
+  test('does not retry other store errors', async () => {
+    let calls = 0;
+    const failure = new memoryStore.WorkspaceMemoryStoreError(
+      'item_not_found',
+      'Workspace memory item not found',
+    );
+    await expect(
+      memoryStore.withIdempotencyRaceRecovery('key', async () => {
+        calls += 1;
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(calls).toBe(1);
+  });
 });
