@@ -102,6 +102,12 @@ Memory schema 使用独立的版本表 `workspace_memory_schema_migrations`，�
 - 创建、编辑和忘记可以携带稳定的 `idempotencyKey`。相同请求重试返回
   `replayed: true`；同一个 key 对应不同请求时返回
   `idempotency_conflict`。
+- 幂等预检与写入在同一个事务内完成，但外部 PostgreSQL 的并发请求仍可能同时
+  通过预检：后写者会触发唯一约束（`create_idempotency_key` 或
+  `mutation_requests` 主键，SQLSTATE 23505）。此时事务已回滚，服务端会重放
+  一次同一事务——先提交的记录此时可见，于是按 request hash 返回
+  `replayed: true` 或 `idempotency_conflict`，而不是 500。Owner Profile 的保留
+  mutation 走同一套恢复逻辑。PGlite 只有一个串行连接，不会出现该竞态。
 
 `validFrom`、`validUntil` 和 `expiresAt` 用于控制知识的时间有效性；`importance` 和
 `confidence` 的范围都是 0 到 1。详情字段与端点见 [API 文档](API.md#workspace-memory-v2)。

@@ -396,6 +396,45 @@ function normalizeNullable(value: string | null | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === '23505'
+  );
+}
+
+/**
+ * Recover from an idempotency race instead of failing the request.
+ *
+ * The idempotency checks read-then-insert: two concurrent mutations that carry
+ * the same key can both see no prior row, and the loser then violates a unique
+ * constraint (SQLSTATE 23505) on `workspace_memory_items.create_idempotency_key`
+ * or on the `workspace_memory_mutation_requests` primary key. On external
+ * PostgreSQL the pool runs at READ COMMITTED, so the winner commits before the
+ * loser's error surfaces and the failed transaction has already rolled back.
+ * Replaying the same transaction once therefore takes the replay branch (same
+ * request hash → `replayed: true`) or reports `idempotency_conflict` (different
+ * hash) against the committed row, instead of returning a 500.
+ *
+ * Embedded PGlite serializes every statement on one connection, so the race
+ * cannot happen there and the retry never triggers; it is exported so tests can
+ * exercise the recovery branch that a single connection cannot produce.
+ */
+export async function withIdempotencyRaceRecovery<T>(
+  idempotencyKey: string | null | undefined,
+  work: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    if (!normalizeNullable(idempotencyKey) || !isUniqueViolation(error)) {
+      throw error;
+    }
+    return await work();
+  }
+}
+
 function isReservedCanonicalKey(value: string | null | undefined): boolean {
   return (
     normalizeNullable(value) ===
@@ -1130,54 +1169,125 @@ export async function mutateCommerceAgentOwnerAddressMemory(input: {
   requestHash?: string | null;
 }): Promise<ReservedWorkspaceMemoryMutationResult> {
   const open = await ready();
-  return await open.transaction(async (sql) => {
-    const initialStore = await requireStoreWithin(sql, input.workspaceJid);
-    const currentRow = await sql.query<MemoryItemRow>(
-      `${ITEM_SELECT}
+  const run = () =>
+    open.transaction(async (sql) => {
+      const initialStore = await requireStoreWithin(sql, input.workspaceJid);
+      const currentRow = await sql.query<MemoryItemRow>(
+        `${ITEM_SELECT}
        WHERE i.store_id = $1 AND i.canonical_key = $2
        ORDER BY
          CASE WHEN i.status = 'active' THEN 0 ELSE 1 END,
          i.updated_at DESC,
          i.id DESC
        LIMIT 1`,
-      [initialStore.id, COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY],
-    );
-    const current = currentRow.rows[0] ? mapItem(currentRow.rows[0]) : null;
-    const idempotencyKey = normalizeNullable(input.idempotencyKey);
-    const preferredAddress = normalizeNullable(input.preferredAddress);
-    if (!input.clear && !preferredAddress) {
-      throw new Error('Preferred address must not be empty');
-    }
+        [initialStore.id, COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY],
+      );
+      const current = currentRow.rows[0] ? mapItem(currentRow.rows[0]) : null;
+      const idempotencyKey = normalizeNullable(input.idempotencyKey);
+      const preferredAddress = normalizeNullable(input.preferredAddress);
+      if (!input.clear && !preferredAddress) {
+        throw new Error('Preferred address must not be empty');
+      }
 
-    if (!current) {
-      if (input.clear) {
-        throw new WorkspaceMemoryStoreError(
-          'revision_conflict',
-          'CommerceAgent Owner Profile revision conflict',
-          { currentRevision: 0, storeRevision: initialStore.revision },
-        );
-      }
-      if (
-        input.expectedRevision !== undefined &&
-        input.expectedRevision !== 0
-      ) {
-        throw new WorkspaceMemoryStoreError(
-          'revision_conflict',
-          'CommerceAgent Owner Profile revision conflict',
-          { currentRevision: 0, storeRevision: initialStore.revision },
-        );
-      }
-      if (idempotencyKey) {
-        const existing = await sql.query<{
-          id: string;
-          create_request_hash: string | null;
-        }>(
-          `SELECT id, create_request_hash
+      if (!current) {
+        if (input.clear) {
+          throw new WorkspaceMemoryStoreError(
+            'revision_conflict',
+            'CommerceAgent Owner Profile revision conflict',
+            { currentRevision: 0, storeRevision: initialStore.revision },
+          );
+        }
+        if (
+          input.expectedRevision !== undefined &&
+          input.expectedRevision !== 0
+        ) {
+          throw new WorkspaceMemoryStoreError(
+            'revision_conflict',
+            'CommerceAgent Owner Profile revision conflict',
+            { currentRevision: 0, storeRevision: initialStore.revision },
+          );
+        }
+        if (idempotencyKey) {
+          const existing = await sql.query<{
+            id: string;
+            create_request_hash: string | null;
+          }>(
+            `SELECT id, create_request_hash
            FROM workspace_memory_items
            WHERE store_id = $1 AND create_idempotency_key = $2`,
-          [initialStore.id, idempotencyKey],
+            [initialStore.id, idempotencyKey],
+          );
+          const row = existing.rows[0];
+          if (row) {
+            if (
+              row.create_request_hash &&
+              input.requestHash &&
+              row.create_request_hash !== input.requestHash
+            ) {
+              throw new WorkspaceMemoryStoreError(
+                'idempotency_conflict',
+                'Idempotency key was already used for a different request',
+                { storeRevision: initialStore.revision },
+              );
+            }
+            return {
+              store: await requireStoreWithin(sql, input.workspaceJid),
+              item: await requireItemWithin(sql, initialStore, row.id),
+              replayed: true,
+              changed: true,
+            };
+          }
+        }
+
+        const at = nowIso();
+        const store = await bumpStore(sql, initialStore.id, at);
+        const itemId = newId('wmi');
+        await sql.query(
+          `INSERT INTO workspace_memory_items (
+          id, store_id, workspace_jid, kind, title, content, canonical_key,
+          status, importance, confidence, valid_from, valid_until, expires_at,
+          revision, create_idempotency_key, create_request_hash,
+          created_at, updated_at, deleted_at
+        ) VALUES ($1, $2, $3, 'fact', $4, $5, $6, 'active', 1, 1,
+          NULL, NULL, NULL, 1, $7, $8, $9, $10, NULL)`,
+          [
+            itemId,
+            store.id,
+            store.workspaceJid,
+            '主人称呼',
+            preferredAddress,
+            COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+            idempotencyKey,
+            normalizeNullable(input.requestHash),
+            at,
+            at,
+          ],
         );
-        const row = existing.rows[0];
+        await markPlatformMemoryItem(sql, itemId, at);
+        const versionItem = await requireItemWithin(sql, store, itemId);
+        await appendVersion(sql, versionItem, 'create', input.context, at);
+        const item = await requireItemWithin(sql, store, itemId);
+        await appendAuditAndOutbox(
+          sql,
+          store,
+          item,
+          'create',
+          input.context,
+          at,
+        );
+        return { store, item, replayed: false, changed: true };
+      }
+
+      if (idempotencyKey) {
+        const createReplay = await sql.query<{
+          create_request_hash: string | null;
+        }>(
+          `SELECT create_request_hash
+         FROM workspace_memory_items
+         WHERE store_id = $1 AND id = $2 AND create_idempotency_key = $3`,
+          [initialStore.id, current.id, idempotencyKey],
+        );
+        const row = createReplay.rows[0];
         if (row) {
           if (
             row.create_request_hash &&
@@ -1191,191 +1301,129 @@ export async function mutateCommerceAgentOwnerAddressMemory(input: {
             );
           }
           return {
-            store: await requireStoreWithin(sql, input.workspaceJid),
-            item: await requireItemWithin(sql, initialStore, row.id),
+            store: initialStore,
+            item: current,
             replayed: true,
             changed: true,
           };
         }
       }
 
-      const at = nowIso();
-      const store = await bumpStore(sql, initialStore.id, at);
-      const itemId = newId('wmi');
-      await sql.query(
-        `INSERT INTO workspace_memory_items (
-          id, store_id, workspace_jid, kind, title, content, canonical_key,
-          status, importance, confidence, valid_from, valid_until, expires_at,
-          revision, create_idempotency_key, create_request_hash,
-          created_at, updated_at, deleted_at
-        ) VALUES ($1, $2, $3, 'fact', $4, $5, $6, 'active', 1, 1,
-          NULL, NULL, NULL, 1, $7, $8, $9, $10, NULL)`,
-        [
-          itemId,
-          store.id,
-          store.workspaceJid,
-          '主人称呼',
-          preferredAddress,
-          COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-          idempotencyKey,
-          normalizeNullable(input.requestHash),
-          at,
-          at,
-        ],
-      );
-      await markPlatformMemoryItem(sql, itemId, at);
-      const versionItem = await requireItemWithin(sql, store, itemId);
-      await appendVersion(sql, versionItem, 'create', input.context, at);
-      const item = await requireItemWithin(sql, store, itemId);
-      await appendAuditAndOutbox(sql, store, item, 'create', input.context, at);
-      return { store, item, replayed: false, changed: true };
-    }
+      const replay = await reservedRequestReplay(sql, initialStore, {
+        itemId: current.id,
+        idempotencyKey,
+        requestHash: input.requestHash,
+      });
+      if (replay) return replay;
 
-    if (idempotencyKey) {
-      const createReplay = await sql.query<{
-        create_request_hash: string | null;
-      }>(
-        `SELECT create_request_hash
-         FROM workspace_memory_items
-         WHERE store_id = $1 AND id = $2 AND create_idempotency_key = $3`,
-        [initialStore.id, current.id, idempotencyKey],
-      );
-      const row = createReplay.rows[0];
-      if (row) {
-        if (
-          row.create_request_hash &&
-          input.requestHash &&
-          row.create_request_hash !== input.requestHash
-        ) {
-          throw new WorkspaceMemoryStoreError(
-            'idempotency_conflict',
-            'Idempotency key was already used for a different request',
-            { storeRevision: initialStore.revision },
+      if (
+        input.expectedRevision === undefined ||
+        input.expectedRevision !== current.revision
+      ) {
+        throw new WorkspaceMemoryStoreError(
+          'revision_conflict',
+          'CommerceAgent Owner Profile revision conflict',
+          {
+            currentRevision: current.revision,
+            storeRevision: initialStore.revision,
+          },
+        );
+      }
+
+      const nextStatus: WorkspaceMemoryStatus = input.clear
+        ? 'superseded'
+        : 'active';
+      const nextContent = input.clear ? current.content : preferredAddress!;
+      if (current.status === nextStatus && current.content === nextContent) {
+        if (idempotencyKey && input.requestHash) {
+          await sql.query(
+            `INSERT INTO workspace_memory_mutation_requests (
+            store_id, idempotency_key, operation, item_id, request_hash,
+            response_json, created_at
+          ) VALUES ($1, $2, 'update', $3, $4, $5, $6)`,
+            [
+              initialStore.id,
+              idempotencyKey,
+              current.id,
+              input.requestHash,
+              JSON.stringify({
+                store: initialStore,
+                item: current,
+                changed: false,
+              }),
+              nowIso(),
+            ],
           );
         }
         return {
           store: initialStore,
           item: current,
-          replayed: true,
-          changed: true,
+          replayed: false,
+          changed: false,
         };
       }
-    }
 
-    const replay = await reservedRequestReplay(sql, initialStore, {
-      itemId: current.id,
-      idempotencyKey,
-      requestHash: input.requestHash,
-    });
-    if (replay) return replay;
-
-    if (
-      input.expectedRevision === undefined ||
-      input.expectedRevision !== current.revision
-    ) {
-      throw new WorkspaceMemoryStoreError(
-        'revision_conflict',
-        'CommerceAgent Owner Profile revision conflict',
-        {
-          currentRevision: current.revision,
-          storeRevision: initialStore.revision,
-        },
-      );
-    }
-
-    const nextStatus: WorkspaceMemoryStatus = input.clear
-      ? 'superseded'
-      : 'active';
-    const nextContent = input.clear ? current.content : preferredAddress!;
-    if (current.status === nextStatus && current.content === nextContent) {
-      if (idempotencyKey && input.requestHash) {
-        await sql.query(
-          `INSERT INTO workspace_memory_mutation_requests (
-            store_id, idempotency_key, operation, item_id, request_hash,
-            response_json, created_at
-          ) VALUES ($1, $2, 'update', $3, $4, $5, $6)`,
-          [
-            initialStore.id,
-            idempotencyKey,
-            current.id,
-            input.requestHash,
-            JSON.stringify({
-              store: initialStore,
-              item: current,
-              changed: false,
-            }),
-            nowIso(),
-          ],
-        );
-      }
-      return {
-        store: initialStore,
-        item: current,
-        replayed: false,
-        changed: false,
-      };
-    }
-
-    const at = nowIso();
-    const nextRevision = current.revision + 1;
-    const result = await sql.query(
-      `UPDATE workspace_memory_items
+      const at = nowIso();
+      const nextRevision = current.revision + 1;
+      const result = await sql.query(
+        `UPDATE workspace_memory_items
        SET content = $1, status = $2, revision = $3, updated_at = $4,
            deleted_at = NULL
        WHERE store_id = $5 AND id = $6 AND revision = $7
          AND canonical_key = $8`,
-      [
-        nextContent,
-        nextStatus,
-        nextRevision,
-        at,
-        initialStore.id,
-        current.id,
-        input.expectedRevision,
-        COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-      ],
-    );
-    if (result.rowCount !== 1) {
-      const latest = await requireItemWithin(sql, initialStore, current.id);
-      throw new WorkspaceMemoryStoreError(
-        'revision_conflict',
-        'CommerceAgent Owner Profile revision conflict',
-        {
-          currentRevision: latest.revision,
-          storeRevision: (await requireStoreWithin(sql, input.workspaceJid))
-            .revision,
-        },
+        [
+          nextContent,
+          nextStatus,
+          nextRevision,
+          at,
+          initialStore.id,
+          current.id,
+          input.expectedRevision,
+          COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+        ],
       );
-    }
-    const store = await bumpStore(sql, initialStore.id, at);
-    if (current.status === 'deleted') {
-      await sql.query(
-        'DELETE FROM workspace_memory_tombstones WHERE item_id = $1',
-        [current.id],
-      );
-    }
-    const versionItem = await requireItemWithin(sql, store, current.id);
-    await appendVersion(sql, versionItem, 'update', input.context, at);
-    const item = await requireItemWithin(sql, store, current.id);
-    await appendAuditAndOutbox(sql, store, item, 'update', input.context, at);
-    if (idempotencyKey && input.requestHash) {
-      await sql.query(
-        `INSERT INTO workspace_memory_mutation_requests (
+      if (result.rowCount !== 1) {
+        const latest = await requireItemWithin(sql, initialStore, current.id);
+        throw new WorkspaceMemoryStoreError(
+          'revision_conflict',
+          'CommerceAgent Owner Profile revision conflict',
+          {
+            currentRevision: latest.revision,
+            storeRevision: (await requireStoreWithin(sql, input.workspaceJid))
+              .revision,
+          },
+        );
+      }
+      const store = await bumpStore(sql, initialStore.id, at);
+      if (current.status === 'deleted') {
+        await sql.query(
+          'DELETE FROM workspace_memory_tombstones WHERE item_id = $1',
+          [current.id],
+        );
+      }
+      const versionItem = await requireItemWithin(sql, store, current.id);
+      await appendVersion(sql, versionItem, 'update', input.context, at);
+      const item = await requireItemWithin(sql, store, current.id);
+      await appendAuditAndOutbox(sql, store, item, 'update', input.context, at);
+      if (idempotencyKey && input.requestHash) {
+        await sql.query(
+          `INSERT INTO workspace_memory_mutation_requests (
           store_id, idempotency_key, operation, item_id, request_hash,
           response_json, created_at
         ) VALUES ($1, $2, 'update', $3, $4, $5, $6)`,
-        [
-          store.id,
-          idempotencyKey,
-          item.id,
-          input.requestHash,
-          JSON.stringify({ store, item, changed: true }),
-          at,
-        ],
-      );
-    }
-    return { store, item, replayed: false, changed: true };
-  });
+          [
+            store.id,
+            idempotencyKey,
+            item.id,
+            input.requestHash,
+            JSON.stringify({ store, item, changed: true }),
+            at,
+          ],
+        );
+      }
+      return { store, item, replayed: false, changed: true };
+    });
+  return await withIdempotencyRaceRecovery(input.idempotencyKey, run);
 }
 
 export async function createWorkspaceMemoryItem(input: {
@@ -1391,79 +1439,85 @@ export async function createWorkspaceMemoryItem(input: {
 }> {
   rejectReservedCanonicalKey(input.value.canonicalKey);
   const open = await ready();
-  return await open.transaction(async (sql) => {
-    const initialStore = await requireStoreWithin(sql, input.workspaceJid);
-    const idempotencyKey = normalizeNullable(input.idempotencyKey);
-    if (idempotencyKey) {
-      const existing = await sql.query<{
-        id: string;
-        create_request_hash: string | null;
-      }>(
-        `SELECT id, create_request_hash
+  const run = () =>
+    open.transaction(async (sql) => {
+      const initialStore = await requireStoreWithin(sql, input.workspaceJid);
+      const idempotencyKey = normalizeNullable(input.idempotencyKey);
+      if (idempotencyKey) {
+        const existing = await sql.query<{
+          id: string;
+          create_request_hash: string | null;
+        }>(
+          `SELECT id, create_request_hash
          FROM workspace_memory_items
          WHERE store_id = $1 AND create_idempotency_key = $2`,
-        [initialStore.id, idempotencyKey],
-      );
-      const row = existing.rows[0];
-      if (row) {
-        const existingItem = await requireItemWithin(sql, initialStore, row.id);
-        await rejectReservedMemoryItem(sql, existingItem);
-        if (
-          row.create_request_hash &&
-          input.requestHash &&
-          row.create_request_hash !== input.requestHash
-        ) {
-          throw new WorkspaceMemoryStoreError(
-            'idempotency_conflict',
-            'Idempotency key was already used for a different request',
-            { storeRevision: initialStore.revision },
+          [initialStore.id, idempotencyKey],
+        );
+        const row = existing.rows[0];
+        if (row) {
+          const existingItem = await requireItemWithin(
+            sql,
+            initialStore,
+            row.id,
           );
+          await rejectReservedMemoryItem(sql, existingItem);
+          if (
+            row.create_request_hash &&
+            input.requestHash &&
+            row.create_request_hash !== input.requestHash
+          ) {
+            throw new WorkspaceMemoryStoreError(
+              'idempotency_conflict',
+              'Idempotency key was already used for a different request',
+              { storeRevision: initialStore.revision },
+            );
+          }
+          return {
+            store: await requireStoreWithin(sql, input.workspaceJid),
+            item: existingItem,
+            replayed: true,
+          };
         }
-        return {
-          store: await requireStoreWithin(sql, input.workspaceJid),
-          item: existingItem,
-          replayed: true,
-        };
       }
-    }
 
-    const at = nowIso();
-    const store = await bumpStore(sql, initialStore.id, at);
-    const itemId = newId('wmi');
-    await sql.query(
-      `INSERT INTO workspace_memory_items (
+      const at = nowIso();
+      const store = await bumpStore(sql, initialStore.id, at);
+      const itemId = newId('wmi');
+      await sql.query(
+        `INSERT INTO workspace_memory_items (
         id, store_id, workspace_jid, kind, title, content, canonical_key,
         status, importance, confidence, valid_from, valid_until, expires_at,
         revision, create_idempotency_key, create_request_hash,
         created_at, updated_at, deleted_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
         1, $14, $15, $16, $17, NULL)`,
-      [
-        itemId,
-        store.id,
-        store.workspaceJid,
-        input.value.kind,
-        normalizeNullable(input.value.title),
-        input.value.content.trim(),
-        normalizeNullable(input.value.canonicalKey),
-        input.value.status ?? 'active',
-        input.value.importance ?? 0.5,
-        input.value.confidence ?? 1,
-        input.value.validFrom ?? null,
-        input.value.validUntil ?? null,
-        input.value.expiresAt ?? null,
-        idempotencyKey,
-        normalizeNullable(input.requestHash),
-        at,
-        at,
-      ],
-    );
-    const versionItem = await requireItemWithin(sql, store, itemId);
-    await appendVersion(sql, versionItem, 'create', input.context, at);
-    const item = await requireItemWithin(sql, store, itemId);
-    await appendAuditAndOutbox(sql, store, item, 'create', input.context, at);
-    return { store, item, replayed: false };
-  });
+        [
+          itemId,
+          store.id,
+          store.workspaceJid,
+          input.value.kind,
+          normalizeNullable(input.value.title),
+          input.value.content.trim(),
+          normalizeNullable(input.value.canonicalKey),
+          input.value.status ?? 'active',
+          input.value.importance ?? 0.5,
+          input.value.confidence ?? 1,
+          input.value.validFrom ?? null,
+          input.value.validUntil ?? null,
+          input.value.expiresAt ?? null,
+          idempotencyKey,
+          normalizeNullable(input.requestHash),
+          at,
+          at,
+        ],
+      );
+      const versionItem = await requireItemWithin(sql, store, itemId);
+      await appendVersion(sql, versionItem, 'create', input.context, at);
+      const item = await requireItemWithin(sql, store, itemId);
+      await appendAuditAndOutbox(sql, store, item, 'create', input.context, at);
+      return { store, item, replayed: false };
+    });
+  return await withIdempotencyRaceRecovery(input.idempotencyKey, run);
 }
 
 export async function updateWorkspaceMemoryItem(input: {
@@ -1480,141 +1534,143 @@ export async function updateWorkspaceMemoryItem(input: {
   replayed: boolean;
 }> {
   const open = await ready();
-  return await open.transaction(async (sql) => {
-    const initialStore = await requireStoreWithin(sql, input.workspaceJid);
-    const current = await requireItemWithin(sql, initialStore, input.itemId);
-    await rejectReservedMemoryItem(sql, current);
-    rejectReservedCanonicalKey(input.patch.canonicalKey);
-    const idempotencyKey = normalizeNullable(input.idempotencyKey);
-    if (idempotencyKey) {
-      const replay = await sql.query<MutationReplayRow>(
-        `SELECT operation, item_id, request_hash, response_json
+  const run = () =>
+    open.transaction(async (sql) => {
+      const initialStore = await requireStoreWithin(sql, input.workspaceJid);
+      const current = await requireItemWithin(sql, initialStore, input.itemId);
+      await rejectReservedMemoryItem(sql, current);
+      rejectReservedCanonicalKey(input.patch.canonicalKey);
+      const idempotencyKey = normalizeNullable(input.idempotencyKey);
+      if (idempotencyKey) {
+        const replay = await sql.query<MutationReplayRow>(
+          `SELECT operation, item_id, request_hash, response_json
          FROM workspace_memory_mutation_requests
          WHERE store_id = $1 AND idempotency_key = $2`,
-        [initialStore.id, idempotencyKey],
-      );
-      const row = replay.rows[0];
-      if (row) {
-        if (
-          row.operation !== 'update' ||
-          row.item_id !== input.itemId ||
-          !input.requestHash ||
-          row.request_hash !== input.requestHash
-        ) {
-          throw new WorkspaceMemoryStoreError(
-            'idempotency_conflict',
-            'Idempotency key was already used for a different request',
-            { storeRevision: initialStore.revision },
-          );
+          [initialStore.id, idempotencyKey],
+        );
+        const row = replay.rows[0];
+        if (row) {
+          if (
+            row.operation !== 'update' ||
+            row.item_id !== input.itemId ||
+            !input.requestHash ||
+            row.request_hash !== input.requestHash
+          ) {
+            throw new WorkspaceMemoryStoreError(
+              'idempotency_conflict',
+              'Idempotency key was already used for a different request',
+              { storeRevision: initialStore.revision },
+            );
+          }
+          const response = JSON.parse(row.response_json) as {
+            store: WorkspaceMemoryStore;
+            item: WorkspaceMemoryItem;
+          };
+          return { ...response, replayed: true };
         }
-        const response = JSON.parse(row.response_json) as {
-          store: WorkspaceMemoryStore;
-          item: WorkspaceMemoryItem;
-        };
-        return { ...response, replayed: true };
       }
-    }
-    if (
-      current.revision !== input.expectedRevision ||
-      current.status === 'deleted'
-    ) {
-      throw new WorkspaceMemoryStoreError(
-        'revision_conflict',
-        'Workspace memory item revision conflict',
-        {
-          currentRevision: current.revision,
-          storeRevision: initialStore.revision,
-        },
-      );
-    }
+      if (
+        current.revision !== input.expectedRevision ||
+        current.status === 'deleted'
+      ) {
+        throw new WorkspaceMemoryStoreError(
+          'revision_conflict',
+          'Workspace memory item revision conflict',
+          {
+            currentRevision: current.revision,
+            storeRevision: initialStore.revision,
+          },
+        );
+      }
 
-    const at = nowIso();
-    const nextRevision = current.revision + 1;
-    const next: WorkspaceMemoryValue = {
-      kind: input.patch.kind ?? current.kind,
-      title:
-        input.patch.title === undefined ? current.title : input.patch.title,
-      content: input.patch.content ?? current.content,
-      canonicalKey:
-        input.patch.canonicalKey === undefined
-          ? current.canonicalKey
-          : input.patch.canonicalKey,
-      status: input.patch.status ?? current.status,
-      importance: input.patch.importance ?? current.importance,
-      confidence: input.patch.confidence ?? current.confidence,
-      validFrom:
-        input.patch.validFrom === undefined
-          ? current.validFrom
-          : input.patch.validFrom,
-      validUntil:
-        input.patch.validUntil === undefined
-          ? current.validUntil
-          : input.patch.validUntil,
-      expiresAt:
-        input.patch.expiresAt === undefined
-          ? current.expiresAt
-          : input.patch.expiresAt,
-    };
-    const result = await sql.query(
-      `UPDATE workspace_memory_items SET
+      const at = nowIso();
+      const nextRevision = current.revision + 1;
+      const next: WorkspaceMemoryValue = {
+        kind: input.patch.kind ?? current.kind,
+        title:
+          input.patch.title === undefined ? current.title : input.patch.title,
+        content: input.patch.content ?? current.content,
+        canonicalKey:
+          input.patch.canonicalKey === undefined
+            ? current.canonicalKey
+            : input.patch.canonicalKey,
+        status: input.patch.status ?? current.status,
+        importance: input.patch.importance ?? current.importance,
+        confidence: input.patch.confidence ?? current.confidence,
+        validFrom:
+          input.patch.validFrom === undefined
+            ? current.validFrom
+            : input.patch.validFrom,
+        validUntil:
+          input.patch.validUntil === undefined
+            ? current.validUntil
+            : input.patch.validUntil,
+        expiresAt:
+          input.patch.expiresAt === undefined
+            ? current.expiresAt
+            : input.patch.expiresAt,
+      };
+      const result = await sql.query(
+        `UPDATE workspace_memory_items SET
         kind = $1, title = $2, content = $3, canonical_key = $4, status = $5,
         importance = $6, confidence = $7, valid_from = $8, valid_until = $9,
         expires_at = $10, revision = $11, updated_at = $12
        WHERE store_id = $13 AND id = $14 AND revision = $15
          AND status <> 'deleted'`,
-      [
-        next.kind,
-        normalizeNullable(next.title),
-        next.content.trim(),
-        normalizeNullable(next.canonicalKey),
-        next.status ?? 'active',
-        next.importance ?? 0.5,
-        next.confidence ?? 1,
-        next.validFrom ?? null,
-        next.validUntil ?? null,
-        next.expiresAt ?? null,
-        nextRevision,
-        at,
-        initialStore.id,
-        current.id,
-        input.expectedRevision,
-      ],
-    );
-    if (result.rowCount !== 1) {
-      const latest = await requireItemWithin(sql, initialStore, current.id);
-      throw new WorkspaceMemoryStoreError(
-        'revision_conflict',
-        'Workspace memory item revision conflict',
-        {
-          currentRevision: latest.revision,
-          storeRevision: (await requireStoreWithin(sql, input.workspaceJid))
-            .revision,
-        },
+        [
+          next.kind,
+          normalizeNullable(next.title),
+          next.content.trim(),
+          normalizeNullable(next.canonicalKey),
+          next.status ?? 'active',
+          next.importance ?? 0.5,
+          next.confidence ?? 1,
+          next.validFrom ?? null,
+          next.validUntil ?? null,
+          next.expiresAt ?? null,
+          nextRevision,
+          at,
+          initialStore.id,
+          current.id,
+          input.expectedRevision,
+        ],
       );
-    }
-    const store = await bumpStore(sql, initialStore.id, at);
-    const versionItem = await requireItemWithin(sql, store, current.id);
-    await appendVersion(sql, versionItem, 'update', input.context, at);
-    const item = await requireItemWithin(sql, store, current.id);
-    await appendAuditAndOutbox(sql, store, item, 'update', input.context, at);
-    if (idempotencyKey && input.requestHash) {
-      await sql.query(
-        `INSERT INTO workspace_memory_mutation_requests (
+      if (result.rowCount !== 1) {
+        const latest = await requireItemWithin(sql, initialStore, current.id);
+        throw new WorkspaceMemoryStoreError(
+          'revision_conflict',
+          'Workspace memory item revision conflict',
+          {
+            currentRevision: latest.revision,
+            storeRevision: (await requireStoreWithin(sql, input.workspaceJid))
+              .revision,
+          },
+        );
+      }
+      const store = await bumpStore(sql, initialStore.id, at);
+      const versionItem = await requireItemWithin(sql, store, current.id);
+      await appendVersion(sql, versionItem, 'update', input.context, at);
+      const item = await requireItemWithin(sql, store, current.id);
+      await appendAuditAndOutbox(sql, store, item, 'update', input.context, at);
+      if (idempotencyKey && input.requestHash) {
+        await sql.query(
+          `INSERT INTO workspace_memory_mutation_requests (
           store_id, idempotency_key, operation, item_id, request_hash,
           response_json, created_at
         ) VALUES ($1, $2, 'update', $3, $4, $5, $6)`,
-        [
-          store.id,
-          idempotencyKey,
-          item.id,
-          input.requestHash,
-          JSON.stringify({ store, item }),
-          at,
-        ],
-      );
-    }
-    return { store, item, replayed: false };
-  });
+          [
+            store.id,
+            idempotencyKey,
+            item.id,
+            input.requestHash,
+            JSON.stringify({ store, item }),
+            at,
+          ],
+        );
+      }
+      return { store, item, replayed: false };
+    });
+  return await withIdempotencyRaceRecovery(input.idempotencyKey, run);
 }
 
 export async function forgetWorkspaceMemoryItem(input: {
@@ -1631,118 +1687,120 @@ export async function forgetWorkspaceMemoryItem(input: {
   replayed: boolean;
 }> {
   const open = await ready();
-  return await open.transaction(async (sql) => {
-    const initialStore = await requireStoreWithin(sql, input.workspaceJid);
-    const current = await requireItemWithin(sql, initialStore, input.itemId);
-    await rejectReservedMemoryItem(sql, current);
-    const idempotencyKey = normalizeNullable(input.idempotencyKey);
-    if (idempotencyKey) {
-      const replay = await sql.query<MutationReplayRow>(
-        `SELECT operation, item_id, request_hash, response_json
+  const run = () =>
+    open.transaction(async (sql) => {
+      const initialStore = await requireStoreWithin(sql, input.workspaceJid);
+      const current = await requireItemWithin(sql, initialStore, input.itemId);
+      await rejectReservedMemoryItem(sql, current);
+      const idempotencyKey = normalizeNullable(input.idempotencyKey);
+      if (idempotencyKey) {
+        const replay = await sql.query<MutationReplayRow>(
+          `SELECT operation, item_id, request_hash, response_json
          FROM workspace_memory_mutation_requests
          WHERE store_id = $1 AND idempotency_key = $2`,
-        [initialStore.id, idempotencyKey],
-      );
-      const row = replay.rows[0];
-      if (row) {
-        if (
-          row.operation !== 'forget' ||
-          row.item_id !== input.itemId ||
-          !input.requestHash ||
-          row.request_hash !== input.requestHash
-        ) {
-          throw new WorkspaceMemoryStoreError(
-            'idempotency_conflict',
-            'Idempotency key was already used for a different request',
-            { storeRevision: initialStore.revision },
-          );
+          [initialStore.id, idempotencyKey],
+        );
+        const row = replay.rows[0];
+        if (row) {
+          if (
+            row.operation !== 'forget' ||
+            row.item_id !== input.itemId ||
+            !input.requestHash ||
+            row.request_hash !== input.requestHash
+          ) {
+            throw new WorkspaceMemoryStoreError(
+              'idempotency_conflict',
+              'Idempotency key was already used for a different request',
+              { storeRevision: initialStore.revision },
+            );
+          }
+          const response = JSON.parse(row.response_json) as {
+            store: WorkspaceMemoryStore;
+            item: WorkspaceMemoryItem;
+          };
+          return { ...response, replayed: true };
         }
-        const response = JSON.parse(row.response_json) as {
-          store: WorkspaceMemoryStore;
-          item: WorkspaceMemoryItem;
-        };
-        return { ...response, replayed: true };
       }
-    }
-    if (
-      current.revision !== input.expectedRevision ||
-      current.status === 'deleted'
-    ) {
-      throw new WorkspaceMemoryStoreError(
-        'revision_conflict',
-        'Workspace memory item revision conflict',
-        {
-          currentRevision: current.revision,
-          storeRevision: initialStore.revision,
-        },
-      );
-    }
-    const at = nowIso();
-    const nextRevision = current.revision + 1;
-    const result = await sql.query(
-      `UPDATE workspace_memory_items
+      if (
+        current.revision !== input.expectedRevision ||
+        current.status === 'deleted'
+      ) {
+        throw new WorkspaceMemoryStoreError(
+          'revision_conflict',
+          'Workspace memory item revision conflict',
+          {
+            currentRevision: current.revision,
+            storeRevision: initialStore.revision,
+          },
+        );
+      }
+      const at = nowIso();
+      const nextRevision = current.revision + 1;
+      const result = await sql.query(
+        `UPDATE workspace_memory_items
        SET status = 'deleted', revision = $1, updated_at = $2, deleted_at = $3
        WHERE store_id = $4 AND id = $5 AND revision = $6
          AND status <> 'deleted'`,
-      [
-        nextRevision,
-        at,
-        at,
-        initialStore.id,
-        current.id,
-        input.expectedRevision,
-      ],
-    );
-    if (result.rowCount !== 1) {
-      const latest = await requireItemWithin(sql, initialStore, current.id);
-      throw new WorkspaceMemoryStoreError(
-        'revision_conflict',
-        'Workspace memory item revision conflict',
-        {
-          currentRevision: latest.revision,
-          storeRevision: (await requireStoreWithin(sql, input.workspaceJid))
-            .revision,
-        },
+        [
+          nextRevision,
+          at,
+          at,
+          initialStore.id,
+          current.id,
+          input.expectedRevision,
+        ],
       );
-    }
-    const store = await bumpStore(sql, initialStore.id, at);
-    const versionItem = await requireItemWithin(sql, store, current.id);
-    await appendVersion(sql, versionItem, 'forget', input.context, at);
-    const item = await requireItemWithin(sql, store, current.id);
-    await sql.query(
-      `INSERT INTO workspace_memory_tombstones (
+      if (result.rowCount !== 1) {
+        const latest = await requireItemWithin(sql, initialStore, current.id);
+        throw new WorkspaceMemoryStoreError(
+          'revision_conflict',
+          'Workspace memory item revision conflict',
+          {
+            currentRevision: latest.revision,
+            storeRevision: (await requireStoreWithin(sql, input.workspaceJid))
+              .revision,
+          },
+        );
+      }
+      const store = await bumpStore(sql, initialStore.id, at);
+      const versionItem = await requireItemWithin(sql, store, current.id);
+      await appendVersion(sql, versionItem, 'forget', input.context, at);
+      const item = await requireItemWithin(sql, store, current.id);
+      await sql.query(
+        `INSERT INTO workspace_memory_tombstones (
         item_id, workspace_jid, deleted_revision, reason, actor_type, actor_id,
         deleted_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        item.id,
-        item.workspaceJid,
-        item.revision,
-        normalizeNullable(input.reason),
-        input.context.sourceType,
-        input.context.actorId,
-        at,
-      ],
-    );
-    await appendAuditAndOutbox(sql, store, item, 'forget', input.context, at);
-    if (idempotencyKey && input.requestHash) {
-      await sql.query(
-        `INSERT INTO workspace_memory_mutation_requests (
-          store_id, idempotency_key, operation, item_id, request_hash,
-          response_json, created_at
-        ) VALUES ($1, $2, 'forget', $3, $4, $5, $6)`,
         [
-          store.id,
-          idempotencyKey,
           item.id,
-          input.requestHash,
-          JSON.stringify({ store, item }),
+          item.workspaceJid,
+          item.revision,
+          normalizeNullable(input.reason),
+          input.context.sourceType,
+          input.context.actorId,
           at,
         ],
       );
-    }
-    return { store, item, replayed: false };
-  });
+      await appendAuditAndOutbox(sql, store, item, 'forget', input.context, at);
+      if (idempotencyKey && input.requestHash) {
+        await sql.query(
+          `INSERT INTO workspace_memory_mutation_requests (
+          store_id, idempotency_key, operation, item_id, request_hash,
+          response_json, created_at
+        ) VALUES ($1, $2, 'forget', $3, $4, $5, $6)`,
+          [
+            store.id,
+            idempotencyKey,
+            item.id,
+            input.requestHash,
+            JSON.stringify({ store, item }),
+            at,
+          ],
+        );
+      }
+      return { store, item, replayed: false };
+    });
+  return await withIdempotencyRaceRecovery(input.idempotencyKey, run);
 }
 
 export async function listWorkspaceMemoryItems(input: {
