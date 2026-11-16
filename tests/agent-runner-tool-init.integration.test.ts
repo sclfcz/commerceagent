@@ -126,6 +126,8 @@ describe('CommerceAgent tool initialization', () => {
         'workspace_memory_remember',
         'workspace_memory_update',
         'workspace_memory_forget',
+        'workspace_memory_propose',
+        'workspace_memory_review',
         'agent_profile_list',
         'agent_profile_get',
         'agent_profile_draft_get',
@@ -153,6 +155,8 @@ describe('CommerceAgent tool initialization', () => {
         'workspace_memory_remember',
         'workspace_memory_update',
         'workspace_memory_forget',
+        'workspace_memory_propose',
+        'workspace_memory_review',
       ]),
     );
     expect(names).not.toContain('install_skill');
@@ -168,16 +172,18 @@ describe('CommerceAgent tool initialization', () => {
     ).toContain('agent_profile_publish');
   });
 
-  test('scheduled and task-triggered turns expose Workspace Memory read-only', () => {
+  test('scheduled and task-triggered turns can only propose, never write or review', () => {
     for (const names of [
       toolNames(false, { isScheduledTask: true }),
       toolNames(false, { currentTaskId: 'scheduled-group-task' }),
     ]) {
       expect(names).toContain('workspace_memory_search');
       expect(names).toContain('workspace_memory_get');
+      expect(names).toContain('workspace_memory_propose');
       expect(names).not.toContain('workspace_memory_remember');
       expect(names).not.toContain('workspace_memory_update');
       expect(names).not.toContain('workspace_memory_forget');
+      expect(names).not.toContain('workspace_memory_review');
     }
   });
 
@@ -212,7 +218,13 @@ describe('CommerceAgent tool initialization', () => {
           ANTHROPIC_API_KEY: '',
           CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
         },
-        allowedTools: ['Bash', 'Write', 'Edit', 'Task', 'mcp__commerceagent__*'],
+        allowedTools: [
+          'Bash',
+          'Write',
+          'Edit',
+          'Task',
+          'mcp__commerceagent__*',
+        ],
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         settingSources: [],

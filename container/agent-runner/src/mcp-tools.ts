@@ -216,7 +216,17 @@ const OWNER_PROFILE_RESULT_PREFIX = 'commerceagent_owner_profile_result';
 
 async function callWorkspaceMemory(
   ctx: McpContext,
-  operation: 'snapshot' | 'search' | 'get' | 'create' | 'update' | 'delete',
+  operation:
+    | 'snapshot'
+    | 'search'
+    | 'get'
+    | 'create'
+    | 'update'
+    | 'delete'
+    | 'propose'
+    | 'review_list'
+    | 'review_confirm'
+    | 'review_reject',
   payload: Record<string, unknown>,
   timeoutMs = 30_000,
 ): Promise<Record<string, unknown>> {
@@ -235,7 +245,10 @@ async function callWorkspaceMemory(
   if (
     operation === 'create' ||
     operation === 'update' ||
-    operation === 'delete'
+    operation === 'delete' ||
+    operation === 'propose' ||
+    operation === 'review_confirm' ||
+    operation === 'review_reject'
   ) {
     const auth = ctx.workspaceMemoryMutationAuth;
     if (auth) {
@@ -2662,7 +2675,16 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
       'Use commerceagent_owner_profile for the reserved owner address field',
     );
   const callMemoryTool = async (
-    operation: 'search' | 'get' | 'create' | 'update' | 'delete',
+    operation:
+      | 'search'
+      | 'get'
+      | 'create'
+      | 'update'
+      | 'delete'
+      | 'propose'
+      | 'review_list'
+      | 'review_confirm'
+      | 'review_reject',
     payload: Record<string, unknown>,
   ) => {
     try {
@@ -2808,8 +2830,99 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
             ),
           }),
       ),
+      tool(
+        'workspace_memory_review',
+        'Review Workspace Memory candidates proposed by automatic extraction or by other sessions. `list` shows pending candidates with their evidence; `confirm` makes one active memory (optionally after editing title/content); `reject` discards it. Confirmation requires the candidate revision and is only available in an interactive top-level session.',
+        {
+          action: z.enum(['list', 'confirm', 'reject']),
+          item_id: z.string().min(1).optional(),
+          expected_revision: z.number().int().min(1).optional(),
+          title: z.string().min(1).max(200).optional(),
+          content: z.string().min(1).max(20_000).optional(),
+          limit: z.number().int().min(1).max(50).optional().default(20),
+          idempotency_key: z.string().min(1).max(128).optional(),
+        },
+        async (args) => {
+          if (args.action === 'list') {
+            return callMemoryTool('review_list', { limit: args.limit });
+          }
+          if (!args.item_id || !args.expected_revision) {
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: 'item_id and expected_revision are required to confirm or reject a candidate.',
+                },
+              ],
+              isError: true,
+            };
+          }
+          if (args.action === 'confirm') {
+            return callMemoryTool('review_confirm', {
+              itemId: args.item_id,
+              expectedRevision: args.expected_revision,
+              title: args.title?.trim(),
+              content: args.content?.trim(),
+              idempotencyKey: memoryIdempotencyKey(
+                args.idempotency_key,
+                `${ctx.currentInputTurnId ?? 'turn'}:review-confirm:${args.item_id}:${args.expected_revision}`,
+              ),
+            });
+          }
+          return callMemoryTool('review_reject', {
+            itemId: args.item_id,
+            expectedRevision: args.expected_revision,
+            idempotencyKey: memoryIdempotencyKey(
+              args.idempotency_key,
+              `${ctx.currentInputTurnId ?? 'turn'}:review-reject:${args.item_id}:${args.expected_revision}`,
+            ),
+          });
+        },
+      ),
     );
   }
+
+  // Proposals are available to every context, including scheduled runs and
+  // sub-agents: a proposal is inert until a human confirms it, so it is the
+  // supported way for a non-interactive turn to hand a learning back without
+  // touching the active memory space.
+  tools.push(
+    tool(
+      'workspace_memory_propose',
+      'Propose one candidate memory for this workspace. The candidate stays `proposed` and is invisible to search/snapshot until a human confirms it in Web or through workspace_memory_review. Use it for durable learnings discovered during scheduled runs or delegated tasks; never include secrets or personal data.',
+      {
+        kind: memoryKindSchema,
+        title: z.string().min(1).max(200),
+        content: z.string().min(1).max(2_000),
+        confidence: z.number().min(0).max(1).optional().default(0.6),
+        importance: z.number().min(0).max(1).optional().default(0.5),
+        applies_when: z
+          .string()
+          .min(1)
+          .max(400)
+          .optional()
+          .describe('Required for lessons: when this lesson applies'),
+        evidence_message_ids: z.array(z.string().min(1)).max(20).optional(),
+        search_keys: z.array(z.string().min(1).max(64)).max(6).optional(),
+        idempotency_key: z.string().min(1).max(128).optional(),
+      },
+      async (args) =>
+        callMemoryTool('propose', {
+          kind: args.kind,
+          title: args.title.trim(),
+          content: args.content.trim(),
+          confidence: args.confidence,
+          importance: args.importance,
+          appliesWhen: args.applies_when?.trim(),
+          evidenceMessageIds: args.evidence_message_ids,
+          searchKeys: args.search_keys,
+          idempotencyKey: memoryIdempotencyKey(
+            args.idempotency_key,
+            `${ctx.currentInputTurnId ?? 'turn'}:propose:${args.title}`,
+          ),
+        }),
+    ),
+  );
 
   return tools;
 }

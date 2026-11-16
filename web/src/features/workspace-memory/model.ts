@@ -80,6 +80,44 @@ export interface WorkspaceMemoryCollection {
   nextCursor: string | null;
 }
 
+export type WorkspaceMemoryCandidateState =
+  | 'pending'
+  | 'confirmed'
+  | 'rejected'
+  | 'expired';
+
+/**
+ * Extraction-only annotation attached to a `proposed` item: when the lesson
+ * applies, which messages the proposal came from, and when it expires unless a
+ * human decides.
+ */
+export interface WorkspaceMemoryCandidateMetadata {
+  itemId: string;
+  workspaceJid: string;
+  sessionKey: string;
+  sessionId: string | null;
+  runId: string;
+  appliesWhen: string | null;
+  searchKeys: string[];
+  evidenceMessageIds: string[];
+  state: WorkspaceMemoryCandidateState;
+  model: string | null;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt: string | null;
+  decidedBy: string | null;
+}
+
+export interface WorkspaceMemoryCandidate {
+  item: WorkspaceMemoryItem;
+  candidate: WorkspaceMemoryCandidateMetadata;
+}
+
+export interface WorkspaceMemoryCandidateCollection {
+  storeRevision: number;
+  candidates: WorkspaceMemoryCandidate[];
+}
+
 export interface WorkspaceMemoryItemResult {
   storeRevision: number;
   item: WorkspaceMemoryItem;
@@ -146,6 +184,24 @@ export function memoryVersionsPath(
   itemId: string,
 ): string {
   return `${memoryItemPath(workspaceJid, itemId)}/versions`;
+}
+
+export function memoryCandidatesPath(workspaceJid: string): string {
+  return `/api/memory/workspaces/${encodeURIComponent(workspaceJid)}/candidates`;
+}
+
+export function memoryCandidateConfirmPath(
+  workspaceJid: string,
+  itemId: string,
+): string {
+  return `${memoryItemPath(workspaceJid, itemId)}/confirm`;
+}
+
+export function memoryCandidateRejectPath(
+  workspaceJid: string,
+  itemId: string,
+): string {
+  return `${memoryItemPath(workspaceJid, itemId)}/reject`;
 }
 
 export function revisionConflictFrom(error: unknown): RevisionConflict | null {

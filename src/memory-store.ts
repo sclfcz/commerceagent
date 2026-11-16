@@ -53,7 +53,9 @@ export type WorkspaceMemorySourceType =
   | 'web_user'
   | 'agent_runtime'
   | 'scheduled_task'
-  | 'migration';
+  | 'migration'
+  | 'agent_extraction'
+  | 'system';
 
 /** One durable Home Workspace fact completes CommerceAgent's first-wake ritual. */
 export const COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY =
@@ -2044,6 +2046,23 @@ export async function listWorkspaceMemoryVersions(input: {
     itemId: input.itemId,
     versions: rows.rows.map(mapVersion),
   };
+}
+
+/**
+ * Shared handle to the Memory database for feature modules that own auxiliary
+ * tables next to the canonical items (extraction cursors, candidate
+ * annotations — see `src/memory-candidate-store.ts`).
+ *
+ * It deliberately exposes the same `MemoryDatabase` the store itself uses so
+ * there is exactly one connection (embedded PGlite allows only one) and the
+ * migration/bootstrap state is shared. Feature modules must not open their own
+ * database, and must not start a `transaction()` while already inside one of
+ * the store's transactions (PGlite would deadlock on its single connection).
+ */
+export async function withWorkspaceMemoryDatabase<T>(
+  work: (db: MemoryDatabase) => Promise<T>,
+): Promise<T> {
+  return await work(await ready());
 }
 
 /**

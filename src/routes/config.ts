@@ -2211,6 +2211,8 @@ function toSystemSettingsResponse(
     loginLockoutMinutes: settings.loginLockoutMinutes,
     fallbackModel: settings.fallbackModel,
     blockUnverifiedModelConfigs: settings.blockUnverifiedModelConfigs,
+    memoryExtractionEnabled: settings.memoryExtractionEnabled,
+    memoryExtractionIdleMs: settings.memoryExtractionIdleMs,
     observabilityEnabled: settings.observabilityEnabled,
     observabilityEndpoint: settings.observabilityEndpoint,
     observabilityPublicKey: settings.observabilityPublicKey,

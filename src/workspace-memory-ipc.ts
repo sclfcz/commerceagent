@@ -7,7 +7,11 @@ export type WorkspaceMemoryIpcOperation =
   | 'get'
   | 'create'
   | 'update'
-  | 'delete';
+  | 'delete'
+  | 'propose'
+  | 'review_list'
+  | 'review_confirm'
+  | 'review_reject';
 
 export interface WorkspaceMemoryAuthoritativePrincipal {
   actor: WorkspaceMemoryActor;
@@ -20,10 +24,22 @@ export interface WorkspaceMemoryAuthoritativePrincipal {
   };
 }
 
-const MUTATIONS = new Set<WorkspaceMemoryIpcOperation>([
+/**
+ * Operations that can only ever touch the *active* memory space, so they are
+ * restricted to a host-admitted interactive top-level turn.
+ *
+ * `propose` is deliberately absent: it can only create a `proposed` candidate,
+ * which is invisible to snapshots, search and every active list until a human
+ * confirms it. Scheduled runs and sub-agents are therefore allowed to propose —
+ * that is the supported way for them to hand a learning back without granting
+ * them write access to what future sessions recall.
+ */
+const INTERACTIVE_ONLY_MUTATIONS = new Set<WorkspaceMemoryIpcOperation>([
   'create',
   'update',
   'delete',
+  'review_confirm',
+  'review_reject',
 ]);
 
 const UPDATE_FIELDS = [
@@ -46,7 +62,11 @@ export function workspaceMemoryWriteRejection(input: {
   runtimeAgentKind: 'task' | 'conversation' | 'spawn' | null;
   capabilityValid: boolean;
 }): { code: string; error: string } | null {
-  if (!MUTATIONS.has(input.operation as WorkspaceMemoryIpcOperation)) {
+  if (
+    !INTERACTIVE_ONLY_MUTATIONS.has(
+      input.operation as WorkspaceMemoryIpcOperation,
+    )
+  ) {
     return null;
   }
   if (input.runtimeAgentId && input.runtimeAgentKind !== 'conversation') {

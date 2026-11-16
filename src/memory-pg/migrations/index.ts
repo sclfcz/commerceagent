@@ -1,5 +1,6 @@
 import type { MemoryDatabase } from '../index.js';
 import { sql as baselineSql } from './001-baseline.js';
+import { sql as extractionSql } from './003-extraction-candidates.js';
 
 export interface MemoryMigration {
   version: number;
@@ -9,6 +10,7 @@ export interface MemoryMigration {
 
 export const MEMORY_MIGRATIONS: readonly MemoryMigration[] = [
   { version: 1, name: 'baseline', sql: baselineSql },
+  { version: 3, name: 'extraction-candidates', sql: extractionSql },
 ];
 
 export const MEMORY_SCHEMA_VERSION = Math.max(
@@ -21,7 +23,8 @@ export const MEMORY_SCHEMA_VERSION = Math.max(
  * - 001 baseline — the Workspace Memory v2 storage move to PostgreSQL.
  * - 002 reserved — phase B: write-time retrieval keywords, pinned profile
  *   segment, three-way budgeted recall.
- * - 003 reserved — phase C: post-session extraction of proposed candidates.
+ * - 003 extraction-candidates — phase C: post-session extraction cursors and
+ *   proposed-candidate annotations.
  * - 004 reserved — phase D: nightly dedupe/merge worker and open-loop expiry.
  *
  * Each phase adds exactly one file here and never edits 001, so the three
@@ -30,7 +33,7 @@ export const MEMORY_SCHEMA_VERSION = Math.max(
 export function describeReservedMigrationVersions(): Record<number, string> {
   return {
     2: 'phase B — retrieval keywords, pinned profile, budgeted recall',
-    3: 'phase C — post-session proposed memory extraction',
+    3: 'phase C — post-session proposed memory extraction (applied)',
     4: 'phase D — nightly dedupe/merge and open-loop expiry',
   };
 }

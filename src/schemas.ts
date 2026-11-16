@@ -577,6 +577,26 @@ export const WorkspaceMemoryForgetSchema = z
   })
   .strict();
 
+export const WorkspaceMemoryCandidateConfirmSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
+    kind: WorkspaceMemoryKindSchema.optional(),
+    title: WorkspaceMemoryValueFields.title,
+    content: WorkspaceMemoryValueFields.content.optional(),
+    canonicalKey: WorkspaceMemoryValueFields.canonicalKey,
+    importance: WorkspaceMemoryValueFields.importance,
+    confidence: WorkspaceMemoryValueFields.confidence,
+  })
+  .strict();
+
+export const WorkspaceMemoryCandidateRejectSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict();
+
 export const WorkspaceMemoryListQuerySchema = z
   .object({
     status: WorkspaceMemoryStatusSchema.optional(),
@@ -722,6 +742,13 @@ export const SystemSettingsSchema = z
     loginLockoutMinutes: z.number().int().min(1).max(1440).optional(),
     fallbackModel: z.string().max(64).optional(),
     blockUnverifiedModelConfigs: z.boolean().optional(),
+    memoryExtractionEnabled: z.boolean().optional(),
+    memoryExtractionIdleMs: z
+      .number()
+      .int()
+      .min(60_000)
+      .max(86_400_000)
+      .optional(),
     observabilityEnabled: z.boolean().optional(),
     observabilityEndpoint: z.string().max(512).optional(),
     observabilityPublicKey: z.string().max(256).optional(),
