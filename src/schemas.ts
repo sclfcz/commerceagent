@@ -728,6 +728,18 @@ export const SystemSettingsSchema = z
     observabilitySampleRate: z.number().min(0).max(1).optional(),
     observabilityIncludeContent: z.boolean().optional(),
     observabilitySecretKey: z.string().max(2048).optional(),
+    memoryConsolidationEnabled: z.boolean().optional(),
+    memoryConsolidationTime: z
+      .string()
+      .regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, 'Must be HH:MM (24-hour)')
+      .optional(),
+    memoryConsolidationBatchSize: z.number().int().min(1).max(1000).optional(),
+    memoryConsolidationMaxRuntimeMs: z
+      .number()
+      .int()
+      .min(10000)
+      .max(3600000)
+      .optional(),
   })
   .strict();
 

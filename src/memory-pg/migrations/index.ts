@@ -1,5 +1,6 @@
 import type { MemoryDatabase } from '../index.js';
 import { sql as baselineSql } from './001-baseline.js';
+import { sql as consolidationSql } from './004-consolidation.js';
 
 export interface MemoryMigration {
   version: number;
@@ -9,6 +10,7 @@ export interface MemoryMigration {
 
 export const MEMORY_MIGRATIONS: readonly MemoryMigration[] = [
   { version: 1, name: 'baseline', sql: baselineSql },
+  { version: 4, name: 'consolidation', sql: consolidationSql },
 ];
 
 export const MEMORY_SCHEMA_VERSION = Math.max(
@@ -22,16 +24,17 @@ export const MEMORY_SCHEMA_VERSION = Math.max(
  * - 002 reserved — phase B: write-time retrieval keywords, pinned profile
  *   segment, three-way budgeted recall.
  * - 003 reserved — phase C: post-session extraction of proposed candidates.
- * - 004 reserved — phase D: nightly dedupe/merge worker and open-loop expiry.
+ * - 004 consolidation — phase D: nightly dedupe/merge worker and expiry
+ *   demotion (`004-consolidation.ts`).
  *
- * Each phase adds exactly one file here and never edits 001, so the three
- * phases can be developed in parallel without touching the same migration.
+ * Each phase adds exactly one file here and never edits 001 or another phase's
+ * file, so the phases can be developed in parallel without touching the same
+ * migration.
  */
 export function describeReservedMigrationVersions(): Record<number, string> {
   return {
     2: 'phase B — retrieval keywords, pinned profile, budgeted recall',
     3: 'phase C — post-session proposed memory extraction',
-    4: 'phase D — nightly dedupe/merge and open-loop expiry',
   };
 }
 
