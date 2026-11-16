@@ -140,10 +140,10 @@ Memory 随 Workspace 保留，不跨 Workspace 复制。
 `/api/memory/workspaces/:workspaceJid/items*` 先要求 Login，再按 URL 中的
 Workspace JID 执行资源级授权：
 
-| 操作                           | 权限                                               |
-| ------------------------------ | -------------------------------------------------- |
-| GET 列表、搜索、详情、versions | `canAccessGroup()`，当前用户必须是 Workspace owner |
-| POST、PATCH、DELETE            | `canModifyGroup()`，当前用户必须是 Workspace owner |
+| 操作                                       | 权限                                               |
+| ------------------------------------------ | -------------------------------------------------- |
+| GET 列表、搜索、详情、versions、待确认候选 | `canAccessGroup()`，当前用户必须是 Workspace owner |
+| POST、PATCH、DELETE、confirm、reject       | `canModifyGroup()`，当前用户必须是 Workspace owner |
 
 admin 没有跨 owner bypass。目标 Workspace/item 不存在或授权失败均返回 404，不能据此
 枚举其他用户的 Workspace 或 Memory。客户端必须使用 `/api/workspaces` 返回的 JID，
@@ -151,14 +151,18 @@ admin 没有跨 owner bypass。目标 Workspace/item 不存在或授权失败均
 
 Agent Runtime 的 Workspace Memory MCP 还叠加执行上下文策略：
 
-| 执行上下文                         | 读取 | 创建、更新、忘记 |
-| ---------------------------------- | ---- | ---------------- |
-| 顶层交互式 Main/Runtime Session    | 允许 | 按 Workspace ACL |
-| Scheduled Run（group 或 isolated） | 允许 | 拒绝             |
-| SDK Task Sub-Agent                 | 允许 | 拒绝             |
+| 执行上下文                         | 读取 | propose 候选 | 创建、更新、忘记、确认/拒绝 |
+| ---------------------------------- | ---- | ------------ | --------------------------- |
+| 顶层交互式 Main/Runtime Session    | 允许 | 允许         | 按 Workspace ACL            |
+| Scheduled Run（group 或 isolated） | 允许 | 允许         | 拒绝                        |
+| SDK Task/Spawn Sub-Agent           | 允许 | 允许         | 拒绝                        |
 
-定时任务和 Sub-Agent 即使继承 Workspace owner 身份，也不能写入 Workspace Memory；
-只读限制由 MCP 暴露面与主进程 IPC broker 共同执行，不能由模型参数扩大权限。
+定时任务和 Sub-Agent 即使继承 Workspace owner 身份，也不能写入 active Memory；
+它们只能通过 `workspace_memory_propose` 写入 `proposed` 候选，候选在人工确认前不进
+入 snapshot、搜索或任何活跃列表。确认和拒绝由 `workspace_memory_review` 提供，只在
+顶层交互会话注册，并由 Sub-Agent PreToolUse hook 拒绝。限制由 MCP 暴露面与主进程
+IPC broker 共同执行，不能由模型参数扩大权限；候选确认仍要求顶层交互 turn 签发的
+HMAC 能力凭证。
 
 ### 4.6 CommerceAgent Owner Profile
 

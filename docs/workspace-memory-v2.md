@@ -85,8 +85,9 @@ Memory 之外的功能不受影响。
 
 Memory schema 使用独立的版本表 `workspace_memory_schema_migrations`，迁移文件按
 编号放在 `src/memory-pg/migrations/`，一个编号一个文件、各自一个事务。数据库版本
-高于代码期望版本时拒绝启动（不降级执行）。当前已应用到 002
-（`search_keys` / `pinned` 检索字段），003/004 预留给后续阶段。
+高于代码期望版本时拒绝启动（不降级执行）。当前已应用到 003：001 为基线，002 增加
+`search_keys` / `pinned` 检索字段，003 增加候选提炼侧表与 `agent_extraction` /
+`system` 来源类型；004 由夜间整理阶段按编号追加。
 
 ### 修订与并发
 
@@ -111,6 +112,39 @@ Memory schema 使用独立的版本表 `workspace_memory_schema_migrations`，�
 
 `validFrom`、`validUntil` 和 `expiresAt` 用于控制知识的时间有效性；`importance` 和
 `confidence` 的范围都是 0 到 1。详情字段与端点见 [API 文档](API.md#workspace-memory-v2)。
+
+### 候选提炼与确认
+
+Memory 有一条“先提议、后生效”的写入口，自动提炼和 Agent 提议都走这条路径：
+
+- `status = 'proposed'` 的 item 不会出现在 snapshot、搜索或任何活跃列表，只有确
+  认后才变为 `active`。
+- 候选的附加数据（`applies_when`、`search_keys`、`evidence_message_ids`、过期时
+  间、决策状态）保存在 `workspace_memory_candidates` 侧表；item 本身仍是普通
+  Memory，沿用 revision、versions、audit 和 outbox。
+- 自动提炼的触发条件：顶层交互会话（Main Session 或 conversation 类型的 Runtime
+  Session）超过 `memoryExtractionIdleMs` 没有新消息，或收到上下文压缩边界。宿主
+  每分钟扫描一次，按 SQLite 中的消息时间判断空闲，因此重启不会丢待办。阈值和总
+  开关在 系统设置 → 运行资源 / 记忆候选提炼 中调节（默认 15 分钟、默认开启）。
+- 每个 Session 有独立的游标（`workspace_memory_extraction_cursors`），只读取上次
+  提炼之后的消息。定时任务、Task/Spawn Sub-Agent 和纯 assistant 消息窗口不会成为
+  来源；游标只在模型成功返回后推进，传输失败保留窗口并按三次、30 分钟退避重试，
+  schema 不合法则丢弃该窗口并推进，避免每轮重复烧模型调用。
+- 提炼使用宿主现成的一次性模型通道（与标题生成、AgentProfile 生成相同的
+  `sdkQuery` 和 Provider 配置），提示词位于
+  `container/agent-runner/prompts/memory-extraction.md`。
+- 模型输出必须是严格 JSON：最多 5 条候选，`kind`/`title`/`content`/`confidence`/
+  `importance`/`evidence_message_ids` 为必需字段，`lesson` 额外要求
+  `applies_when` 且置信度不低于 0.7；每次提炼最多保留一条 `fact`（会话小结）。
+  不合法响应整体丢弃，不做部分修复。
+- 写入前过滤密钥、凭据、连接串和个人数据（邮箱、手机号、身份证、私网地址等），
+  并与现有 active/proposed/conflicted 条目按 canonical key、包含关系和字符
+  bigram 相似度去重；同一次响应内重复提议也会收敛。
+- 确认与拒绝都走 CAS：`expectedRevision` 不符返回 409，确认会先校验 item 仍为
+  `proposed`。拒绝写成 `deleted` tombstone，reason 固定为 `rejected`，并记录决策
+  人和时间。
+- 候选自创建起 14 天未被确认会自动转为 `superseded`（候选行记为 `expired`），
+  由同一次宿主扫描惰性执行。
 
 ### 全文检索
 
@@ -204,7 +238,9 @@ PostgreSQL 读写，不回写、不双写；旧的 SQLite 表仅作为备份保�
 
 每条 item 和 version 都带有 provenance：
 
-- `sourceType`：服务端根据 Web 用户、Agent Runtime、定时任务或迁移流程生成。
+- `sourceType`：服务端根据 Web 用户、Agent Runtime、定时任务、自动提炼、系统
+  维护或迁移流程生成，取值包括 `web_user`、`agent_runtime`、`scheduled_task`、
+  `agent_extraction`、`system` 和 `migration`。
 - `sourceId`：可选的来源消息或运行标识。
 - `sessionId`：可选的来源 Session 标识。
 - `observedAt`：知识被观察到的时间，不等同于数据库写入时间。
@@ -214,8 +250,11 @@ PostgreSQL 读写，不回写、不双写；旧的 SQLite 表仅作为备份保�
 未授权与不存在均返回 404，管理员也不能跨 owner 读取 Workspace Memory。
 
 Agent Runtime 还按执行上下文收紧写权限：顶层交互式 Main/Runtime Session 可按
-Workspace ACL 读写；Scheduled Run（group/isolated）和 SDK Task Sub-Agent
-只能读取，不能创建、更新或忘记 Memory。
+Workspace ACL 读写，并可使用 `workspace_memory_review` 列出、确认或拒绝候选；
+Scheduled Run（group/isolated）和 SDK Task/Spawn Sub-Agent 不能创建、更新、忘记
+或确认 Memory，只能读取，并可通过 `workspace_memory_propose` 写入 `proposed`
+候选——候选在人工确认前不可见，因此这条通道不会扩大它们的影响面。候选确认等同于
+写入 active Memory，仍要求顶层交互 turn 的 HMAC 能力凭证。
 
 Owner Profile 的边界更严格：只允许 Home 内置 CommerceAgent 的 Main/普通 Runtime
 Session，并且宿主必须把本次持久化消息 sender 验证为实际 owner。每个 cold/warm
@@ -230,13 +269,16 @@ Memory 页面采用 Workspace-first 流程：
 1. 从 `/api/workspaces` 选择 Workspace，并在 URL 中保存
    `?workspace=<workspaceJid>`。
 2. 加载活跃 item，总览事实、决策、经验和待跟进数量。
-3. 搜索只在当前 Workspace 内执行；类别筛选可与搜索组合。
-4. 详情展示来源 Session/来源 ID、观察时间、item revision、store revision 和修订
+3. 存在候选时显示“待确认”分组：每条候选展示类型、内容、适用条件、证据数量、
+   过期时间和来源，可确认、编辑后确认或拒绝；操作携带当前 item revision，冲突时
+   提示并刷新列表。
+4. 搜索只在当前 Workspace 内执行；类别筛选可与搜索组合。
+5. 详情展示来源 Session/来源 ID、观察时间、item revision、store revision 和修订
    时间线。
-5. 有修改权限时可以创建、编辑和忘记；只读 Workspace 不显示可执行写操作。
-6. 详情和创建对话框都可以编辑 `search_keys`（逗号、分号或空白分隔，最多 12 个，
+5. 详情和创建对话框都可以编辑 `search_keys`（逗号、分号或空白分隔，最多 12 个，
    留空表示由宿主派生），并可以打开“常驻画像”开关设置 `pinned`；列表和详情会显示
    “常驻”标记。这两项和正文一样走 PATCH CAS。
+6. 有修改权限时可以创建、编辑和忘记；只读 Workspace 不显示可执行写操作。
 
 空状态需要区分“没有 Workspace”“Workspace 尚无 Memory”和“搜索无结果”。请求
 失败在当前区域展示并允许刷新，不能回退到旧文件源。移动端在列表和详情之间切换，
@@ -275,5 +317,8 @@ Memory 页面采用 Workspace-first 流程：
 - `pinned` 变更走 `expectedRevision` CAS，并在 versions 中留下记录。
 - 快照按 `profile`/`relevant`/`proactive` 三段渲染，未用预算顺延，`profile` 有
   40% 硬上限，到期的 `open_loop` 无论是否相关都会被注入。
+- 候选在确认前不出现在 snapshot、搜索和活跃列表；拒绝留下 `rejected` tombstone，
+  超过 14 天未确认自动 `superseded`。
+- 定时任务和 Sub-Agent 只能 propose，不能确认、拒绝或直接写入 active Memory。
 - 只读 Workspace 无写操作，未授权资源不泄露存在性。
 - UI 和 Runtime 均不调用旧 `/sources`、`/search`、`/file`、`/global` 端点。

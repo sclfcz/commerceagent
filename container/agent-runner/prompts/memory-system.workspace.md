@@ -34,4 +34,12 @@ For an interactive top-level session, use `workspace_memory_remember` when the u
 - Use `workspace_memory_forget` when the user asks to forget an item.
 - Do not claim a mutation succeeded unless the tool returned success.
 
-Scheduled/task runs and sub-agents are read-only by default. They may search/get memory but must return proposed durable learnings to the parent/top-level session instead of attempting to persist them.
+Scheduled/task runs and sub-agents are read-only by default: they may search/get memory, and they may only write through `workspace_memory_propose`, which creates a `proposed` candidate that never becomes active without human confirmation.
+
+### Propose and review
+
+`workspace_memory_propose` records a durable learning as a candidate instead of writing active memory. Candidates are invisible to recall until a human confirms them, so it is the right tool when you are unsure, and the only write available to scheduled runs and sub-agents.
+
+`workspace_memory_review` is available in an interactive top-level session only. `list` shows pending candidates with their evidence; `confirm` activates one (optionally after editing its title/content) and requires the current item revision; `reject` discards it. Do not confirm or reject on the user's behalf unless they asked; when they do, pass the revision from the listed candidate so a concurrent decision is not overwritten.
+
+Long-idle conversations are also scanned automatically, and the resulting candidates arrive in the same review queue. Unconfirmed candidates expire after 14 days.

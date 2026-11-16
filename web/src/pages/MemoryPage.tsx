@@ -10,19 +10,23 @@ import {
   AlertTriangle,
   ArrowLeft,
   BookOpen,
+  Check,
   CheckCircle2,
   CircleDotDashed,
+  Clock,
   FileText,
   History,
   Lightbulb,
   Loader2,
   MessageSquareText,
+  Pencil,
   Pin,
   Plus,
   RefreshCw,
   Save,
   Search,
   Trash2,
+  X,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, apiFetch } from '../api/client';
@@ -63,6 +67,9 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   KIND_META,
   WORKSPACE_MEMORY_KINDS,
+  memoryCandidateConfirmPath,
+  memoryCandidateRejectPath,
+  memoryCandidatesPath,
   memoryItemPath,
   memoryItemsPath,
   memoryKindCounts,
@@ -71,6 +78,8 @@ import {
   formatSearchKeysText,
   revisionConflictFrom,
   type RevisionConflict,
+  type WorkspaceMemoryCandidate,
+  type WorkspaceMemoryCandidateCollection,
   type WorkspaceMemoryCollection,
   type WorkspaceMemoryItem,
   type WorkspaceMemoryItemResult,
@@ -113,6 +122,8 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   web_user: 'Web 用户',
   agent_runtime: 'Agent Runtime',
   scheduled_task: '定时任务',
+  agent_extraction: '自动提炼',
+  system: '系统',
   migration: '迁移',
 };
 
@@ -271,6 +282,23 @@ export function MemoryPage() {
   const [forgetOpen, setForgetOpen] = useState(false);
   const [forgetting, setForgetting] = useState(false);
 
+  const [candidates, setCandidates] = useState<WorkspaceMemoryCandidate[]>([]);
+  const [candidatesLoading, setCandidatesLoading] = useState(false);
+  const [candidatesError, setCandidatesError] = useState<string | null>(null);
+  const [decidingCandidateId, setDecidingCandidateId] = useState<string | null>(
+    null,
+  );
+  const [editingCandidate, setEditingCandidate] =
+    useState<WorkspaceMemoryCandidate | null>(null);
+  const [candidateEdit, setCandidateEdit] = useState({
+    title: '',
+    content: '',
+  });
+  const [savingCandidateEdit, setSavingCandidateEdit] = useState(false);
+  const [rejectingCandidate, setRejectingCandidate] =
+    useState<WorkspaceMemoryCandidate | null>(null);
+  const [rejecting, setRejecting] = useState(false);
+
   const activeWorkspaceRef = useRef('');
   const workspaceEpochRef = useRef(0);
   const detailTargetRef = useRef<string | null>(null);
@@ -281,6 +309,7 @@ export function MemoryPage() {
   const createGenerationRef = useRef(0);
   const saveGenerationRef = useRef(0);
   const forgetGenerationRef = useRef(0);
+  const candidateGenerationRef = useRef(0);
 
   const selectedWorkspace = useMemo(
     () =>
@@ -380,6 +409,7 @@ export function MemoryPage() {
       createGenerationRef.current += 1;
       saveGenerationRef.current += 1;
       forgetGenerationRef.current += 1;
+      candidateGenerationRef.current += 1;
 
       setSelectedWorkspaceJid(workspaceJid);
       setItems([]);
@@ -402,6 +432,14 @@ export function MemoryPage() {
       setForgetOpen(false);
       setForgetting(false);
       setSaving(false);
+      setCandidates([]);
+      setCandidatesLoading(false);
+      setCandidatesError(null);
+      setDecidingCandidateId(null);
+      setEditingCandidate(null);
+      setSavingCandidateEdit(false);
+      setRejectingCandidate(null);
+      setRejecting(false);
     },
     [syncSelectedItem],
   );
@@ -519,6 +557,49 @@ export function MemoryPage() {
     if (selectedWorkspaceJid) void loadItems();
   }, [selectedWorkspaceJid, loadItems]);
 
+  const loadCandidates = useCallback(async () => {
+    const workspaceJid = selectedWorkspaceJid;
+    const workspaceEpoch = workspaceEpochRef.current;
+    if (!workspaceJid || !isCurrentWorkspace(workspaceJid, workspaceEpoch)) {
+      setCandidates([]);
+      return;
+    }
+    const requestGeneration = ++candidateGenerationRef.current;
+    setCandidatesLoading(true);
+    try {
+      const data = await api.get<WorkspaceMemoryCandidateCollection>(
+        `${memoryCandidatesPath(workspaceJid)}?limit=50`,
+      );
+      if (
+        !isCurrentWorkspace(workspaceJid, workspaceEpoch) ||
+        candidateGenerationRef.current !== requestGeneration
+      ) {
+        return;
+      }
+      setCandidates(data.candidates);
+      setCandidatesError(null);
+    } catch (error) {
+      if (
+        !isCurrentWorkspace(workspaceJid, workspaceEpoch) ||
+        candidateGenerationRef.current !== requestGeneration
+      ) {
+        return;
+      }
+      setCandidatesError(getErrorMessage(error, '待确认记忆加载失败'));
+    } finally {
+      if (
+        isCurrentWorkspace(workspaceJid, workspaceEpoch) &&
+        candidateGenerationRef.current === requestGeneration
+      ) {
+        setCandidatesLoading(false);
+      }
+    }
+  }, [isCurrentWorkspace, selectedWorkspaceJid]);
+
+  useEffect(() => {
+    if (selectedWorkspaceJid) void loadCandidates();
+  }, [selectedWorkspaceJid, loadCandidates]);
+
   const loadSearch = useCallback(
     async (options?: { query?: string; kind?: KindFilter }) => {
       const trimmed = (options?.query ?? queryRef.current).trim();
@@ -593,10 +674,10 @@ export function MemoryPage() {
   }, [kindFilter, loadSearch, query, selectedWorkspaceJid]);
 
   const refreshMemoryView = useCallback(async () => {
-    const refreshes: Promise<void>[] = [loadItems()];
+    const refreshes: Promise<void>[] = [loadItems(), loadCandidates()];
     if (queryRef.current.trim()) refreshes.push(loadSearch());
     await Promise.all(refreshes);
-  }, [loadItems, loadSearch]);
+  }, [loadCandidates, loadItems, loadSearch]);
 
   const loadDetail = useCallback(
     async (itemId: string, options?: { discardDraft?: boolean }) => {
@@ -930,6 +1011,106 @@ export function MemoryPage() {
     }
   };
 
+  const openCandidateEdit = (candidate: WorkspaceMemoryCandidate) => {
+    setEditingCandidate(candidate);
+    setCandidateEdit({
+      title: candidate.item.title || '',
+      content: candidate.item.content,
+    });
+  };
+
+  const handleConfirmCandidate = async (
+    target: WorkspaceMemoryCandidate,
+    edits?: { title: string; content: string },
+  ) => {
+    const workspaceJid = selectedWorkspaceJid;
+    const workspaceEpoch = workspaceEpochRef.current;
+    if (!workspaceJid || !isCurrentWorkspace(workspaceJid, workspaceEpoch)) {
+      return;
+    }
+    setDecidingCandidateId(target.item.id);
+    try {
+      const result = await api.post<WorkspaceMemoryItemResult>(
+        memoryCandidateConfirmPath(workspaceJid, target.item.id),
+        {
+          expectedRevision: target.item.revision,
+          ...(edits
+            ? {
+                title: edits.title.trim() || null,
+                content: edits.content.trim(),
+              }
+            : {}),
+        },
+      );
+      if (!isCurrentWorkspace(workspaceJid, workspaceEpoch)) return;
+      setStoreRevision(result.storeRevision);
+      setEditingCandidate(null);
+      toast.success('已确认，这条记忆现在会参与召回');
+      await refreshMemoryView();
+    } catch (error) {
+      if (!isCurrentWorkspace(workspaceJid, workspaceEpoch)) return;
+      const nextConflict = revisionConflictFrom(error);
+      if (nextConflict) {
+        setEditingCandidate(null);
+        toast.error('候选已被其他人处理，请查看刷新后的列表');
+      } else {
+        toast.error(getErrorMessage(error, '确认候选记忆失败'));
+      }
+      await loadCandidates();
+    } finally {
+      if (isCurrentWorkspace(workspaceJid, workspaceEpoch)) {
+        setDecidingCandidateId(null);
+      }
+    }
+  };
+
+  const handleConfirmEditedCandidate = async () => {
+    if (!editingCandidate || !candidateEdit.content.trim()) return;
+    setSavingCandidateEdit(true);
+    try {
+      await handleConfirmCandidate(editingCandidate, candidateEdit);
+    } finally {
+      setSavingCandidateEdit(false);
+    }
+  };
+
+  const handleRejectCandidate = async () => {
+    if (!rejectingCandidate) return;
+    const candidate = rejectingCandidate;
+    const workspaceJid = selectedWorkspaceJid;
+    const workspaceEpoch = workspaceEpochRef.current;
+    if (!workspaceJid || !isCurrentWorkspace(workspaceJid, workspaceEpoch)) {
+      return;
+    }
+    setRejecting(true);
+    setDecidingCandidateId(candidate.item.id);
+    try {
+      const result = await api.post<WorkspaceMemoryItemResult>(
+        memoryCandidateRejectPath(workspaceJid, candidate.item.id),
+        { expectedRevision: candidate.item.revision },
+      );
+      if (!isCurrentWorkspace(workspaceJid, workspaceEpoch)) return;
+      setStoreRevision(result.storeRevision);
+      setRejectingCandidate(null);
+      toast.success('已拒绝，该候选不会进入记忆');
+      await refreshMemoryView();
+    } catch (error) {
+      if (!isCurrentWorkspace(workspaceJid, workspaceEpoch)) return;
+      setRejectingCandidate(null);
+      if (revisionConflictFrom(error)) {
+        toast.error('候选已被其他人处理，请查看刷新后的列表');
+      } else {
+        toast.error(getErrorMessage(error, '拒绝候选记忆失败'));
+      }
+      await loadCandidates();
+    } finally {
+      if (isCurrentWorkspace(workspaceJid, workspaceEpoch)) {
+        setRejecting(false);
+        setDecidingCandidateId(null);
+      }
+    }
+  };
+
   const reloadAfterConflict = async () => {
     if (!selectedItem) return;
     await loadDetail(selectedItem.id, { discardDraft: true });
@@ -1127,6 +1308,124 @@ export function MemoryPage() {
                 </div>
               </CardContent>
             </Card>
+
+            {candidates.length > 0 && (
+              <Card>
+                <CardContent className="space-y-3">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <h2 className="flex items-center gap-2 font-semibold text-foreground">
+                        <Clock className="size-4 text-primary" />
+                        待确认
+                        <Badge variant="secondary">{candidates.length}</Badge>
+                      </h2>
+                      <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+                        自动提炼或 Agent 提议的记忆。确认后才会参与召回；超过 14
+                        天未处理的候选会自动过期。
+                      </p>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => void loadCandidates()}
+                      disabled={candidatesLoading}
+                    >
+                      <RefreshCw
+                        className={candidatesLoading ? 'animate-spin' : ''}
+                      />
+                      刷新
+                    </Button>
+                  </div>
+
+                  {candidatesError && (
+                    <div
+                      role="alert"
+                      className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs text-destructive"
+                    >
+                      {candidatesError}
+                    </div>
+                  )}
+
+                  <div className="grid gap-2 lg:grid-cols-2">
+                    {candidates.map(({ item, candidate }) => {
+                      const busy = decidingCandidateId === item.id;
+                      return (
+                        <div
+                          key={item.id}
+                          className="flex flex-col gap-2 rounded-xl border border-border bg-muted/30 p-3"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm font-semibold text-foreground">
+                                {item.title?.trim() ||
+                                  item.content.split('\n')[0] ||
+                                  '未命名候选'}
+                              </div>
+                              <p className="mt-1 line-clamp-3 text-xs leading-5 text-muted-foreground">
+                                {item.content}
+                              </p>
+                            </div>
+                            <MemoryKindBadge kind={item.kind} />
+                          </div>
+                          {candidate.appliesWhen && (
+                            <p className="rounded-lg bg-primary/5 px-2 py-1 text-[11px] leading-5 text-primary">
+                              适用：{candidate.appliesWhen}
+                            </p>
+                          )}
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                            <span>{provenanceLabel(item.provenance)}</span>
+                            <span aria-hidden="true">·</span>
+                            <span>
+                              {candidate.evidenceMessageIds.length} 条证据
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span>{formatTime(candidate.expiresAt)} 过期</span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                              size="sm"
+                              disabled={!canModify || busy}
+                              onClick={() =>
+                                void handleConfirmCandidate({ item, candidate })
+                              }
+                            >
+                              {busy ? (
+                                <Loader2 className="animate-spin" />
+                              ) : (
+                                <Check />
+                              )}
+                              确认
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={!canModify || busy}
+                              onClick={() =>
+                                openCandidateEdit({ item, candidate })
+                              }
+                            >
+                              <Pencil />
+                              编辑后确认
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={!canModify || busy}
+                              onClick={() =>
+                                setRejectingCandidate({ item, candidate })
+                              }
+                            >
+                              <X />
+                              拒绝
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-[380px_1fr]">
               {(!isMobile || !showDetail) && (
@@ -1698,6 +1997,108 @@ export function MemoryPage() {
             >
               {forgetting && <Loader2 className="animate-spin" />}
               确认忘记
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Dialog
+        open={editingCandidate !== null}
+        onOpenChange={(open) => {
+          if (!open && !savingCandidateEdit) setEditingCandidate(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>编辑后确认</DialogTitle>
+            <DialogDescription>
+              修改后的内容会作为活跃记忆写入{' '}
+              {selectedWorkspace?.name || '当前工作区'}
+              ，原始提议仍保留在修订记录中。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label htmlFor="candidate-edit-title">标题（可选）</Label>
+              <Input
+                id="candidate-edit-title"
+                className="mt-1.5"
+                value={candidateEdit.title}
+                onChange={(event) =>
+                  setCandidateEdit((current) => ({
+                    ...current,
+                    title: event.target.value,
+                  }))
+                }
+                disabled={savingCandidateEdit}
+              />
+            </div>
+            <div>
+              <Label htmlFor="candidate-edit-content">内容</Label>
+              <Textarea
+                id="candidate-edit-content"
+                className="mt-1.5 min-h-36"
+                value={candidateEdit.content}
+                onChange={(event) =>
+                  setCandidateEdit((current) => ({
+                    ...current,
+                    content: event.target.value,
+                  }))
+                }
+                disabled={savingCandidateEdit}
+              />
+            </div>
+            {editingCandidate?.candidate.appliesWhen && (
+              <p className="rounded-lg bg-primary/5 px-3 py-2 text-xs leading-5 text-primary">
+                适用条件：{editingCandidate.candidate.appliesWhen}
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setEditingCandidate(null)}
+              disabled={savingCandidateEdit}
+            >
+              取消
+            </Button>
+            <Button
+              onClick={() => void handleConfirmEditedCandidate()}
+              disabled={!candidateEdit.content.trim() || savingCandidateEdit}
+            >
+              {savingCandidateEdit && <Loader2 className="animate-spin" />}
+              确认并保存
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={rejectingCandidate !== null}
+        onOpenChange={(open) => {
+          if (!open && !rejecting) setRejectingCandidate(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>拒绝这条候选记忆？</AlertDialogTitle>
+            <AlertDialogDescription>
+              它不会进入召回，来源 Session
+              与聊天历史不受影响。拒绝会记录审计与墓碑，之后同样的内容再次被提炼时仍会出现在待确认列表。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={rejecting}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={rejecting}
+              onClick={(event) => {
+                event.preventDefault();
+                void handleRejectCandidate();
+              }}
+            >
+              {rejecting && <Loader2 className="animate-spin" />}
+              确认拒绝
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

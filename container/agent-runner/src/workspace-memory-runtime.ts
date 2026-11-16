@@ -3,10 +3,18 @@ import type {
   PreToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 
+/**
+ * Tools that act on the active memory space or decide a candidate's fate.
+ *
+ * `workspace_memory_propose` is intentionally absent: a proposal only creates an
+ * inert `proposed` candidate, so sub-agents are allowed to use it. Reviewing —
+ * confirming or rejecting — is reserved for the human-driven top-level turn.
+ */
 const WRITE_TOOLS = new Set([
   'mcp__commerceagent__workspace_memory_remember',
   'mcp__commerceagent__workspace_memory_update',
   'mcp__commerceagent__workspace_memory_forget',
+  'mcp__commerceagent__workspace_memory_review',
 ]);
 const OWNER_PROFILE_TOOLS = new Set([
   'mcp__commerceagent__commerceagent_owner_profile',

@@ -2307,7 +2307,9 @@ async function runQueryAttempt(
       tool === 'mcp__commerceagent__workspace_memory_get' ||
       tool === 'mcp__commerceagent__workspace_memory_remember' ||
       tool === 'mcp__commerceagent__workspace_memory_update' ||
-      tool === 'mcp__commerceagent__workspace_memory_forget',
+      tool === 'mcp__commerceagent__workspace_memory_forget' ||
+      tool === 'mcp__commerceagent__workspace_memory_propose' ||
+      tool === 'mcp__commerceagent__workspace_memory_review',
   );
   const hasWebTools = allowedTools.some(
     (tool) => tool === 'WebSearch' || tool === 'WebFetch',

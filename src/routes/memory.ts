@@ -4,6 +4,8 @@ import { bodyLimit } from 'hono/body-limit';
 import type { Variables } from '../web-context.js';
 import { authMiddleware } from '../middleware/auth.js';
 import {
+  WorkspaceMemoryCandidateConfirmSchema,
+  WorkspaceMemoryCandidateRejectSchema,
   WorkspaceMemoryCreateSchema,
   WorkspaceMemoryForgetSchema,
   WorkspaceMemoryListQuerySchema,
@@ -12,11 +14,14 @@ import {
   WorkspaceMemoryVersionsQuerySchema,
 } from '../schemas.js';
 import {
+  confirmWorkspaceMemoryCandidate,
   createWorkspaceMemory,
   forgetWorkspaceMemory,
   getWorkspaceMemory,
   listWorkspaceMemory,
+  listWorkspaceMemoryCandidates,
   listWorkspaceMemoryVersions,
+  rejectWorkspaceMemoryCandidate,
   searchWorkspaceMemory,
   updateWorkspaceMemory,
   WorkspaceMemoryServiceError,
@@ -205,6 +210,72 @@ memoryRoutes.delete('/workspaces/:workspaceJid/items/:itemId', async (c) => {
     return serviceError(c, error);
   }
 });
+
+memoryRoutes.get('/workspaces/:workspaceJid/candidates', async (c) => {
+  try {
+    const user = c.get('user') as AuthUser;
+    const limitRaw = c.req.query('limit');
+    const limit = limitRaw === undefined ? undefined : Number(limitRaw);
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) {
+      return validationError(c, { limit: 'limit must be a positive integer' });
+    }
+    return c.json(
+      await listWorkspaceMemoryCandidates({
+        actor: actor(user),
+        workspaceJid: c.req.param('workspaceJid'),
+        limit,
+      }),
+    );
+  } catch (error) {
+    return serviceError(c, error);
+  }
+});
+
+memoryRoutes.post(
+  '/workspaces/:workspaceJid/items/:itemId/confirm',
+  async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = WorkspaceMemoryCandidateConfirmSchema.safeParse(body);
+    if (!parsed.success) return validationError(c, parsed.error.format());
+    try {
+      const user = c.get('user') as AuthUser;
+      return c.json(
+        await confirmWorkspaceMemoryCandidate({
+          actor: actor(user),
+          workspaceJid: c.req.param('workspaceJid'),
+          itemId: c.req.param('itemId'),
+          sourceType: 'web_user',
+          ...parsed.data,
+        }),
+      );
+    } catch (error) {
+      return serviceError(c, error);
+    }
+  },
+);
+
+memoryRoutes.post(
+  '/workspaces/:workspaceJid/items/:itemId/reject',
+  async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = WorkspaceMemoryCandidateRejectSchema.safeParse(body);
+    if (!parsed.success) return validationError(c, parsed.error.format());
+    try {
+      const user = c.get('user') as AuthUser;
+      return c.json(
+        await rejectWorkspaceMemoryCandidate({
+          actor: actor(user),
+          workspaceJid: c.req.param('workspaceJid'),
+          itemId: c.req.param('itemId'),
+          sourceType: 'web_user',
+          ...parsed.data,
+        }),
+      );
+    } catch (error) {
+      return serviceError(c, error);
+    }
+  },
+);
 
 const legacyMemoryGone = (c: Context) =>
   c.json(

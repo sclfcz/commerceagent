@@ -4290,6 +4290,76 @@ export function getMessagesSince(
   return rows.map((row) => normalizeMessageRow(row));
 }
 
+export interface MemoryExtractionMessage {
+  id: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: boolean;
+  source_kind: string | null;
+}
+
+/**
+ * Messages after an extraction cursor for one conversational session.
+ *
+ * Unlike `getMessagesSince` (inbound only) this includes the assistant's own
+ * final answers, because a session summary has to describe what was concluded,
+ * not just what was asked. Scheduled-task turns, slash commands and queued
+ * follow-ups are excluded here so a scheduled run can never become the source
+ * of a candidate — extraction is for human-initiated conversation only.
+ */
+export function getMemoryExtractionMessages(
+  chatJid: string,
+  cursor: MessageCursor,
+  limit: number,
+): MemoryExtractionMessage[] {
+  const rows = db
+    .prepare(
+      `SELECT id, sender, sender_name, content, timestamp, is_from_me, source_kind
+       FROM messages
+       WHERE chat_jid = ?
+         AND (timestamp > ? OR (timestamp = ? AND id > ?))
+         AND task_id IS NULL
+         AND COALESCE(source_kind, '') NOT IN ('user_command', 'scheduled_task_prompt')
+         AND COALESCE(delivery_status, '') NOT IN ('queued', 'promoting', 'cancelled')
+       ORDER BY timestamp ASC, id ASC
+       LIMIT ?`,
+    )
+    .all(
+      chatJid,
+      cursor.timestamp,
+      cursor.timestamp,
+      cursor.id,
+      limit,
+    ) as Array<{
+    id: string;
+    sender: string;
+    sender_name: string;
+    content: unknown;
+    timestamp: string;
+    is_from_me: number;
+    source_kind: string | null;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    sender: row.sender,
+    sender_name: row.sender_name,
+    content: toUtf8String(row.content, 'messages.content'),
+    timestamp: row.timestamp,
+    is_from_me: row.is_from_me === 1,
+    source_kind: row.source_kind,
+  }));
+}
+
+/** Latest stored message timestamp for a chat, or null when it has none. */
+export function getChatLatestMessageTimestamp(chatJid: string): string | null {
+  const row = db
+    .prepare('SELECT MAX(timestamp) AS latest FROM messages WHERE chat_jid = ?')
+    .get(chatJid) as { latest: string | null } | undefined;
+  return row?.latest ?? null;
+}
+
 type CreateTaskInput = Omit<
   ScheduledTask,
   'last_run' | 'last_result' | 'revision' | 'updated_at' | 'deleted_at'

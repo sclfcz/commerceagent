@@ -3972,6 +3972,15 @@ export interface SystemSettings {
   // false = 关闭定时扫描，admin 仍可手点 POST /api/plugins/catalog/scan。
   // 适用于不希望本机私有 plugin 自动入共享 catalog 的环境。
   pluginAutoScan: boolean;
+  // Post-session Workspace Memory extraction (phase C). When enabled, a
+  // top-level interactive session that has been idle for `memoryExtractionIdleMs`
+  // (or that is about to compact) is asked once for candidate memories. The
+  // candidates are written as `proposed` and only become active after a human
+  // confirms them, so disabling this only stops new suggestions.
+  memoryExtractionEnabled: boolean;
+  // Idle threshold for extraction. Deliberately separate from `idleTimeout`,
+  // which governs warm-runner reclamation and is far longer.
+  memoryExtractionIdleMs: number;
   observabilityEnabled: boolean;
   observabilityEndpoint: string;
   observabilityPublicKey: string;
@@ -4007,6 +4016,8 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   fallbackModel: '',
   blockUnverifiedModelConfigs: false,
   pluginAutoScan: true,
+  memoryExtractionEnabled: true,
+  memoryExtractionIdleMs: 900_000,
   observabilityEnabled: false,
   observabilityEndpoint: '',
   observabilityPublicKey: '',
@@ -4258,6 +4269,16 @@ function normalizeSystemSettings(
       'pluginAutoScan',
       DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,
     ),
+    memoryExtractionEnabled: booleanField(
+      'memoryExtractionEnabled',
+      DEFAULT_SYSTEM_SETTINGS.memoryExtractionEnabled,
+    ),
+    memoryExtractionIdleMs: numberField(
+      'memoryExtractionIdleMs',
+      DEFAULT_SYSTEM_SETTINGS.memoryExtractionIdleMs,
+      60_000,
+      86_400_000,
+    ),
     observabilityEnabled: booleanField(
       'observabilityEnabled',
       DEFAULT_SYSTEM_SETTINGS.observabilityEnabled,
@@ -4413,6 +4434,8 @@ function buildEnvFallbackSettings(): SystemSettings {
         process.env.AUTO_COMPACT_PERCENTAGE,
       fallbackModel: process.env.FALLBACK_MODEL,
       pluginAutoScan: process.env.PLUGIN_AUTO_SCAN,
+      memoryExtractionEnabled: process.env.MEMORY_EXTRACTION_ENABLED,
+      memoryExtractionIdleMs: process.env.MEMORY_EXTRACTION_IDLE_MS,
       observabilityEnabled: process.env.COMMERCEAGENT_OTEL_ENABLED,
       observabilityEndpoint: process.env.COMMERCEAGENT_OTEL_ENDPOINT,
       observabilityPublicKey: process.env.COMMERCEAGENT_OTEL_PUBLIC_KEY,

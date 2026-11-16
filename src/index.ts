@@ -196,14 +196,28 @@ import {
   updateQueuedFollowUpContent,
 } from './db.js';
 import {
+  confirmWorkspaceMemoryCandidate,
   createWorkspaceMemory,
   forgetWorkspaceMemory,
   getWorkspaceMemory,
   getWorkspaceMemorySnapshot,
+  listWorkspaceMemoryCandidates,
+  rejectWorkspaceMemoryCandidate,
   searchWorkspaceMemory,
   updateWorkspaceMemory,
   WorkspaceMemoryServiceError,
 } from './memory-service.js';
+import {
+  MEMORY_EXTRACTION_CANDIDATE_TTL_DAYS,
+  MEMORY_EXTRACTION_MAX_CONTENT_CHARS,
+  MEMORY_EXTRACTION_MAX_TITLE_CHARS,
+} from './memory-extraction/config.js';
+import { containsSensitiveContent } from './memory-extraction/filters.js';
+import { createWorkspaceMemoryCandidate } from './memory-candidate-store.js';
+import {
+  extractBeforeCompaction,
+  startMemoryExtractionLoop,
+} from './memory-extraction/index.js';
 import {
   closeWorkspaceMemoryStore,
   initWorkspaceMemoryStore,
@@ -7154,6 +7168,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               broadcastStreamEvent(chatJid, result.streamEvent);
             }
 
+            // Context compaction is about to drop detail from this session.
+            // Extract what the cursor has not consumed yet, once, before the
+            // detail is gone. Scheduled-task turns are not extraction sources.
+            if (
+              result.streamEvent.eventType === 'compact_boundary' &&
+              !lastProcessed.task_id
+            ) {
+              void extractBeforeCompaction(chatJid);
+            }
+
             // ── 累积 text_delta / thinking_delta 文本（中断时用于保存已输出内容）──
             // 仅累积主 Agent 文本（无 parentToolUseId）。子 Agent（SDK Task）的
             // 中间文本带 parentToolUseId，混入会污染飞书主卡片正文与 interrupt_partial。
@@ -11530,6 +11554,11 @@ async function processTaskIpc(
     validFrom?: string | null;
     validUntil?: string | null;
     expiresAt?: string | null;
+    // Candidate-only annotations (lesson applicability and the messages a
+    // proposal was derived from). `searchKeys` above is shared by both the
+    // item fields and candidate annotations.
+    appliesWhen?: string;
+    evidenceMessageIds?: string[];
     patch?: Record<string, unknown>;
     sessionId?: string;
     timestamp?: string;
@@ -11930,7 +11959,9 @@ async function processTaskIpc(
         const mutationOperation =
           data.operation === 'create' ||
           data.operation === 'update' ||
-          data.operation === 'delete';
+          data.operation === 'delete' ||
+          data.operation === 'review_confirm' ||
+          data.operation === 'review_reject';
         const capabilityValid =
           mutationOperation &&
           (!ipcAgentId || runtimeAgentKind === 'conversation') &&
@@ -12041,6 +12072,177 @@ async function processTaskIpc(
               idempotencyKey: data.idempotencyKey,
             });
             break;
+          case 'propose': {
+            // Model-initiated proposal: allowed from any admitted runner turn
+            // (interactive, scheduled, task/spawn sub-agent) because it can
+            // only create a `proposed` candidate. It never becomes active
+            // without a human confirmation through Web or review_confirm.
+            const kind = data.kind;
+            if (
+              kind !== 'fact' &&
+              kind !== 'decision' &&
+              kind !== 'lesson' &&
+              kind !== 'open_loop'
+            ) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'Invalid memory kind',
+              );
+            }
+            const content =
+              typeof data.content === 'string' ? data.content.trim() : '';
+            if (
+              !content ||
+              content.length > MEMORY_EXTRACTION_MAX_CONTENT_CHARS
+            ) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'Proposed memory content is empty or too long',
+              );
+            }
+            const title =
+              typeof data.title === 'string' && data.title.trim()
+                ? data.title.trim().slice(0, MEMORY_EXTRACTION_MAX_TITLE_CHARS)
+                : null;
+            const appliesWhen =
+              typeof data.appliesWhen === 'string' && data.appliesWhen.trim()
+                ? data.appliesWhen.trim().slice(0, 400)
+                : null;
+            if (kind === 'lesson' && !appliesWhen) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'A lesson proposal must include appliesWhen',
+              );
+            }
+            if (containsSensitiveContent(`${title ?? ''}\n${content}`)) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'Proposed memory contains secrets or personal data',
+              );
+            }
+            const confidence =
+              typeof data.confidence === 'number' &&
+              data.confidence >= 0 &&
+              data.confidence <= 1
+                ? data.confidence
+                : 0.6;
+            const importance =
+              typeof data.importance === 'number' &&
+              data.importance >= 0 &&
+              data.importance <= 1
+                ? data.importance
+                : 0.5;
+            const searchKeys = Array.isArray(data.searchKeys)
+              ? data.searchKeys
+                  .filter((key): key is string => typeof key === 'string')
+                  .slice(0, 6)
+              : [];
+            const evidenceMessageIds = Array.isArray(data.evidenceMessageIds)
+              ? data.evidenceMessageIds
+                  .filter((id): id is string => typeof id === 'string')
+                  .slice(0, 20)
+              : [];
+            const created = await createWorkspaceMemoryCandidate({
+              workspaceJid,
+              // Host-derived session key; never trust a model-supplied JID.
+              sessionKey: `${workspaceJid}${ipcAgentId ? `#agent:${ipcAgentId}` : ''}`,
+              sessionId:
+                typeof data.sessionId === 'string' ? data.sessionId : null,
+              runId: `agent_propose_${String(data.requestId)}`,
+              kind,
+              title,
+              content,
+              confidence,
+              importance,
+              appliesWhen,
+              searchKeys,
+              evidenceMessageIds,
+              ttlDays: MEMORY_EXTRACTION_CANDIDATE_TTL_DAYS,
+              sourceType,
+              actorId: actor.id,
+              idempotencyKey:
+                typeof data.idempotencyKey === 'string'
+                  ? data.idempotencyKey
+                  : `propose:${String(data.requestId)}`,
+              requestHash: crypto
+                .createHash('sha256')
+                .update(JSON.stringify({ kind, title, content }))
+                .digest('hex'),
+            });
+            result = {
+              item: created.item,
+              candidate: created.candidate,
+              replayed: created.replayed,
+            };
+            break;
+          }
+          case 'review_list':
+            result = await listWorkspaceMemoryCandidates({
+              ...base,
+              limit:
+                typeof data.limit === 'number'
+                  ? Math.trunc(data.limit)
+                  : undefined,
+            });
+            break;
+          case 'review_confirm': {
+            if (
+              !Number.isInteger(data.expectedRevision) ||
+              (data.expectedRevision ?? 0) < 1
+            ) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'expectedRevision must be a positive integer',
+              );
+            }
+            result = await confirmWorkspaceMemoryCandidate({
+              ...base,
+              ...mutation,
+              itemId: data.itemId ?? '',
+              expectedRevision: data.expectedRevision as number,
+              kind: data.kind as
+                | 'fact'
+                | 'decision'
+                | 'lesson'
+                | 'open_loop'
+                | undefined,
+              title:
+                data.title === undefined
+                  ? undefined
+                  : (data.title as string | null),
+              content:
+                data.content === undefined
+                  ? undefined
+                  : (data.content as string),
+              idempotencyKey:
+                typeof data.idempotencyKey === 'string'
+                  ? data.idempotencyKey
+                  : undefined,
+            });
+            break;
+          }
+          case 'review_reject': {
+            if (
+              !Number.isInteger(data.expectedRevision) ||
+              (data.expectedRevision ?? 0) < 1
+            ) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'expectedRevision must be a positive integer',
+              );
+            }
+            result = await rejectWorkspaceMemoryCandidate({
+              ...base,
+              ...mutation,
+              itemId: data.itemId ?? '',
+              expectedRevision: data.expectedRevision as number,
+              idempotencyKey:
+                typeof data.idempotencyKey === 'string'
+                  ? data.idempotencyKey
+                  : undefined,
+            });
+            break;
+          }
           default:
             throw new WorkspaceMemoryServiceError(
               'invalid_request',
@@ -15397,6 +15599,12 @@ async function processAgentConversationTurn(
       }
       if (shouldBroadcastSdkStreamEvent(interactionMode, output.streamEvent)) {
         broadcastStreamEvent(chatJid, output.streamEvent, agentId);
+      }
+
+      // Runtime Sessions compact their own context; extract the not-yet-
+      // consumed window before that detail is summarized away.
+      if (output.streamEvent?.eventType === 'compact_boundary') {
+        void extractBeforeCompaction(virtualChatJid);
       }
 
       // ── Feed stream events into Feishu streaming card ──
@@ -21478,6 +21686,9 @@ async function main(): Promise<void> {
   startIpcWatcher();
   startStreamingBuffer();
   startMessageLoop();
+  // Post-session Workspace Memory extraction (idle sweep + 14-day candidate
+  // expiry). It only ever writes `proposed` candidates.
+  startMemoryExtractionLoop();
 
   // Start Feishu group sync if any connection is active
   if (anyFeishuConnected) {

@@ -5,6 +5,7 @@ import {
   forgetWorkspaceMemoryItem,
   getMutableWorkspaceMemoryItem,
   getWorkspaceMemoryItem,
+  getWorkspaceMemoryStore,
   listRecallableWorkspaceMemoryItems,
   listWorkspaceMemoryItems,
   listWorkspaceMemoryVersions as listVersionsFromStore,
@@ -26,6 +27,10 @@ import {
   planWorkspaceMemoryRecall,
   type WorkspaceMemoryRecallSegment,
 } from './memory-recall.js';
+import {
+  listProposedWorkspaceMemoryCandidates,
+  setWorkspaceMemoryCandidateState,
+} from './memory-candidate-store.js';
 import { canAccessGroup, canModifyGroup } from './web-context.js';
 import type { UserRole } from './types.js';
 
@@ -64,6 +69,8 @@ const SOURCE_TYPES = new Set<WorkspaceMemorySourceType>([
   'agent_runtime',
   'scheduled_task',
   'migration',
+  'agent_extraction',
+  'system',
 ]);
 
 export interface WorkspaceMemoryActor {
@@ -554,6 +561,178 @@ export async function forgetWorkspaceMemory(
         reason: input.reason ?? null,
       }),
     });
+    return {
+      storeRevision: result.store.revision,
+      item: result.item,
+      replayed: result.replayed,
+    };
+  } catch (error) {
+    translateStoreError(error);
+  }
+}
+
+/**
+ * Pending extraction candidates with their extraction-only annotations.
+ *
+ * This is the "待确认" view: proposed items are deliberately excluded from
+ * every active list, search and Runtime snapshot, so they need their own read
+ * path that also surfaces `appliesWhen` and the evidence message IDs a human
+ * needs in order to judge a suggestion.
+ */
+export async function listWorkspaceMemoryCandidates(
+  input: WorkspaceMemoryBaseRequest & { limit?: number },
+) {
+  authorizeWorkspace(input, 'read');
+  const limit = clampLimit(input.limit, 50);
+  const candidates = await listProposedWorkspaceMemoryCandidates({
+    workspaceJid: input.workspaceJid,
+    limit,
+  });
+  return {
+    storeRevision:
+      (await getWorkspaceMemoryStore(input.workspaceJid))?.revision ?? 0,
+    candidates,
+  };
+}
+
+function assertProposed(
+  item: WorkspaceMemoryItem,
+  action: 'confirm' | 'reject',
+): void {
+  if (item.status !== 'proposed') {
+    invalid(`Only proposed memory candidates can be ${action}ed`);
+  }
+}
+
+/**
+ * Confirm a proposed candidate: it becomes an active memory in the same CAS
+ * transaction that edits it, so the confirmation is a normal revision with full
+ * version/audit history. The candidate row records who decided and when; its
+ * `agent_extraction` provenance stays on the create revision.
+ */
+export async function confirmWorkspaceMemoryCandidate(
+  input: WorkspaceMemoryMutationRequest & {
+    itemId: string;
+    expectedRevision: number;
+    kind?: WorkspaceMemoryKind;
+    title?: string | null;
+    content?: string;
+    canonicalKey?: string | null;
+    importance?: number;
+    confidence?: number;
+    idempotencyKey?: string | null;
+  },
+) {
+  authorizeWorkspace(input, 'write');
+  if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    invalid('expectedRevision must be a positive integer');
+  }
+  validateBoundedOptional(
+    input.idempotencyKey,
+    'idempotencyKey',
+    MAX_IDEMPOTENCY_KEY_LENGTH,
+  );
+  const patch: WorkspaceMemoryPatch = { status: 'active' };
+  for (const key of [
+    'kind',
+    'title',
+    'content',
+    'canonicalKey',
+    'importance',
+    'confidence',
+  ] as const) {
+    if (input[key] !== undefined) {
+      (patch as Record<string, unknown>)[key] = input[key];
+    }
+  }
+  validateValue(patch, false);
+  try {
+    const current = (
+      await getMutableWorkspaceMemoryItem(input.workspaceJid, input.itemId)
+    ).item;
+    assertProposed(current, 'confirm');
+    const result = await updateWorkspaceMemoryItem({
+      workspaceJid: input.workspaceJid,
+      itemId: input.itemId,
+      expectedRevision: input.expectedRevision,
+      patch,
+      context: mutationContext(input),
+      idempotencyKey: input.idempotencyKey,
+      requestHash: requestHash({
+        itemId: input.itemId,
+        expectedRevision: input.expectedRevision,
+        patch,
+        action: 'confirm',
+      }),
+    });
+    if (!result.replayed) {
+      await setWorkspaceMemoryCandidateState({
+        workspaceJid: input.workspaceJid,
+        itemId: result.item.id,
+        state: 'confirmed',
+        decidedBy: input.actor.id,
+        at: result.item.updatedAt,
+      });
+    }
+    return {
+      storeRevision: result.store.revision,
+      item: result.item,
+      replayed: result.replayed,
+    };
+  } catch (error) {
+    translateStoreError(error);
+  }
+}
+
+/**
+ * Reject a proposed candidate. Rejection is a forget: the item is soft-deleted
+ * with a tombstone whose reason is the fixed marker `rejected`, so audit and
+ * version history keep the suggestion that was turned down without resurrecting
+ * it in the active list.
+ */
+export async function rejectWorkspaceMemoryCandidate(
+  input: WorkspaceMemoryMutationRequest & {
+    itemId: string;
+    expectedRevision: number;
+    idempotencyKey?: string | null;
+  },
+) {
+  authorizeWorkspace(input, 'write');
+  if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    invalid('expectedRevision must be a positive integer');
+  }
+  validateBoundedOptional(
+    input.idempotencyKey,
+    'idempotencyKey',
+    MAX_IDEMPOTENCY_KEY_LENGTH,
+  );
+  try {
+    const current = (
+      await getMutableWorkspaceMemoryItem(input.workspaceJid, input.itemId)
+    ).item;
+    assertProposed(current, 'reject');
+    const result = await forgetWorkspaceMemoryItem({
+      workspaceJid: input.workspaceJid,
+      itemId: input.itemId,
+      expectedRevision: input.expectedRevision,
+      reason: 'rejected',
+      context: mutationContext(input),
+      idempotencyKey: input.idempotencyKey,
+      requestHash: requestHash({
+        itemId: input.itemId,
+        expectedRevision: input.expectedRevision,
+        action: 'reject',
+      }),
+    });
+    if (!result.replayed) {
+      await setWorkspaceMemoryCandidateState({
+        workspaceJid: input.workspaceJid,
+        itemId: result.item.id,
+        state: 'rejected',
+        decidedBy: input.actor.id,
+        at: result.item.updatedAt,
+      });
+    }
     return {
       storeRevision: result.store.revision,
       item: result.item,
