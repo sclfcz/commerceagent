@@ -141,10 +141,13 @@ Memory 有一条“先提议、后生效”的写入口，自动提炼和 Agent 
   不合法响应整体丢弃，不做部分修复。
 - 写入前过滤密钥、凭据、连接串和个人数据（邮箱、手机号、身份证、私网地址等），
   并与现有 active/proposed/conflicted 条目按 canonical key、包含关系和字符
-  bigram 相似度去重；同一次响应内重复提议也会收敛。
+  bigram 相似度去重；同一次响应内重复提议也会收敛。两边都先去空白、标点与符号再
+  比较，CJK 标点表由 `MEMORY_NORMALIZED_EXTRA_CHARACTERS` 统一维护，避免 SQL 侧
+  漏掉 JS 侧已去掉的标点、让一条候选刚被接受就被下一次夜间整理合并掉。
 - 确认与拒绝都走 CAS：`expectedRevision` 不符返回 409，确认会先校验 item 仍为
   `proposed`。拒绝写成 `deleted` tombstone，reason 固定为 `rejected`，并记录决策
-  人和时间。
+  人和时间。模型给出的 `search_keys` 在创建候选时即写入条目；确认（含编辑后确认）
+  时若条目没有检索关键词，宿主按最终文本用 `deriveSearchKeys` 补齐。
 - 候选自创建起 14 天未被确认会自动转为 `superseded`（候选行记为 `expired`），
   由同一次宿主扫描惰性执行。
 
@@ -177,6 +180,9 @@ SQLite FTS 时期。`pg_trgm` 及其 GIN 索引只是可选加速：外部 Postg
   `search_keys`；不传时宿主按标题和正文派生，正文变更且没有显式关键词时重新派生。
 - 显式关键词写入版本记录；派生关键词属于元数据，重新计算不递增 revision、不追加
   版本。启动时会为 `cardinality(search_keys) = 0` 的历史行补一次，可重复执行。
+- 每个版本记录（包括夜间整理写入的版本）都保存当时的 `search_keys`、`pinned`、
+  `superseded_by`、`demoted_from_kind` 与 `demoted_at`，历史可以还原条目当时的
+  完整检索形态。
 
 ### pinned 与三路召回
 
@@ -245,10 +251,13 @@ trigram 相似度偏低（一字之差常落在 0.75–0.8），0.85 实际只�
 合并时保留 `importance` 最高的条目（并列取 `updated_at` 最新，再并列取 id），
 keeper 的 `importance` 取组内最大值，其余条目置为 `superseded` 并写入
 `superseded_by`；每条都追加一个 `update` 版本，actor 为
-`memory_consolidation`（provenance 的 `sourceType` 同步扩展该取值）。被合并条目的
-来源写入 `workspace_memory_merge_sources`，自身 provenance 也保留，因此来源不会因
-合并丢失。计划与写入之间用 revision 做 compare-and-set：组内任一行在此期间被改过，
-整组回滚并记为跳过，等下一次再合并，绝不覆盖并发编辑。
+`memory_consolidation`（provenance 的 `sourceType` 同步扩展该取值）。keeper 还会
+吸收被合并条目的 `search_keys`（去重，keeper 自身的排在前面，合计仍以 12 个为
+上限），否则只被被合并条目命中的关键词会随合并丢失；合并后的关键词写入该
+`update` 版本。被合并条目的来源写入 `workspace_memory_merge_sources`，自身
+provenance 也保留，因此来源不会因合并丢失。计划与写入之间用 revision 做
+compare-and-set：组内任一行在此期间被改过，整组回滚并记为跳过，等下一次再合并，
+绝不覆盖并发编辑。
 
 过期降级：
 
@@ -259,6 +268,9 @@ keeper 的 `importance` 取组内最大值，其余条目置为 `superseded` 并
   kind 不变，`demoted_from_kind` 为空。
 - 同时清空 `expires_at` / `valid_until`（旧值保存在降级前的版本记录里），这样
   降级条目仍能被检索命中。
+- `search_keys` 保留原值，不按改写后的文本重新生成：“（已过期）”是记账标记，
+  降级条目仍应按它有效期内为人所知的关键词被检索到；重新生成还会把标记本身
+  （`已过`、`过期`）变成所有降级条目共有的噪声关键词。
 - `pinned = true` 的条目不降级。该列由 002/004 以 `ADD COLUMN IF NOT EXISTS`
   幂等添加，两条迁移都可以重复执行。
 
@@ -342,10 +354,10 @@ Memory 页面采用 Workspace-first 流程：
 4. 搜索只在当前 Workspace 内执行；类别筛选可与搜索组合。
 5. 详情展示来源 Session/来源 ID、观察时间、item revision、store revision 和修订
    时间线。
-5. 详情和创建对话框都可以编辑 `search_keys`（逗号、分号或空白分隔，最多 12 个，
+6. 详情和创建对话框都可以编辑 `search_keys`（逗号、分号或空白分隔，最多 12 个，
    留空表示由宿主派生），并可以打开“常驻画像”开关设置 `pinned`；列表和详情会显示
    “常驻”标记。这两项和正文一样走 PATCH CAS。
-6. 有修改权限时可以创建、编辑和忘记；只读 Workspace 不显示可执行写操作。
+7. 有修改权限时可以创建、编辑和忘记；只读 Workspace 不显示可执行写操作。
 
 空状态需要区分“没有 Workspace”“Workspace 尚无 Memory”和“搜索无结果”。请求
 失败在当前区域展示并允许刷新，不能回退到旧文件源。移动端在列表和详情之间切换，
@@ -385,7 +397,11 @@ Memory 页面采用 Workspace-first 流程：
 - 快照按 `profile`/`relevant`/`proactive` 三段渲染，未用预算顺延，`profile` 有
   40% 硬上限，到期的 `open_loop` 无论是否相关都会被注入。
 - 候选在确认前不出现在 snapshot、搜索和活跃列表；拒绝留下 `rejected` tombstone，
-  超过 14 天未确认自动 `superseded`。
+  超过 14 天未确认自动 `superseded`；确认（含编辑后确认）会按最终文本补齐
+  `search_keys`，长中文问句可以召回。
+- 降级条目（`demoted_at` 非空）不出现在 `profile` 与 `proactive`，只能通过
+  `relevant` 检索命中；夜间合并后 keeper 汇总两条目的 `search_keys`，keeper 与
+  被合并条目都留下完整版本链。
 - 定时任务和 Sub-Agent 只能 propose，不能确认、拒绝或直接写入 active Memory。
 - 只读 Workspace 无写操作，未授权资源不泄露存在性。
 - UI 和 Runtime 均不调用旧 `/sources`、`/search`、`/file`、`/global` 端点。

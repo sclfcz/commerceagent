@@ -3,6 +3,11 @@ import type {
   MemoryRow,
   MemorySql,
 } from '../memory-pg/index.js';
+import {
+  MAX_SEARCH_KEYS,
+  MEMORY_NORMALIZED_SQL_CHARACTER_CLASS,
+  normalizeSearchKeys,
+} from '../memory-keywords.js';
 import type { WorkspaceMemoryKind } from '../memory-store.js';
 import {
   MEMORY_CONSOLIDATION_SOURCE_TYPE,
@@ -32,7 +37,7 @@ export type DuplicateReason =
 /** Lower-cased, whitespace-free, punctuation-free content. */
 const NORMALIZED_CONTENT_SQL = (alias: string) =>
   `regexp_replace(lower(${alias}.content), ` +
-  `'[[:space:][:punct:]，。！？；：、“”‘’（）《》【】…—·「」『』〈〉～￥]', '', 'g')`;
+  `'${MEMORY_NORMALIZED_SQL_CHARACTER_CLASS}', '', 'g')`;
 
 const CANDIDATE_FILTER = `
   i.store_id = $1
@@ -323,14 +328,32 @@ export async function applyMergeGroup(
         keeper.importance,
         ...group.duplicates.map((duplicate) => duplicate.importance),
       );
+      // Retrieval keys travel with the text they were derived from: a key only
+      // the absorbed item had would otherwise stop finding the merged fact.
+      // The keeper's own keys win on order and the combined list is capped at
+      // the same limit a user-supplied list has.
+      const mergedSearchKeys = [...normalizeSearchKeys(keeperRow.search_keys)];
+      for (const duplicate of group.duplicates) {
+        const duplicateRow = await loadConsolidationItem(
+          sql,
+          storeId,
+          duplicate.id,
+        );
+        if (!duplicateRow?.search_keys) continue;
+        for (const key of normalizeSearchKeys(duplicateRow.search_keys)) {
+          if (mergedSearchKeys.length >= MAX_SEARCH_KEYS) break;
+          if (!mergedSearchKeys.includes(key)) mergedSearchKeys.push(key);
+        }
+      }
       const keeperRevision = keeper.revision + 1;
       const updatedKeeper = await sql.query(
         `UPDATE workspace_memory_items
-         SET importance = $1, revision = $2, updated_at = $3
-         WHERE store_id = $4 AND id = $5 AND revision = $6
+         SET importance = $1, search_keys = $2, revision = $3, updated_at = $4
+         WHERE store_id = $5 AND id = $6 AND revision = $7
            AND status = 'active' AND demoted_at IS NULL`,
         [
           highestImportance,
+          mergedSearchKeys,
           keeperRevision,
           at,
           storeId,

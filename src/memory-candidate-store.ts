@@ -295,6 +295,9 @@ export async function createWorkspaceMemoryCandidate(input: {
       title: input.title ?? null,
       content: input.content,
       canonicalKey: input.canonicalKey ?? null,
+      // Extraction-proposed keys become the item's keys; when it proposed none
+      // the store derives them from the text, exactly like a hand-written item.
+      searchKeys: input.searchKeys ? [...input.searchKeys] : undefined,
       status: 'proposed',
       importance: input.importance,
       confidence: input.confidence,

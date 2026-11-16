@@ -22,6 +22,12 @@ import {
  * - both get `demoted_at`, a capped importance, and cleared validity so the
  *   validity filter no longer hides them from search.
  *
+ * `search_keys` are deliberately left untouched rather than re-derived from the
+ * rewritten text: the demotion marker is bookkeeping, and a demoted item must
+ * still be found by the terms it was known under while it was live. Re-deriving
+ * would also write keys for the marker itself (`已过`, `过期`), which are noise
+ * every expired item would match.
+ *
  * Pinned items are never demoted, and readers must treat demoted items as
  * history: searchable, but never part of standing/recall context.
  */

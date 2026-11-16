@@ -21,6 +21,7 @@ import {
 import { getRegisteredGroup, getWorkspaceRecord } from './db.js';
 import {
   deriveQueryKeywords,
+  deriveSearchKeys,
   searchKeysInputError,
 } from './memory-keywords.js';
 import {
@@ -651,6 +652,31 @@ export async function confirmWorkspaceMemoryCandidate(
       await getMutableWorkspaceMemoryItem(input.workspaceJid, input.itemId)
     ).item;
     assertProposed(current, 'confirm');
+    // Confirming is the moment a candidate becomes recallable, so its retrieval
+    // keys must exist regardless of how it was written: a candidate row from
+    // before phase B has none, and an edit changes the text the keys describe.
+    // Explicit keys supplied by the caller (or by extraction at create time)
+    // are never overwritten.
+    if (patch.searchKeys === undefined) {
+      const nextTitle = patch.title === undefined ? current.title : patch.title;
+      const nextContent =
+        patch.content === undefined ? current.content : patch.content;
+      const nextCanonicalKey =
+        patch.canonicalKey === undefined
+          ? current.canonicalKey
+          : patch.canonicalKey;
+      const textChanged =
+        nextTitle !== current.title ||
+        nextContent !== current.content ||
+        nextCanonicalKey !== current.canonicalKey;
+      if (current.searchKeys.length === 0 || textChanged) {
+        patch.searchKeys = deriveSearchKeys({
+          title: nextTitle,
+          canonicalKey: nextCanonicalKey,
+          content: nextContent,
+        });
+      }
+    }
     const result = await updateWorkspaceMemoryItem({
       workspaceJid: input.workspaceJid,
       itemId: input.itemId,

@@ -25,6 +25,30 @@ export const MIN_SEARCH_KEY_LENGTH = 1;
 export const MAX_SEARCH_KEY_LENGTH = 32;
 export const MAX_QUERY_KEYWORDS = 24;
 
+/**
+ * The character set stripped before two memories are compared for equality.
+ *
+ * Candidate duplicate detection (phase C, in JS) and the nightly merge (phase
+ * D, in SQL) must agree on what "the same text" means, or a candidate can be
+ * accepted as new that the next nightly pass immediately merges away. Both
+ * therefore share this one definition; only the mechanism differs.
+ *
+ * POSIX `[:punct:]` does not reliably classify CJK punctuation in every
+ * PostgreSQL locale, so those characters are listed explicitly. The JS side
+ * (`\p{P}`/`\p{S}`) already covers them; the point of the shared list is that
+ * SQL does not silently keep a CJK comma the JS pass removed.
+ */
+export const MEMORY_NORMALIZED_EXTRA_CHARACTERS =
+  '，。！？；：、“”‘’（）《》【】…—·「」『』〈〉～￥';
+
+/** `regexp_replace` character class implementing {@link normalizeMemoryText}. */
+export const MEMORY_NORMALIZED_SQL_CHARACTER_CLASS = `[[:space:][:punct:]${MEMORY_NORMALIZED_EXTRA_CHARACTERS}]`;
+
+/** Lower-cased text with whitespace, punctuation and symbols removed. */
+export function normalizeMemoryText(text: string): string {
+  return text.toLowerCase().replaceAll(/[\s\p{P}\p{S}]/gu, '');
+}
+
 /** Bound the content scanned for keys; Memory content can be 32k characters. */
 const MAX_KEY_CONTENT_LENGTH = 4000;
 const MAX_QUERY_LENGTH = 500;

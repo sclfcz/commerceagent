@@ -1,3 +1,4 @@
+import { normalizeMemoryText } from '../memory-keywords.js';
 import type { ExtractedCandidate } from './schema.js';
 
 /**
@@ -39,10 +40,9 @@ export function containsSensitiveContent(text: string): boolean {
 }
 
 function normalize(text: string): string {
-  return text
-    .toLowerCase()
-    .replaceAll(/[\s\p{P}\p{S}]/gu, '')
-    .trim();
+  // Shared with the nightly merge (phase D) so both phases agree on what
+  // counts as the same text; see `normalizeMemoryText` in memory-keywords.
+  return normalizeMemoryText(text);
 }
 
 function bigrams(value: string): Set<string> {

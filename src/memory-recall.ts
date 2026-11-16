@@ -325,8 +325,13 @@ export function planWorkspaceMemoryRecall(
     .filter((entry) => !includedIds.has(entry.item.id))
     // A due open loop is always delivered under the `proactive` label so the
     // model can see why it was injected, and no item is rendered twice.
+    // Only standing candidates are re-routed: an item that is not in the
+    // candidate list (a demoted item reached through search) has no proactive
+    // home, so it stays in `relevant` instead of disappearing.
     .filter(
-      (entry) => !isProactiveOpenLoop(entry.item, nowMs, proactiveWindowHours),
+      (entry) =>
+        !byId.has(entry.item.id) ||
+        !isProactiveOpenLoop(entry.item, nowMs, proactiveWindowHours),
     )
     .sort(compareRelevance);
   const relevantBudget = Math.max(

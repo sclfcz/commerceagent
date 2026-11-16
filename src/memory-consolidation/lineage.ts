@@ -33,6 +33,7 @@ export interface ConsolidationItemRow extends MemoryRow {
   title: string | null;
   content: string;
   canonical_key: string | null;
+  search_keys: string[] | null;
   status: WorkspaceMemoryStatus;
   importance: number | string;
   confidence: number | string;
@@ -108,11 +109,11 @@ export async function appendConsolidationLineage(
   await sql.query(
     `INSERT INTO workspace_memory_versions (
       item_id, revision, workspace_jid, kind, title, content, canonical_key,
-      status, importance, confidence, valid_from, valid_until, expires_at,
-      pinned, superseded_by, demoted_from_kind, demoted_at,
+      search_keys, status, importance, confidence, valid_from, valid_until,
+      expires_at, pinned, superseded_by, demoted_from_kind, demoted_at,
       change_type, actor_type, actor_id, created_at
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-      $14, $15, $16, $17, $18, $19, $20, $21)`,
+      $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
     [
       item.id,
       Number(item.revision),
@@ -121,6 +122,7 @@ export async function appendConsolidationLineage(
       item.title,
       item.content,
       item.canonical_key,
+      item.search_keys,
       item.status,
       Number(item.importance),
       Number(item.confidence),
