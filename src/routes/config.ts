@@ -2219,6 +2219,10 @@ function toSystemSettingsResponse(
     observabilitySampleRate: settings.observabilitySampleRate,
     observabilityIncludeContent: settings.observabilityIncludeContent,
     observabilityHasSecretKey: hasObservabilitySecret(),
+    memoryConsolidationEnabled: settings.memoryConsolidationEnabled,
+    memoryConsolidationTime: settings.memoryConsolidationTime,
+    memoryConsolidationBatchSize: settings.memoryConsolidationBatchSize,
+    memoryConsolidationMaxRuntimeMs: settings.memoryConsolidationMaxRuntimeMs,
   };
 }
 

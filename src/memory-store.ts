@@ -62,7 +62,8 @@ export type WorkspaceMemorySourceType =
   | 'scheduled_task'
   | 'migration'
   | 'agent_extraction'
-  | 'system';
+  | 'system'
+  | 'memory_consolidation';
 
 /** One durable Home Workspace fact completes CommerceAgent's first-wake ritual. */
 export const COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY =
@@ -103,6 +104,12 @@ export interface WorkspaceMemoryItem {
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
+  /** Set on a merged duplicate: the item that absorbed it. */
+  supersededBy: string | null;
+  /** The kind this item had before an expiry demotion changed it. */
+  demotedFromKind: WorkspaceMemoryKind | null;
+  /** When the nightly worker demoted this item as expired or out of validity. */
+  demotedAt: string | null;
   provenance: WorkspaceMemoryProvenance;
 }
 
@@ -170,6 +177,9 @@ interface MemoryItemRow extends MemoryRow {
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
+  superseded_by: string | null;
+  demoted_from_kind: WorkspaceMemoryKind | null;
+  demoted_at: string | null;
   source_type: WorkspaceMemorySourceType | null;
   source_id: string | null;
   session_id: string | null;
@@ -523,6 +533,9 @@ function mapItem(row: MemoryItemRow): WorkspaceMemoryItem {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     deletedAt: row.deleted_at,
+    supersededBy: row.superseded_by ?? null,
+    demotedFromKind: row.demoted_from_kind ?? null,
+    demotedAt: row.demoted_at ?? null,
     provenance: {
       sourceType: row.source_type ?? 'migration',
       sourceId: row.source_id,
@@ -552,6 +565,9 @@ function mapVersion(row: MemoryVersionRow): WorkspaceMemoryVersion {
     revision: item.revision,
     changeType: row.change_type,
     createdAt: row.created_at,
+    supersededBy: item.supersededBy,
+    demotedFromKind: item.demotedFromKind,
+    demotedAt: item.demotedAt,
     actor: {
       type: row.actor_type,
       id: row.actor_id,
@@ -713,11 +729,11 @@ async function appendVersion(
   await sql.query(
     `INSERT INTO workspace_memory_versions (
       item_id, revision, workspace_jid, kind, title, content, canonical_key,
-      search_keys, pinned,
-      status, importance, confidence, valid_from, valid_until, expires_at,
+      search_keys, status, importance, confidence, valid_from, valid_until,
+      expires_at, pinned, superseded_by, demoted_from_kind, demoted_at,
       change_type, actor_type, actor_id, created_at
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-      $14, $15, $16, $17, $18, $19)`,
+      $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
     [
       item.id,
       item.revision,
@@ -727,13 +743,16 @@ async function appendVersion(
       item.content,
       item.canonicalKey,
       item.searchKeys,
-      item.pinned,
       item.status,
       item.importance,
       item.confidence,
       item.validFrom,
       item.validUntil,
       item.expiresAt,
+      item.pinned,
+      item.supersededBy,
+      item.demotedFromKind,
+      item.demotedAt,
       changeType,
       context.sourceType,
       context.actorId,
@@ -1090,6 +1109,7 @@ export async function hasRecallableWorkspaceMemoryCanonicalKey(
      WHERE store_id = $1
        AND canonical_key = $2
        AND status = 'active'
+       AND demoted_at IS NULL
        AND (valid_from IS NULL OR valid_from::timestamptz <= $3::timestamptz)
        AND (valid_until IS NULL OR valid_until::timestamptz > $4::timestamptz)
        AND (expires_at IS NULL OR expires_at::timestamptz > $5::timestamptz)
@@ -1975,6 +1995,7 @@ export async function listRecallableWorkspaceMemoryItems(input: {
     `${ITEM_SELECT}
      WHERE i.store_id = $1
        AND i.status = 'active'
+       AND i.demoted_at IS NULL
        AND (i.canonical_key IS NULL OR i.canonical_key <> $2)
        AND NOT EXISTS (
          SELECT 1 FROM workspace_memory_platform_items mpi
@@ -2178,6 +2199,7 @@ export async function listWorkspaceMemoryVersions(input: {
       v.canonical_key, v.search_keys, v.pinned,
       v.status, v.importance, v.confidence, v.valid_from,
       v.valid_until, v.expires_at, v.revision, v.created_at,
+      v.superseded_by, v.demoted_from_kind, v.demoted_at,
       v.created_at AS updated_at, NULL AS deleted_at, v.change_type,
       v.actor_type, v.actor_id,
       p.source_type, p.source_id, p.session_id, p.observed_at
@@ -2198,14 +2220,18 @@ export async function listWorkspaceMemoryVersions(input: {
 
 /**
  * Shared handle to the Memory database for feature modules that own auxiliary
- * tables next to the canonical items (extraction cursors, candidate
- * annotations — see `src/memory-candidate-store.ts`).
+ * tables next to the canonical items (extraction cursors and candidate
+ * annotations in `src/memory-candidate-store.ts`, the nightly consolidation
+ * worker, which applies each duplicate group in its own transaction).
  *
  * It deliberately exposes the same `MemoryDatabase` the store itself uses so
  * there is exactly one connection (embedded PGlite allows only one) and the
  * migration/bootstrap state is shared. Feature modules must not open their own
  * database, and must not start a `transaction()` while already inside one of
  * the store's transactions (PGlite would deadlock on its single connection).
+ * Everything else in this module keeps the handle private, so callers describe
+ * intent instead of writing arbitrary SQL; treat this as internal plumbing,
+ * not a public API.
  */
 export async function withWorkspaceMemoryDatabase<T>(
   work: (db: MemoryDatabase) => Promise<T>,

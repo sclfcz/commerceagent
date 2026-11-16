@@ -3986,6 +3986,14 @@ export interface SystemSettings {
   observabilityPublicKey: string;
   observabilitySampleRate: number;
   observabilityIncludeContent: boolean;
+  // Workspace Memory 夜间整理（去重合并 + 过期降级）。宿主后台任务，不进入用户
+  // 可见的 scheduled_tasks；按 TZ 的本地时间每天运行一次。
+  memoryConsolidationEnabled: boolean;
+  // 本地时间 HH:MM（24 小时制），默认凌晨 03:30。
+  memoryConsolidationTime: string;
+  // 每批处理的条目数上限；单次运行时长上限由下一个配置决定。
+  memoryConsolidationBatchSize: number;
+  memoryConsolidationMaxRuntimeMs: number;
 }
 
 // Upper bound for the login lockout window. auth.ts reclaims login-attempt
@@ -4023,6 +4031,10 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   observabilityPublicKey: '',
   observabilitySampleRate: 1,
   observabilityIncludeContent: false,
+  memoryConsolidationEnabled: true,
+  memoryConsolidationTime: '03:30',
+  memoryConsolidationBatchSize: 200,
+  memoryConsolidationMaxRuntimeMs: 600_000,
 };
 
 type SystemSettingsSource = 'file' | 'env' | 'api';
@@ -4194,6 +4206,21 @@ function normalizeSystemSettings(
     }
   }
 
+  // Local wall-clock time for the nightly Workspace Memory consolidation. A
+  // malformed value falls back to 03:30 rather than disabling the worker, so a
+  // typo in the settings file cannot silently stop cleanup.
+  let memoryConsolidationTime = DEFAULT_SYSTEM_SETTINGS.memoryConsolidationTime;
+  if (raw.memoryConsolidationTime !== undefined) {
+    if (
+      typeof raw.memoryConsolidationTime === 'string' &&
+      /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(raw.memoryConsolidationTime.trim())
+    ) {
+      memoryConsolidationTime = raw.memoryConsolidationTime.trim();
+    } else {
+      invalidFields.add('memoryConsolidationTime');
+    }
+  }
+
   const normalized: SystemSettings = {
     containerTimeout: numberField(
       'containerTimeout',
@@ -4297,6 +4324,23 @@ function normalizeSystemSettings(
     observabilityIncludeContent: booleanField(
       'observabilityIncludeContent',
       DEFAULT_SYSTEM_SETTINGS.observabilityIncludeContent,
+    ),
+    memoryConsolidationEnabled: booleanField(
+      'memoryConsolidationEnabled',
+      DEFAULT_SYSTEM_SETTINGS.memoryConsolidationEnabled,
+    ),
+    memoryConsolidationTime,
+    memoryConsolidationBatchSize: numberField(
+      'memoryConsolidationBatchSize',
+      DEFAULT_SYSTEM_SETTINGS.memoryConsolidationBatchSize,
+      1,
+      1000,
+    ),
+    memoryConsolidationMaxRuntimeMs: numberField(
+      'memoryConsolidationMaxRuntimeMs',
+      DEFAULT_SYSTEM_SETTINGS.memoryConsolidationMaxRuntimeMs,
+      10_000,
+      3_600_000,
     ),
   };
 
@@ -4442,6 +4486,11 @@ function buildEnvFallbackSettings(): SystemSettings {
       observabilitySampleRate: process.env.COMMERCEAGENT_OTEL_SAMPLE_RATE,
       observabilityIncludeContent:
         process.env.COMMERCEAGENT_OTEL_INCLUDE_CONTENT,
+      memoryConsolidationEnabled: process.env.MEMORY_CONSOLIDATION_ENABLED,
+      memoryConsolidationTime: process.env.MEMORY_CONSOLIDATION_TIME,
+      memoryConsolidationBatchSize: process.env.MEMORY_CONSOLIDATION_BATCH_SIZE,
+      memoryConsolidationMaxRuntimeMs:
+        process.env.MEMORY_CONSOLIDATION_MAX_RUNTIME_MS,
     },
     'env',
   );

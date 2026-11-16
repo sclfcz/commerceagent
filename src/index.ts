@@ -224,6 +224,10 @@ import {
   type WorkspaceMemoryMutationContext,
 } from './memory-store.js';
 import {
+  startMemoryConsolidationWorker,
+  type MemoryConsolidationWorkerHandle,
+} from './memory-consolidation/index.js';
+import {
   isCommerceAgentBootstrapTurn,
   isCommerceAgentOwnerProfileRuntimeStructurallyEligible,
 } from './commerceagent-bootstrap.js';
@@ -20049,6 +20053,7 @@ async function main(): Promise<void> {
     typeof startChannelReliabilityRecoveryLoop
   > | null = null;
   let unsubscribeChannelReadyRecovery: (() => void) | null = null;
+  let memoryConsolidationWorker: MemoryConsolidationWorkerHandle | null = null;
   if (getSystemSettings().pluginAutoScan) {
     startupPluginScanTimer = setTimeout(() => {
       scanHostMarketplaces().catch((err) =>
@@ -20183,6 +20188,12 @@ async function main(): Promise<void> {
       );
 
     clearTimeout(forceExitTimer);
+
+    // Stop the Memory worker before its database closes. A run interrupted by
+    // the bounded wait is abandoned mid-pass; every write it made is a complete
+    // transaction, and the workspace is caught up at the next start.
+    await memoryConsolidationWorker?.stop();
+    memoryConsolidationWorker = null;
 
     try {
       await closeWorkspaceMemoryStore();
@@ -21392,6 +21403,11 @@ async function main(): Promise<void> {
   }
 
   await startSchedulerLoop(schedulerDeps);
+
+  // Workspace Memory nightly consolidation: host-side maintenance, not a
+  // user-visible scheduled task. Its first check also covers the restart
+  // catch-up for a night missed while the service was down.
+  memoryConsolidationWorker = startMemoryConsolidationWorker();
 
   // Inject triggerTaskRun into WebDeps (schedulerDeps must exist first)
   const webDeps = getWebDeps();

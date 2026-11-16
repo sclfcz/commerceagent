@@ -85,9 +85,11 @@ Memory 之外的功能不受影响。
 
 Memory schema 使用独立的版本表 `workspace_memory_schema_migrations`，迁移文件按
 编号放在 `src/memory-pg/migrations/`，一个编号一个文件、各自一个事务。数据库版本
-高于代码期望版本时拒绝启动（不降级执行）。当前已应用到 003：001 为基线，002 增加
-`search_keys` / `pinned` 检索字段，003 增加候选提炼侧表与 `agent_extraction` /
-`system` 来源类型；004 由夜间整理阶段按编号追加。
+高于代码期望版本时拒绝启动（不降级执行）。当前已应用到 004：001 为基线，002 增加
+`search_keys` / `pinned` 检索字段与三路回忆所需的画像标记，003 增加候选提炼侧表与
+`agent_extraction` / `system` 来源类型，004 增加整理字段（`superseded_by`、
+`demoted_from_kind`、`demoted_at`）与合并来源表。新迁移只能追加编号，不得修改
+已有迁移文件。
 
 ### 修订与并发
 
@@ -200,6 +202,71 @@ SQLite FTS 时期。`pg_trgm` 及其 GIN 索引只是可选加速：外部 Postg
   `retrievalTrace.segments`；被裁掉的条目只记录数量，不注入正文。
 - 渲染为 `<workspace_memory>` 下的 `<profile>`、`<relevant>`、`<proactive>` 三个
   分组，空分组直接省略，`pinned` 条目带 `pinned="true"` 属性。
+
+### 夜间整理与过期降级
+
+`src/memory-consolidation/` 是宿主机上的后台维护任务：它不是用户可见的定时任务，
+不出现在任务列表里，也不在容器内运行。每个本地日一次（默认 03:30，`TZ` 时区），
+逐个 Workspace 做两件事——把过期条目降级为历史事实、把确定性重复合并成一条。
+两步都只追加 revision，从不删除数据，全部可在版本链中追溯。
+
+配置项走系统设置（Web 持久设置 > `MEMORY_CONSOLIDATION_*` 环境变量 > 默认值）：
+
+| 设置                              | 默认     | 说明                                       |
+| --------------------------------- | -------- | ------------------------------------------ |
+| `memoryConsolidationEnabled`      | `true`   | 关闭后不再调度，已跑过的结果保留           |
+| `memoryConsolidationTime`         | `03:30`  | 本地墙钟时间 `HH:MM`，非法值保留默认并告警 |
+| `memoryConsolidationBatchSize`    | `200`    | 单批处理条目上限，1–1000                   |
+| `memoryConsolidationMaxRuntimeMs` | `600000` | 单个 Workspace 单轮时长上限，10s–1h        |
+
+运行语义：
+
+- 是否到期只看“最近一次记录到的运行时刻”和“最近一个已到的计划时刻”。重启后补跑
+  一次，计划时刻之前重启不会提前执行。
+- 每个 Workspace 用 `workspace_memory_consolidation_state` 中的租约行
+  （`lease_owner` / `lease_expires_at`）串行化，多实例部署不会重复整理；租约过期
+  可被其他实例接管，崩溃不会把 Workspace 永久锁住。
+- 单批受 `batchSize` 限制、单轮受 `maxRuntimeMs` 限制；到时限就停下并记 `partial`，
+  剩下的留给下一次，不会为了跑完而拖住进程。
+- 结果（`processed` / `merged` / `demoted` / `skippedGroups` / 错误 / 耗时）按
+  Workspace 记录，通过 `GET /api/status/memory-consolidation` 查看，只有计数器，
+  不含 Memory 内容。
+
+去重判定（同 Workspace、同 kind、`active`、未降级），满足任一条即为重复：
+
+1. `canonical_key` 相同；
+2. 归一化内容相同——去掉空白与中英文标点、统一小写后逐字相等；
+3. `pg_trgm` `similarity >= 0.85` 且标题相同（都为空视为相同）。
+
+`pg_trgm` 不可用时只保留前两条精确判定。阈值 0.85 是有意的保守取值：中文短文本的
+trigram 相似度偏低（一字之差常落在 0.75–0.8），0.85 实际只会合并几乎逐字相同、
+标题也一致的条目——宁可漏合并，也不误合并，因为这里没有模型参与判断。
+
+合并时保留 `importance` 最高的条目（并列取 `updated_at` 最新，再并列取 id），
+keeper 的 `importance` 取组内最大值，其余条目置为 `superseded` 并写入
+`superseded_by`；每条都追加一个 `update` 版本，actor 为
+`memory_consolidation`（provenance 的 `sourceType` 同步扩展该取值）。被合并条目的
+来源写入 `workspace_memory_merge_sources`，自身 provenance 也保留，因此来源不会因
+合并丢失。计划与写入之间用 revision 做 compare-and-set：组内任一行在此期间被改过，
+整组回滚并记为跳过，等下一次再合并，绝不覆盖并发编辑。
+
+过期降级：
+
+- `expires_at` 或 `valid_until` 已过的活跃条目写入 `demoted_at`，`importance`
+  上限压到 0.3。
+- `open_loop` 过期后 kind 变为 `fact`，标题（没有标题则内容）前加“（已过期）”，
+  并记录 `demoted_from_kind = 'open_loop'`；其他 kind（例如临时促销 fact）保持
+  kind 不变，`demoted_from_kind` 为空。
+- 同时清空 `expires_at` / `valid_until`（旧值保存在降级前的版本记录里），这样
+  降级条目仍能被检索命中。
+- `pinned = true` 的条目不降级。该列由 002/004 以 `ADD COLUMN IF NOT EXISTS`
+  幂等添加，两条迁移都可以重复执行。
+
+**降级条目是历史事实：可以被搜索命中，但绝不进入 standing context 或主动回忆。**
+回忆路径（`hasRecallableWorkspaceMemoryCanonicalKey`、
+`listRecallableWorkspaceMemoryItems`）过滤掉 `demoted_at` 非空的条目；检索路径
+按时间有效性过滤。两条过滤都在读取路径上完成，因此 Worker 没跑过也不会让过期
+知识进入上下文，整理只负责把该状态落库、可审计。
 
 ### 跨库一致性
 

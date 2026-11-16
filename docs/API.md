@@ -655,6 +655,7 @@ Web 和 Runtime 不再把它们当作第二个可写真相源。
 
 - `GET /api/health`，Public
 - `GET /api/status`
+- `GET /api/status/memory-consolidation`
 - `POST /api/status/groups/:folder/switch-provider`
 - `GET /api/status/channel-outbox/uncertain`
 - `POST /api/status/channel-outbox/:id/resolve`
@@ -667,6 +668,12 @@ Agent 镜像只由 `main` 分支的 GitHub Actions 构建并发布。该接口�
 确认后放行。`resolve` 使用 `expectedRevision` 做 compare-and-set，取值为
 `delivered`（需要 `providerMessageId`）或 `failed`；revision 过期返回 409，
 调用方必须重新读取后再决定，不能盲目重试。列表不返回 payload。
+
+`GET /api/status/memory-consolidation` 需要 `manage_system_config`，返回夜间整理
+的当前配置（`enabled`、`time`、`batchSize`、`maxRuntimeMs`）和每个 Workspace
+最近一次运行的结果，字段包括 `lastRunAt`、`lastStatus`、`processed`、`merged`、
+`demoted`、`skippedGroups`、`lastError`、`durationMs` 以及仍在生效的
+`leaseOwner`/`leaseExpiresAt`。响应只有计数器，不含任何 Memory 内容。
 
 问题报告：
 

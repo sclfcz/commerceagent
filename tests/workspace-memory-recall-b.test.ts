@@ -72,8 +72,11 @@ describe('migration 002', () => {
     }>(
       'SELECT version FROM workspace_memory_schema_migrations ORDER BY version',
     );
-    expect(result.rows.map((row) => Number(row.version))).toEqual([1, 2]);
-    expect(migrations.MEMORY_SCHEMA_VERSION).toBe(2);
+    // Phases B, C and D are merged: the fresh database runs 1 → 2 → 3 → 4.
+    expect(result.rows.map((row) => Number(row.version))).toEqual([
+      1, 2, 3, 4,
+    ]);
+    expect(migrations.MEMORY_SCHEMA_VERSION).toBe(4);
   });
 
   test('adds search_keys and pinned to items and versions', async () => {
