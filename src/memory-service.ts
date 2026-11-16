@@ -18,6 +18,14 @@ import {
   type WorkspaceMemoryValue,
 } from './memory-store.js';
 import { getRegisteredGroup, getWorkspaceRecord } from './db.js';
+import {
+  deriveQueryKeywords,
+  searchKeysInputError,
+} from './memory-keywords.js';
+import {
+  planWorkspaceMemoryRecall,
+  type WorkspaceMemoryRecallSegment,
+} from './memory-recall.js';
 import { canAccessGroup, canModifyGroup } from './web-context.js';
 import type { UserRole } from './types.js';
 
@@ -29,6 +37,8 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const MAX_QUERY_LENGTH = 500;
 const MAX_PAGE_SIZE = 100;
 const MAX_SNAPSHOT_CHARS = 64_000;
+const RECALL_CANDIDATE_LIMIT = 200;
+const RECALL_HIT_LIMIT = 50;
 
 const KINDS = new Set<WorkspaceMemoryKind>([
   'fact',
@@ -143,6 +153,11 @@ function validateValue(
     'canonicalKey',
     MAX_CANONICAL_KEY_LENGTH,
   );
+  const searchKeysError = searchKeysInputError(value.searchKeys);
+  if (searchKeysError) invalid(searchKeysError);
+  if (value.pinned !== undefined && typeof value.pinned !== 'boolean') {
+    invalid('pinned must be a boolean');
+  }
   if (
     value.status !== undefined &&
     !WRITABLE_STATUSES.has(
@@ -398,6 +413,8 @@ export async function createWorkspaceMemory(
     title: input.title,
     content: input.content,
     canonicalKey: input.canonicalKey,
+    searchKeys: input.searchKeys,
+    pinned: input.pinned,
     status: input.status,
     importance: input.importance,
     confidence: input.confidence,
@@ -448,6 +465,8 @@ export async function updateWorkspaceMemory(
     'title',
     'content',
     'canonicalKey',
+    'searchKeys',
+    'pinned',
     'status',
     'importance',
     'confidence',
@@ -605,69 +624,79 @@ export async function getWorkspaceMemorySnapshot(
     256,
     Math.min(MAX_SNAPSHOT_CHARS, Math.trunc(input.maxChars ?? 12_000)),
   );
-  let storeRevision: number;
-  let items: WorkspaceMemoryItem[];
-  if (input.query?.trim()) {
-    const searched = await searchWorkspaceMemory({
-      ...input,
-      query: input.query,
+  authorizeWorkspace(input, 'read');
+  const now = new Date().toISOString();
+  const query = input.query?.trim() || null;
+  let storeRevision = 0;
+  let candidates: WorkspaceMemoryItem[] = [];
+  let searchHits: Array<{ item: WorkspaceMemoryItem; rank: number }> = [];
+  try {
+    const recalled = await listRecallableWorkspaceMemoryItems({
+      workspaceJid: input.workspaceJid,
       kind: input.kind,
-      limit,
+      limit: RECALL_CANDIDATE_LIMIT,
+      now,
     });
-    storeRevision = searched.storeRevision;
-    items = searched.hits.map((hit) => hit.item);
-    if (items.length < limit) {
-      // A turn prompt is not a search query. In particular, an exact FTS
-      // phrase for a long natural-language/Chinese prompt often returns zero
-      // even though the Workspace has important standing context. Preserve
-      // relevance hits first, then fill the remaining budget with the most
-      // important currently-valid memories.
-      try {
-        const recalled = await listRecallableWorkspaceMemoryItems({
-          workspaceJid: input.workspaceJid,
-          kind: input.kind,
-          limit,
-        });
-        storeRevision = recalled.store.revision;
-        const seen = new Set(items.map((item) => item.id));
-        for (const item of recalled.items) {
-          if (items.length >= limit) break;
-          if (seen.has(item.id)) continue;
-          seen.add(item.id);
-          items.push(item);
-        }
-      } catch (error) {
-        translateStoreError(error);
-      }
-    }
-  } else {
-    authorizeWorkspace(input, 'read');
-    try {
-      const recalled = await listRecallableWorkspaceMemoryItems({
+    storeRevision = recalled.store.revision;
+    candidates = recalled.items;
+    if (query) {
+      const searched = await searchWorkspaceMemoryItems({
         workspaceJid: input.workspaceJid,
+        query,
         kind: input.kind,
-        limit,
+        limit: RECALL_HIT_LIMIT,
+        now,
       });
-      storeRevision = recalled.store.revision;
-      items = recalled.items;
-    } catch (error) {
-      translateStoreError(error);
+      storeRevision = searched.store.revision;
+      searchHits = searched.hits.map((hit) => ({
+        item: hit.item,
+        rank: hit.rank,
+      }));
     }
+  } catch (error) {
+    translateStoreError(error);
   }
 
-  const lines = [
-    `<workspace_memory workspace="${xmlEscape(input.workspaceJid)}" revision="${storeRevision}">`,
-  ];
-  const included: WorkspaceMemoryItem[] = [];
-  let size = lines[0].length;
-  for (const item of items) {
-    const line = `<memory id="${xmlEscape(item.id)}" revision="${item.revision}" kind="${item.kind}">${xmlEscape(item.content)}</memory>`;
-    if (size + line.length + '</workspace_memory>'.length > maxChars) break;
-    lines.push(line);
-    included.push(item);
-    size += line.length;
+  const segmentTags: Record<WorkspaceMemoryRecallSegment, [string, string]> = {
+    profile: ['<profile>', '</profile>'],
+    relevant: ['<relevant>', '</relevant>'],
+    proactive: ['<proactive>', '</proactive>'],
+  };
+  const openTag = `<workspace_memory workspace="${xmlEscape(input.workspaceJid)}" revision="${storeRevision}">`;
+  const closeTag = '</workspace_memory>';
+  // The snapshot is rendered as one block separated by newlines; the wrapper
+  // tags are outside the segment budget but still count against `maxChars`.
+  const budgetChars = Math.max(
+    0,
+    maxChars - openTag.length - closeTag.length - 2,
+  );
+  const plan = planWorkspaceMemoryRecall({
+    candidates,
+    searchHits,
+    now,
+    maxChars: budgetChars,
+    limit,
+    measureLine: (item) => renderMemoryLine(item).length + 1,
+    measureSegmentOverhead: (segment) => {
+      const [open, close] = segmentTags[segment];
+      return open.length + close.length + 2;
+    },
+  });
+  const segments = plan.segments.filter(
+    (segment) => segment.entries.length > 0,
+  );
+  const lines = [openTag];
+  for (const segment of segments) {
+    const [open, close] = segmentTags[segment.segment];
+    lines.push(open);
+    for (const entry of segment.entries)
+      lines.push(renderMemoryLine(entry.item));
+    lines.push(close);
   }
-  lines.push('</workspace_memory>');
+  lines.push(closeTag);
+  const included = plan.segments.flatMap((segment) =>
+    segment.entries.map((entry) => entry.item),
+  );
   const generatedAt = new Date().toISOString();
   return {
     workspaceJid: input.workspaceJid,
@@ -675,12 +704,30 @@ export async function getWorkspaceMemorySnapshot(
     items: included,
     renderedText: included.length > 0 ? lines.join('\n') : '',
     retrievalTrace: {
-      query: input.query?.trim() || null,
+      query,
+      queryKeywords: query ? deriveQueryKeywords(query) : [],
       itemRevisions: included.map((item) => ({
         id: item.id,
         revision: item.revision,
       })),
+      segments: Object.fromEntries(
+        plan.segments.map((segment) => [
+          segment.segment,
+          {
+            budgetChars: segment.budgetChars,
+            usedChars: segment.usedChars,
+            included: segment.entries.length,
+            truncated: segment.truncated,
+            itemIds: segment.entries.map((entry) => entry.item.id),
+          },
+        ]),
+      ),
       generatedAt,
     },
   };
+}
+
+function renderMemoryLine(item: WorkspaceMemoryItem): string {
+  const pinned = item.pinned ? ' pinned="true"' : '';
+  return `<memory id="${xmlEscape(item.id)}" revision="${item.revision}" kind="${item.kind}"${pinned}>${xmlEscape(item.content)}</memory>`;
 }

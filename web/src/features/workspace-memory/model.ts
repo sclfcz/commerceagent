@@ -39,6 +39,10 @@ export interface WorkspaceMemoryItem {
   title: string | null;
   content: string;
   canonicalKey: string | null;
+  /** Deterministic retrieval keywords; empty means "host derives them". */
+  searchKeys: string[];
+  /** Pinned items form the always-recalled profile segment. */
+  pinned: boolean;
   status: string;
   importance: number;
   confidence: number;
@@ -61,6 +65,8 @@ export interface WorkspaceMemoryVersion {
   title: string | null;
   content: string;
   canonicalKey: string | null;
+  searchKeys: string[];
+  pinned: boolean;
   importance: number;
   confidence: number;
   validFrom: string | null;
@@ -180,4 +186,27 @@ export function memoryKindCounts(
   };
   for (const item of items) counts[item.kind] += 1;
   return counts;
+}
+
+/**
+ * The keyword editor is a single free-text field: commas, semicolons,
+ * whitespace and Chinese punctuation all separate keys. Entries are
+ * normalized the same way the host does (NFKC + lowercase, dedupe, max 12),
+ * so what the user sees is what will be stored.
+ */
+export function parseSearchKeysText(value: string): string[] {
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const raw of value.split(/[\s,，;；、|/]+/)) {
+    const key = raw.normalize('NFKC').toLowerCase().trim();
+    if (!key || key.length > 32 || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+    if (keys.length >= 12) break;
+  }
+  return keys;
+}
+
+export function formatSearchKeysText(keys: readonly string[]): string {
+  return keys.join(', ');
 }

@@ -31,6 +31,8 @@ const UPDATE_FIELDS = [
   'title',
   'content',
   'canonicalKey',
+  'searchKeys',
+  'pinned',
   'status',
   'importance',
   'confidence',

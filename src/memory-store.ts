@@ -19,6 +19,13 @@ import {
   type LegacySqliteDatabase,
 } from './memory-pg/legacy-sqlite-import.js';
 import { migrateMemoryDatabase } from './memory-pg/migrations/index.js';
+import {
+  deriveQueryKeywords,
+  deriveSearchKeys,
+  keywordsToTsQuery,
+  normalizeSearchKeys,
+} from './memory-keywords.js';
+import { backfillWorkspaceMemorySearchKeys } from './memory-keywords-backfill.js';
 
 /**
  * Workspace Memory v2 storage.
@@ -74,6 +81,16 @@ export interface WorkspaceMemoryItem {
   title: string | null;
   content: string;
   canonicalKey: string | null;
+  /**
+   * Deterministic retrieval keys (phase B). Derived from the item text at
+   * write time unless the Agent/Web caller supplied an explicit list.
+   */
+  searchKeys: string[];
+  /**
+   * Core shop profile / identity preference that is always recalled. Mutated
+   * through the same revision compare-and-set as every other field.
+   */
+  pinned: boolean;
   status: WorkspaceMemoryStatus;
   importance: number;
   confidence: number;
@@ -121,6 +138,9 @@ export interface WorkspaceMemoryValue {
   title?: string | null;
   content: string;
   canonicalKey?: string | null;
+  /** Explicit keys; empty/omitted means "derive from the item text". */
+  searchKeys?: string[] | null;
+  pinned?: boolean;
   status?: Exclude<WorkspaceMemoryStatus, 'deleted'>;
   importance?: number;
   confidence?: number;
@@ -136,6 +156,8 @@ interface MemoryItemRow extends MemoryRow {
   title: string | null;
   content: string;
   canonical_key: string | null;
+  search_keys: string[] | null;
+  pinned: boolean | null;
   status: WorkspaceMemoryStatus;
   importance: number | string;
   confidence: number | string;
@@ -288,6 +310,15 @@ async function runBootstrapReconciliation(open: MemoryDatabase): Promise<void> {
     await purgeOrphanedWorkspaceMemory(open, sqliteBinding);
     await provisionWorkspaceMemoryStores(open, sqliteBinding);
   }
+  // Rows written before phase B (including imported legacy rows) have no
+  // retrieval keys; derive them once so keyword recall covers the whole store.
+  const backfilled = await backfillWorkspaceMemorySearchKeys(open);
+  if (backfilled > 0) {
+    logger.info(
+      { items: backfilled },
+      'Backfilled Workspace Memory retrieval keys',
+    );
+  }
   await reconcileReservedKeyDuplicates(open);
   await enforceReservedKeyInvariant(open);
   if (
@@ -396,6 +427,26 @@ function normalizeNullable(value: string | null | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
+/**
+ * Explicit keys win; otherwise the deterministic host algorithm derives them
+ * from the item text. An explicitly empty list means "derive again", which is
+ * what the Web UI clears to.
+ */
+function resolveSearchKeys(input: {
+  searchKeys?: readonly unknown[] | null;
+  title?: string | null;
+  canonicalKey?: string | null;
+  content?: string | null;
+}): string[] {
+  const provided = normalizeSearchKeys(input.searchKeys);
+  if (provided.length > 0) return provided;
+  return deriveSearchKeys({
+    title: input.title,
+    canonicalKey: input.canonicalKey,
+    content: input.content,
+  });
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return (
     typeof error === 'object' &&
@@ -458,6 +509,8 @@ function mapItem(row: MemoryItemRow): WorkspaceMemoryItem {
     title: row.title,
     content: row.content,
     canonicalKey: row.canonical_key,
+    searchKeys: normalizeSearchKeys(row.search_keys ?? []),
+    pinned: row.pinned === true,
     status: row.status,
     importance: Number(row.importance),
     confidence: Number(row.confidence),
@@ -486,6 +539,8 @@ function mapVersion(row: MemoryVersionRow): WorkspaceMemoryVersion {
     title: item.title,
     content: item.content,
     canonicalKey: item.canonicalKey,
+    searchKeys: item.searchKeys,
+    pinned: item.pinned,
     status: item.status,
     importance: item.importance,
     confidence: item.confidence,
@@ -656,10 +711,11 @@ async function appendVersion(
   await sql.query(
     `INSERT INTO workspace_memory_versions (
       item_id, revision, workspace_jid, kind, title, content, canonical_key,
+      search_keys, pinned,
       status, importance, confidence, valid_from, valid_until, expires_at,
       change_type, actor_type, actor_id, created_at
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-      $14, $15, $16, $17)`,
+      $14, $15, $16, $17, $18, $19)`,
     [
       item.id,
       item.revision,
@@ -668,6 +724,8 @@ async function appendVersion(
       item.title,
       item.content,
       item.canonicalKey,
+      item.searchKeys,
+      item.pinned,
       item.status,
       item.importance,
       item.confidence,
@@ -1483,14 +1541,21 @@ export async function createWorkspaceMemoryItem(input: {
       const at = nowIso();
       const store = await bumpStore(sql, initialStore.id, at);
       const itemId = newId('wmi');
+      const searchKeys = resolveSearchKeys({
+        searchKeys: input.value.searchKeys,
+        title: input.value.title,
+        canonicalKey: input.value.canonicalKey,
+        content: input.value.content,
+      });
       await sql.query(
         `INSERT INTO workspace_memory_items (
         id, store_id, workspace_jid, kind, title, content, canonical_key,
+        search_keys, pinned,
         status, importance, confidence, valid_from, valid_until, expires_at,
         revision, create_idempotency_key, create_request_hash,
         created_at, updated_at, deleted_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-        1, $14, $15, $16, $17, NULL)`,
+        $14, $15, 1, $16, $17, $18, $19, NULL)`,
         [
           itemId,
           store.id,
@@ -1499,6 +1564,8 @@ export async function createWorkspaceMemoryItem(input: {
           normalizeNullable(input.value.title),
           input.value.content.trim(),
           normalizeNullable(input.value.canonicalKey),
+          searchKeys,
+          input.value.pinned === true,
           input.value.status ?? 'active',
           input.value.importance ?? 0.5,
           input.value.confidence ?? 1,
@@ -1594,6 +1661,11 @@ export async function updateWorkspaceMemoryItem(input: {
           input.patch.canonicalKey === undefined
             ? current.canonicalKey
             : input.patch.canonicalKey,
+        searchKeys:
+          input.patch.searchKeys === undefined
+            ? undefined
+            : input.patch.searchKeys,
+        pinned: input.patch.pinned ?? current.pinned,
         status: input.patch.status ?? current.status,
         importance: input.patch.importance ?? current.importance,
         confidence: input.patch.confidence ?? current.confidence,
@@ -1610,11 +1682,32 @@ export async function updateWorkspaceMemoryItem(input: {
             ? current.expiresAt
             : input.patch.expiresAt,
       };
+      // Keys describe the text, so an edit to title/content/canonical key
+      // re-derives them unless the caller sent an explicit, non-empty list.
+      const textChanged =
+        next.title !== current.title ||
+        next.content.trim() !== current.content ||
+        next.canonicalKey !== current.canonicalKey;
+      const explicitKeys =
+        input.patch.searchKeys === undefined
+          ? null
+          : normalizeSearchKeys(input.patch.searchKeys);
+      let nextSearchKeys = current.searchKeys;
+      if (explicitKeys && explicitKeys.length > 0)
+        nextSearchKeys = explicitKeys;
+      else if (explicitKeys || textChanged || current.searchKeys.length === 0) {
+        nextSearchKeys = resolveSearchKeys({
+          title: next.title,
+          canonicalKey: next.canonicalKey,
+          content: next.content,
+        });
+      }
       const result = await sql.query(
         `UPDATE workspace_memory_items SET
         kind = $1, title = $2, content = $3, canonical_key = $4, status = $5,
         importance = $6, confidence = $7, valid_from = $8, valid_until = $9,
-        expires_at = $10, revision = $11, updated_at = $12
+        expires_at = $10, revision = $11, updated_at = $12,
+        search_keys = $16, pinned = $17
        WHERE store_id = $13 AND id = $14 AND revision = $15
          AND status <> 'deleted'`,
         [
@@ -1633,6 +1726,8 @@ export async function updateWorkspaceMemoryItem(input: {
           initialStore.id,
           current.id,
           input.expectedRevision,
+          nextSearchKeys,
+          next.pinned === true,
         ],
       );
       if (result.rowCount !== 1) {
@@ -1932,13 +2027,24 @@ export async function searchWorkspaceMemoryItems(input: {
   now?: string;
 }): Promise<{
   store: WorkspaceMemoryStore;
-  hits: Array<{ item: WorkspaceMemoryItem; rank: number; snippet: string }>;
+  hits: Array<{
+    item: WorkspaceMemoryItem;
+    rank: number;
+    searchKeyHits: number;
+    snippet: string;
+  }>;
 }> {
   const open = await ready();
   const store = await requireStoreWithin(open, input.workspaceJid);
   const now = input.now ?? nowIso();
   const query = input.query.trim();
   const pattern = `%${escapeLikePattern(query)}%`;
+  // A whole Chinese question is one `simple` lexeme and never equals a stored
+  // key, so the same deterministic algorithm extracts query keywords and each
+  // of them is matched against `search_keys` in both containment directions.
+  const keywords = deriveQueryKeywords(query);
+  const keywordTsQuery = keywordsToTsQuery(keywords);
+  const keywordPatterns = keywords.map((key) => `%${escapeLikePattern(key)}%`);
   const params: unknown[] = [
     store.id,
     COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
@@ -1955,14 +2061,30 @@ export async function searchWorkspaceMemoryItems(input: {
   const tsQueryParam = params.length;
   params.push(pattern);
   const patternParam = params.length;
+  params.push(keywords);
+  const keywordsParam = params.length;
+  params.push(keywordPatterns);
+  const keywordPatternsParam = params.length;
+  params.push(keywordTsQuery);
+  const keywordTsQueryParam = params.length;
   params.push(input.limit);
   const limitParam = params.length;
+  const keyHitExpression = `(
+    SELECT count(*)
+    FROM unnest(i.search_keys) AS sk
+    CROSS JOIN unnest($${keywordsParam}::text[]) AS kw
+    WHERE sk <> '' AND kw <> '' AND (strpos(sk, kw) > 0 OR strpos(kw, sk) > 0)
+  )`;
   const rows = await open.query<
-    MemoryItemRow & { search_rank: number | string }
+    MemoryItemRow & {
+      search_rank: number | string;
+      search_key_hits: number | string;
+    }
   >(
     `SELECT i.*, p.source_type, p.source_id, p.session_id, p.observed_at,
        ts_rank('{0.3333,0,0.6667,1}'::float4[], i.search_vector,
-         plainto_tsquery('simple', $${tsQueryParam})) AS search_rank
+         plainto_tsquery('simple', $${tsQueryParam})) AS search_rank,
+       ${keyHitExpression} AS search_key_hits
      FROM workspace_memory_items i
      LEFT JOIN workspace_memory_provenance p
        ON p.item_id = i.id AND p.revision = i.revision
@@ -1979,21 +2101,46 @@ export async function searchWorkspaceMemoryItems(input: {
        ${kindClause}
        AND (
          i.search_vector @@ plainto_tsquery('simple', $${tsQueryParam})
+         OR (
+           $${keywordTsQueryParam}::text <> ''
+           AND i.search_vector @@ to_tsquery('simple', $${keywordTsQueryParam})
+         )
          OR i.title ILIKE $${patternParam}
          OR i.content ILIKE $${patternParam}
          OR i.canonical_key ILIKE $${patternParam}
+         OR EXISTS (
+           SELECT 1
+           FROM unnest(i.search_keys) AS sk
+           WHERE sk <> ''
+             AND (
+               sk ILIKE ANY ($${keywordPatternsParam}::text[])
+               OR EXISTS (
+                 SELECT 1
+                 FROM unnest($${keywordsParam}::text[]) AS kw
+                 WHERE kw <> '' AND strpos(kw, sk) > 0
+               )
+             )
+         )
        )
-     ORDER BY search_rank DESC, i.importance DESC, i.updated_at DESC
+     ORDER BY search_key_hits DESC, search_rank DESC, i.importance DESC,
+       i.updated_at DESC
      LIMIT $${limitParam}`,
     params,
   );
   return {
     store,
-    hits: rows.rows.map((row) => ({
-      item: mapItem(row),
-      rank: Number(row.search_rank),
-      snippet: buildSnippet(row.content, query),
-    })),
+    hits: rows.rows.map((row) => {
+      const searchRank = Number(row.search_rank);
+      const searchKeyHits = Number(row.search_key_hits);
+      return {
+        item: mapItem(row),
+        // Keyword agreement is a stronger signal than raw ts_rank alone, and
+        // both stay in the same 0–1 range used by decayed recall scoring.
+        rank: Math.min(1, searchRank + 0.3 * Math.min(searchKeyHits, 3)),
+        searchKeyHits,
+        snippet: buildSnippet(row.content, query),
+      };
+    }),
   };
 }
 
@@ -2026,7 +2173,8 @@ export async function listWorkspaceMemoryVersions(input: {
   const rows = await open.query<MemoryVersionRow>(
     `SELECT
       v.item_id AS id, v.workspace_jid, v.kind, v.title, v.content,
-      v.canonical_key, v.status, v.importance, v.confidence, v.valid_from,
+      v.canonical_key, v.search_keys, v.pinned,
+      v.status, v.importance, v.confidence, v.valid_from,
       v.valid_until, v.expires_at, v.revision, v.created_at,
       v.created_at AS updated_at, NULL AS deleted_at, v.change_type,
       v.actor_type, v.actor_id,

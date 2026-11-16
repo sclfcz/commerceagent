@@ -445,7 +445,8 @@ Workspace Memory 是 Workspace 范围内、跨 Session 复用的结构化知识�
   - 返回 `{ storeRevision, items, nextCursor }`。
 - `GET /api/memory/workspaces/:workspaceJid/items/search`
   - Query：必填 `q`，可选 `kind`、`limit=1..100`。
-  - 返回 `{ storeRevision, hits: [{ item, rank, snippet }] }`。
+  - 返回 `{ storeRevision, hits: [{ item, rank, snippet, searchKeyHits }] }`。
+    `searchKeyHits` 是命中的检索关键词数量，`rank` 已把它折算进 0–1 分数。
 - `GET /api/memory/workspaces/:workspaceJid/items/:itemId`
   - 返回 `{ storeRevision, item }`。
 - `GET /api/memory/workspaces/:workspaceJid/items/:itemId/versions`
@@ -464,6 +465,8 @@ Workspace Memory 是 Workspace 范围内、跨 Session 复用的结构化知识�
   "title": "采用 SQLite",
   "content": "Workspace Memory 以 SQLite 为唯一真相源。",
   "canonicalKey": "memory-store",
+  "searchKeys": ["memory-store", "sqlite"],
+  "pinned": false,
   "status": "active",
   "importance": 0.9,
   "confidence": 1,
@@ -483,7 +486,7 @@ Workspace Memory 是 Workspace 范围内、跨 Session 复用的结构化知识�
 }
 ```
 
-Version 还包含 `changeType: create | update | forget` 和
+Version 还包含 `changeType: create | update | forget`、`searchKeys`、`pinned` 和
 `actor: { type, id }`，用于展示修订来源；历史版本不可通过 API 原地修改。
 
 ### 创建、编辑与忘记
@@ -493,9 +496,10 @@ Version 还包含 `changeType: create | update | forget` 和
 - `DELETE /api/memory/workspaces/:workspaceJid/items/:itemId`
 
 创建请求必须包含 `kind` 和非空 `content`，可以包含 `title`、`canonicalKey`、
-`status`、`importance`、`confidence`、有效期字段、`provenance` 和
-`idempotencyKey`。Web 客户端不能提交 `sourceType` 或 writer 身份；服务端根据认证
-上下文生成它们。示例：
+`searchKeys`、`pinned`、`status`、`importance`、`confidence`、有效期字段、
+`provenance` 和 `idempotencyKey`。`searchKeys` 最多 12 项、每项 1–32 字符，省略或
+传 `null` 时由宿主按标题和正文派生；`pinned` 只应为核心店铺画像或身份偏好设置。
+Web 客户端不能提交 `sourceType` 或 writer 身份；服务端根据认证上下文生成它们。示例：
 
 ```json
 {

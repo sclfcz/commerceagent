@@ -489,11 +489,17 @@ export const WorkspaceMemoryProvenanceSchema = z
   })
   .strict();
 
+const WorkspaceMemorySearchKeysSchema = z
+  .array(z.string().trim().min(1).max(32))
+  .max(12);
+
 const WorkspaceMemoryValueFields = {
   kind: WorkspaceMemoryKindSchema,
   title: z.string().trim().min(1).max(500).nullable().optional(),
   content: z.string().trim().min(1).max(32_768),
   canonicalKey: z.string().trim().min(1).max(500).nullable().optional(),
+  searchKeys: WorkspaceMemorySearchKeysSchema.nullable().optional(),
+  pinned: z.boolean().optional(),
   status: WritableWorkspaceMemoryStatusSchema.optional(),
   importance: z.number().min(0).max(1).optional(),
   confidence: z.number().min(0).max(1).optional(),
@@ -536,6 +542,8 @@ export const WorkspaceMemoryPatchSchema = z
     title: WorkspaceMemoryValueFields.title,
     content: WorkspaceMemoryValueFields.content.optional(),
     canonicalKey: WorkspaceMemoryValueFields.canonicalKey,
+    searchKeys: WorkspaceMemorySearchKeysSchema.nullable().optional(),
+    pinned: z.boolean().optional(),
     status: WritableWorkspaceMemoryStatusSchema.optional(),
     importance: WorkspaceMemoryValueFields.importance,
     confidence: WorkspaceMemoryValueFields.confidence,
@@ -553,6 +561,8 @@ export const WorkspaceMemoryPatchSchema = z
         'title',
         'content',
         'canonicalKey',
+        'searchKeys',
+        'pinned',
         'status',
         'importance',
         'confidence',

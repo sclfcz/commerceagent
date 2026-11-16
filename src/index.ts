@@ -11523,6 +11523,8 @@ async function processTaskIpc(
     title?: string;
     content?: string;
     canonicalKey?: string | null;
+    searchKeys?: string[] | null;
+    pinned?: boolean;
     importance?: number;
     confidence?: number;
     validFrom?: string | null;
@@ -12011,6 +12013,8 @@ async function processTaskIpc(
               title: data.title,
               content: data.content ?? '',
               canonicalKey: data.canonicalKey,
+              searchKeys: data.searchKeys,
+              pinned: data.pinned,
               importance: data.importance,
               confidence: data.confidence,
               validFrom: data.validFrom,

@@ -122,6 +122,14 @@ function newRequestId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export interface WorkspaceMemoryRecallSegmentTrace {
+  budgetChars: number;
+  usedChars: number;
+  included: number;
+  truncated: number;
+  itemIds: string[];
+}
+
 export interface WorkspaceMemorySnapshot {
   workspaceJid: string;
   storeRevision: number;
@@ -130,6 +138,8 @@ export interface WorkspaceMemorySnapshot {
   retrievalTrace: {
     itemRevisions: Array<{ id: string; revision: number }>;
     query?: string | null;
+    queryKeywords?: string[];
+    segments?: Record<string, WorkspaceMemoryRecallSegmentTrace>;
     generatedAt: string;
   };
 }
@@ -164,6 +174,35 @@ export interface CommerceAgentOwnerProfileTurnResult {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseRecallSegments(
+  value: unknown,
+): Record<string, WorkspaceMemoryRecallSegmentTrace> | undefined {
+  if (!isRecord(value)) return undefined;
+  const parsed: Record<string, WorkspaceMemoryRecallSegmentTrace> = {};
+  for (const [name, segment] of Object.entries(value)) {
+    if (!isRecord(segment)) continue;
+    const { budgetChars, usedChars, included, truncated, itemIds } = segment;
+    if (
+      typeof budgetChars !== 'number' ||
+      typeof usedChars !== 'number' ||
+      typeof included !== 'number' ||
+      typeof truncated !== 'number' ||
+      !Array.isArray(itemIds) ||
+      !itemIds.every((id) => typeof id === 'string')
+    ) {
+      continue;
+    }
+    parsed[name] = {
+      budgetChars,
+      usedChars,
+      included,
+      truncated,
+      itemIds: itemIds as string[],
+    };
+  }
+  return Object.keys(parsed).length > 0 ? parsed : undefined;
 }
 
 export function parseWorkspaceMemorySnapshot(
@@ -206,6 +245,12 @@ export function parseWorkspaceMemorySnapshot(
         revision: number;
       }>,
       query: trace.query as string | null | undefined,
+      queryKeywords: Array.isArray(trace.queryKeywords)
+        ? (trace.queryKeywords.filter(
+            (keyword) => typeof keyword === 'string',
+          ) as string[])
+        : undefined,
+      segments: parseRecallSegments(trace.segments),
       generatedAt: trace.generatedAt,
     },
   };
@@ -2653,6 +2698,12 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
   // supplies a workspace, owner, actor, or filesystem path: the host derives
   // all authorization and provenance from this IPC namespace.
   const memoryKindSchema = z.enum(['fact', 'decision', 'lesson', 'open_loop']);
+  const memorySearchKeysSchema = z
+    .array(z.string().min(1).max(32))
+    .max(12)
+    .describe(
+      'Optional retrieval keywords (lowercased, deduped, max 12). Omit to let the host derive them from the title and content.',
+    );
   const genericMemoryCanonicalKeySchema = z
     .string()
     .min(1)
@@ -2728,6 +2779,13 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
           title: z.string().min(1).max(200),
           content: z.string().min(1).max(20_000),
           canonical_key: genericMemoryCanonicalKeySchema.optional(),
+          search_keys: memorySearchKeysSchema.optional(),
+          pinned: z
+            .boolean()
+            .optional()
+            .describe(
+              'Pin this item as persistent shop profile or identity context that must be recalled on every turn.',
+            ),
           importance: z.number().min(0).max(1).optional(),
           confidence: z.number().min(0).max(1).optional(),
           valid_from: z.string().datetime().optional(),
@@ -2741,6 +2799,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
             title: args.title.trim(),
             content: args.content.trim(),
             canonicalKey: args.canonical_key?.trim(),
+            searchKeys: args.search_keys,
+            pinned: args.pinned,
             importance: args.importance,
             confidence: args.confidence,
             validFrom: args.valid_from,
@@ -2762,6 +2822,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
           title: z.string().min(1).max(200).optional(),
           content: z.string().min(1).max(20_000).optional(),
           canonical_key: genericMemoryCanonicalKeySchema.nullable().optional(),
+          search_keys: memorySearchKeysSchema.nullable().optional(),
+          pinned: z.boolean().optional(),
           importance: z.number().min(0).max(1).optional(),
           confidence: z.number().min(0).max(1).optional(),
           valid_from: z.string().datetime().nullable().optional(),
@@ -2778,6 +2840,8 @@ Use the skills panel in the UI to find the skill ID (directory name, e.g. "memor
               title: args.title?.trim(),
               content: args.content?.trim(),
               canonicalKey: args.canonical_key,
+              searchKeys: args.search_keys,
+              pinned: args.pinned,
               importance: args.importance,
               confidence: args.confidence,
               validFrom: args.valid_from,

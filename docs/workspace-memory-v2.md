@@ -85,8 +85,8 @@ Memory 之外的功能不受影响。
 
 Memory schema 使用独立的版本表 `workspace_memory_schema_migrations`，迁移文件按
 编号放在 `src/memory-pg/migrations/`，一个编号一个文件、各自一个事务。数据库版本
-高于代码期望版本时拒绝启动（不降级执行）。当前只有 001 基线，002/003/004 预留给
-后续阶段。
+高于代码期望版本时拒绝启动（不降级执行）。当前已应用到 002
+（`search_keys` / `pinned` 检索字段），003/004 预留给后续阶段。
 
 ### 修订与并发
 
@@ -115,11 +115,57 @@ Memory schema 使用独立的版本表 `workspace_memory_schema_migrations`，�
 ### 全文检索
 
 `workspace_memory_items.search_vector` 是生成的 `tsvector` 列，使用 `simple`
-词典，并按旧 bm25 权重分配字段权重：title = A、`canonical_key` = B、
-content = D；查询时 `ts_rank` 使用 `{0.3333, 0, 0.6667, 1}`。每次检索同时执行
-tsvector 匹配与 `ILIKE` 子串匹配，因此中文短语（`simple` 词典不分词）仍能召回，
-召回率不低于 SQLite FTS 时期。`pg_trgm` 及其 GIN 索引只是可选加速：外部
-PostgreSQL 角色没有建扩展权限时只记录 warning，`ILIKE` 兜底结果仍然正确。
+词典：title 和 `search_keys` 都是 A，`canonical_key` 是 B，content 是 D；查询时
+`ts_rank` 使用 `{0.3333, 0, 0.6667, 1}`。每次检索同时执行 tsvector 匹配与
+`ILIKE` 子串匹配，因此中文短语（`simple` 词典不分词）仍能召回，召回率不低于
+SQLite FTS 时期。`pg_trgm` 及其 GIN 索引只是可选加速：外部 PostgreSQL 角色没有
+建扩展权限时只记录 warning，`ILIKE` 兜底结果仍然正确。
+
+### 检索关键词（search_keys）
+
+`simple` 词典把整句中文当作一个 lexeme，长问句永远匹配不上短条目。为了弥补这一
+点，每个 item 带一列确定性的检索关键词 `search_keys`（`text[]`，最多 12 个，
+每个 1–32 字符，小写并去重）：
+
+- `search_keys` 与 title 同权重（A）进入 `search_vector`，同时参与
+  `ILIKE ANY(...)` 匹配，并在 `search_key_hits` 中计数；排序为
+  `search_key_hits DESC, ts_rank DESC, importance DESC, updated_at DESC`。
+- 写入侧（`deriveSearchKeys`）：中文按标点切成 2–4 字 n-gram，按 title(3) /
+  canonical_key(2) / content(1) 加权并保留高信息量片段；英文与数字按词切分；
+  去掉中英文停用词；已被选中关键词包含或被包含的候选直接跳过。
+- 查询侧（`deriveQueryKeywords`）：英数词优先，其次整段 2–4 字中文 run，再取长
+  run 的全部 2-gram，最后补 3/4-gram，最多 24 个。两侧算法共用同一套切分与停用词
+  表，所以“长问句里的两个字”能命中“条目里存的四个字”：匹配时用双向包含
+  （`strpos(sk, kw) > 0 OR strpos(kw, sk) > 0`）。
+- Agent 可以在 `workspace_memory_remember` / `workspace_memory_update` 上传
+  `search_keys`；不传时宿主按标题和正文派生，正文变更且没有显式关键词时重新派生。
+- 显式关键词写入版本记录；派生关键词属于元数据，重新计算不递增 revision、不追加
+  版本。启动时会为 `cardinality(search_keys) = 0` 的历史行补一次，可重复执行。
+
+### pinned 与三路召回
+
+`pinned` 表示“每轮都必须出现”的店铺画像与身份偏好。它和 create/update 的其它字段
+一样走 revision CAS 并写入版本记录，不能绕过并发保护。
+
+一次快照共享同一个 `maxChars` 预算，按 `profile → relevant → proactive` 顺序渲染，
+前一段没用完的字符预算顺延给后一段；每个条目只出现在一段中：
+
+| 段          | 内容                                                              | 预算                                                              | 排序                                     |
+| ----------- | ----------------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------- |
+| `profile`   | `pinned` 且当前有效的条目                                         | 默认 30%，硬上限 40%                                              | importance                               |
+| `relevant`  | 检索命中 + 按 importance 补齐的其余活跃条目（不含到期 open_loop） | 剩余预算（`maxChars − profile 已用 − proactive 预留 15%`）        | `rank ?? importance × exp(−Δt / 半衰期)` |
+| `proactive` | 到期的 `open_loop`                                                | 剩余预算（`maxChars − profile 已用 − relevant 已用`，至少约 15%） | 到期时间早者优先，其次 importance        |
+
+- 时间衰减的 Δt 取 `provenance.observedAt`，缺失时用 `updatedAt`；半衰期默认 30
+  天。`pinned` 条目不衰减。
+- `proactive` 只收录 `status = active` 的 `open_loop`，且满足
+  `expires_at ∈ (now, now + 72h]` 或 `valid_from <= now`；两个条件互相独立，因此
+  “已到生效时间、但到期还在很远的”待跟进也会被主动注入。其余条目即使与问题无关也
+  不会进入该段。
+- 每段的 `budgetChars` / `usedChars` / `included` / `truncated` / `itemIds` 都写入
+  `retrievalTrace.segments`；被裁掉的条目只记录数量，不注入正文。
+- 渲染为 `<workspace_memory>` 下的 `<profile>`、`<relevant>`、`<proactive>` 三个
+  分组，空分组直接省略，`pinned` 条目带 `pinned="true"` 属性。
 
 ### 跨库一致性
 
@@ -188,6 +234,9 @@ Memory 页面采用 Workspace-first 流程：
 4. 详情展示来源 Session/来源 ID、观察时间、item revision、store revision 和修订
    时间线。
 5. 有修改权限时可以创建、编辑和忘记；只读 Workspace 不显示可执行写操作。
+6. 详情和创建对话框都可以编辑 `search_keys`（逗号、分号或空白分隔，最多 12 个，
+   留空表示由宿主派生），并可以打开“常驻画像”开关设置 `pinned`；列表和详情会显示
+   “常驻”标记。这两项和正文一样走 PATCH CAS。
 
 空状态需要区分“没有 Workspace”“Workspace 尚无 Memory”和“搜索无结果”。请求
 失败在当前区域展示并允许刷新，不能回退到旧文件源。移动端在列表和详情之间切换，
@@ -222,5 +271,9 @@ Memory 页面采用 Workspace-first 流程：
 - 详情可回溯来源、时间、revision 和 versions。
 - PATCH/DELETE 携带 `expectedRevision`；409 时本地草稿仍在。
 - 忘记后活跃列表不再显示 item，来源 Session 历史仍存在。
+- 长中文问句能命中只带短关键词的条目；改写前的整句匹配零召回，现在能召回。
+- `pinned` 变更走 `expectedRevision` CAS，并在 versions 中留下记录。
+- 快照按 `profile`/`relevant`/`proactive` 三段渲染，未用预算顺延，`profile` 有
+  40% 硬上限，到期的 `open_loop` 无论是否相关都会被注入。
 - 只读 Workspace 无写操作，未授权资源不泄露存在性。
 - UI 和 Runtime 均不调用旧 `/sources`、`/search`、`/file`、`/global` 端点。

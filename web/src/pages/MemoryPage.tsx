@@ -17,6 +17,7 @@ import {
   Lightbulb,
   Loader2,
   MessageSquareText,
+  Pin,
   Plus,
   RefreshCw,
   Save,
@@ -57,6 +58,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
 import {
   KIND_META,
@@ -65,6 +67,8 @@ import {
   memoryItemsPath,
   memoryKindCounts,
   memoryVersionsPath,
+  parseSearchKeysText,
+  formatSearchKeysText,
   revisionConflictFrom,
   type RevisionConflict,
   type WorkspaceMemoryCollection,
@@ -85,6 +89,8 @@ interface Draft {
   title: string;
   content: string;
   sessionId: string;
+  searchKeys: string;
+  pinned: boolean;
 }
 
 const EMPTY_DRAFT: Draft = {
@@ -92,6 +98,8 @@ const EMPTY_DRAFT: Draft = {
   title: '',
   content: '',
   sessionId: '',
+  searchKeys: '',
+  pinned: false,
 };
 
 const KIND_ICONS: Record<WorkspaceMemoryKind, typeof FileText> = {
@@ -180,6 +188,12 @@ function MemoryListItem({
         <MemoryKindBadge kind={item.kind} />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+        {item.pinned && (
+          <span className="inline-flex items-center gap-1 font-medium text-primary">
+            <Pin className="size-3" aria-hidden="true" />
+            常驻
+          </span>
+        )}
         <span>{provenanceLabel(item.provenance)}</span>
         <span aria-hidden="true">·</span>
         <span>{formatTime(item.provenance.observedAt || item.updatedAt)}</span>
@@ -286,7 +300,10 @@ export function MemoryPage() {
     return (
       draft.kind !== selectedItem.kind ||
       draft.title !== (selectedItem.title || '') ||
-      draft.content !== selectedItem.content
+      draft.content !== selectedItem.content ||
+      draft.searchKeys !==
+        formatSearchKeysText(selectedItem.searchKeys ?? []) ||
+      draft.pinned !== (selectedItem.pinned === true)
     );
   }, [draft, selectedItem]);
   const shouldBlockNavigation = useCallback<BlockerFunction>(
@@ -331,6 +348,8 @@ export function MemoryPage() {
             title: item.title || '',
             content: item.content,
             sessionId: item.provenance.sessionId || '',
+            searchKeys: formatSearchKeysText(item.searchKeys ?? []),
+            pinned: item.pinned === true,
           }
         : EMPTY_DRAFT,
     );
@@ -747,6 +766,8 @@ export function MemoryPage() {
           ...(createDraft.title.trim()
             ? { title: createDraft.title.trim() }
             : {}),
+          searchKeys: parseSearchKeysText(createDraft.searchKeys),
+          pinned: createDraft.pinned,
           provenance: {
             observedAt: new Date().toISOString(),
             ...(createDraft.sessionId.trim()
@@ -805,6 +826,8 @@ export function MemoryPage() {
           kind: draft.kind,
           title: draft.title.trim() || null,
           content: draft.content.trim(),
+          searchKeys: parseSearchKeysText(draft.searchKeys),
+          pinned: draft.pinned,
           provenance: {
             observedAt: new Date().toISOString(),
           },
@@ -1232,6 +1255,12 @@ export function MemoryPage() {
                           <div>
                             <div className="flex flex-wrap items-center gap-2">
                               <MemoryKindBadge kind={selectedItem.kind} />
+                              {selectedItem.pinned && (
+                                <Badge variant="secondary">
+                                  <Pin />
+                                  常驻画像
+                                </Badge>
+                              )}
                               <Badge variant="outline">
                                 Revision {selectedItem.revision}
                               </Badge>
@@ -1373,6 +1402,50 @@ export function MemoryPage() {
                             }
                             disabled={!canModify || saving}
                           />
+                        </div>
+
+                        <div className="grid gap-4 rounded-xl border border-border bg-muted/20 p-4 sm:grid-cols-[1fr_auto]">
+                          <div>
+                            <Label htmlFor="memory-search-keys">
+                              检索关键词（可选）
+                            </Label>
+                            <Input
+                              id="memory-search-keys"
+                              className="mt-1.5"
+                              value={draft.searchKeys}
+                              onChange={(event) =>
+                                setDraft((current) => ({
+                                  ...current,
+                                  searchKeys: event.target.value,
+                                }))
+                              }
+                              disabled={!canModify || saving}
+                              placeholder="留空则由系统根据标题和内容自动生成"
+                            />
+                            <p className="mt-1.5 text-xs leading-5 text-muted-foreground">
+                              用逗号或空格分隔，最多 12
+                              个。清空后保存会重新自动生成。
+                            </p>
+                          </div>
+                          <div className="flex items-start gap-3 sm:pt-7">
+                            <Switch
+                              id="memory-pinned"
+                              checked={draft.pinned}
+                              onCheckedChange={(checked) =>
+                                setDraft((current) => ({
+                                  ...current,
+                                  pinned: checked,
+                                }))
+                              }
+                              disabled={!canModify || saving}
+                            />
+                            <div>
+                              <Label htmlFor="memory-pinned">常驻画像</Label>
+                              <p className="mt-1 max-w-48 text-xs leading-5 text-muted-foreground">
+                                锁定为核心店铺画像或身份偏好，每轮对话都会召回。
+                              </p>
+                            </div>
+                          </div>
                         </div>
 
                         {canModify && (
@@ -1545,6 +1618,43 @@ export function MemoryPage() {
                 disabled={creating}
                 placeholder="用于回溯产生这条记忆的 Session"
               />
+            </div>
+            <div>
+              <Label htmlFor="create-memory-search-keys">
+                检索关键词（可选）
+              </Label>
+              <Input
+                id="create-memory-search-keys"
+                className="mt-1.5"
+                value={createDraft.searchKeys}
+                onChange={(event) =>
+                  setCreateDraft((current) => ({
+                    ...current,
+                    searchKeys: event.target.value,
+                  }))
+                }
+                disabled={creating}
+                placeholder="留空则由系统自动生成，例如：退款, 售后"
+              />
+            </div>
+            <div className="flex items-start gap-3 rounded-xl border border-border bg-muted/20 p-4">
+              <Switch
+                id="create-memory-pinned"
+                checked={createDraft.pinned}
+                onCheckedChange={(checked) =>
+                  setCreateDraft((current) => ({
+                    ...current,
+                    pinned: checked,
+                  }))
+                }
+                disabled={creating}
+              />
+              <div>
+                <Label htmlFor="create-memory-pinned">常驻画像</Label>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  仅用于核心店铺画像或身份偏好；勾选后每轮对话都会召回。
+                </p>
+              </div>
             </div>
           </div>
           <DialogFooter>
