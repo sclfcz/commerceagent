@@ -40,6 +40,11 @@ check_sync "$ROOT/shared/channel-prefixes.ts" \
   "$ROOT/src/channel-prefixes.ts" \
   "$ROOT/container/agent-runner/src/channel-prefixes.ts"
 
+# Session migration context
+check_sync "$ROOT/shared/session-migration.ts" \
+  "$ROOT/src/session-migration.ts" \
+  "$ROOT/container/agent-runner/src/session-migration.ts"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "All shared type copies are in sync."
 else

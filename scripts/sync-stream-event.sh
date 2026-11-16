@@ -43,3 +43,14 @@ for target in \
 ; do
   sync_file "$SRC_CP" "$target"
 done
+
+# --- Session migration context (2 targets: backend + agent-runner) ---
+# 旧会话 transcript → 结构化迁移摘要。Host 与 Runner 输出必须逐字节一致，
+# 因此两侧共用这份唯一真相源。
+SRC_SM="$ROOT/shared/session-migration.ts"
+for target in \
+  "$ROOT/src/session-migration.ts" \
+  "$ROOT/container/agent-runner/src/session-migration.ts" \
+; do
+  sync_file "$SRC_SM" "$target"
+done

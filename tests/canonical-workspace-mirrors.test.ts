@@ -177,7 +177,7 @@ describe('canonical workspace compatibility mirrors', () => {
     expect(db.getAgentChannelMount('telegram:mirror-chat-c')).toBeUndefined();
   });
 
-  test('provider session deletion removes runtime-session projections atomically', async () => {
+  test('provider session invalidation keeps the session and marks it for a stripped resume', () => {
     db.setRegisteredGroup('web:mirror-workspace-provider', {
       name: 'Provider Workspace',
       folder: 'mirror-workspace-provider',
@@ -201,16 +201,29 @@ describe('canonical workspace compatibility mirrors', () => {
       ),
     ).toBeDefined();
 
-    expect(db.deleteSessionsByProviderId('provider-to-delete')).toMatchObject({
-      deletedCount: 1,
+    expect(
+      db.markSessionsForThinkingStripByProviderId('provider-to-delete'),
+    ).toMatchObject({
+      markedCount: 1,
       affectedFolders: ['mirror-workspace-provider'],
     });
+    // The conversation is kept: only the resume strategy changes, so the
+    // runtime-session projection (and its SDK session id) survives.
     expect(
       db.getWorkspaceRuntimeSession(
         'mirror-workspace-provider',
         'agent-provider',
       ),
-    ).toBeUndefined();
+    ).toBeDefined();
+    expect(
+      db.getSessionResumeStripThinking(
+        'mirror-workspace-provider',
+        'agent-provider',
+      ),
+    ).toBe(true);
+    expect(db.getSession('mirror-workspace-provider', 'agent-provider')).toBe(
+      'sdk-provider-session',
+    );
   });
 
   test('deleting a product Session clears its runtime state and channel projection', async () => {

@@ -78,6 +78,8 @@ Public：
 
 `GET|PUT /api/config/system` 受 `manage_system_config` 权限保护。OpenTelemetry 字段的
 修改还要求调用者角色为 admin；其他系统配置仍按原权限策略处理。系统设置响应包含
+`blockUnverifiedModelConfigs`（默认 `false`：Agent 仍可选择尚未验证续接的上游，
+只在响应里带提示；`true` 时只有续接基线已验证的上游可以作为 Agent 的模型配置），
 `observabilityEnabled`、`observabilityEndpoint`、`observabilityPublicKey`、
 `observabilitySampleRate`、`observabilityIncludeContent` 和只读的
 `observabilityHasSecretKey`。写入请求可带 `observabilitySecretKey`；Secret Key
@@ -219,6 +221,24 @@ HTTP 状态为 409；请求不会停止现有 Runner，也不会修改绑定。
 - `POST /api/agent-profiles/:id/prompt-versions/:version/restore`
 - `POST /api/agent-profiles/:id/effective-capabilities`
 
+### 模型配置续接准入
+
+`GET /api/agent-profiles` 的 `model_configs[]` 包含
+`session_continuity: { status, checkedAt, bidirectionalProviderIds }`。`status` 为
+`verified`（该上游已验证可以续接自己产生的会话）、`unverified`（没有与当前上游
+指纹匹配的实测结果）或 `failed`（基线实测未通过）。该对象只包含状态、检查时间和
+上游 id，不包含 Base URL、模型名或任何凭据。
+
+`POST /api/agent-profiles` 与 `PATCH /api/agent-profiles/:id` 的 `model_config_id`
+按以下规则准入：
+
+- 上游基线 `failed`：一律拒绝，返回 400
+  `{ error, code: "session_continuity_failed", session_continuity }`。
+- 上游基线 `unverified`：默认允许，响应额外带
+  `warnings: [{ code: "session_continuity_unverified", message }]`。
+  当系统设置 `blockUnverifiedModelConfigs` 为 `true` 时改为拒绝，返回 400
+  `{ error, code: "session_continuity_unverified", session_continuity }`。
+
 `effective-capabilities` 返回 PromptPlan、Skill/MCP Manifest、上下文预算和最近一次
 脱敏运行快照，用于对比“配置预期”与“SDK 实际加载”。
 
@@ -327,6 +347,11 @@ Provider：
 - `POST /api/config/claude/oauth/start`
 - `POST /api/config/claude/oauth/callback`
 - `PUT /api/config/claude/custom-env`
+
+`GET /api/config/claude/providers` 返回的每个上游都带
+`sessionContinuity: { status, checkedAt, bidirectionalProviderIds }`，语义见
+`docs/session-continuity.md`。其中 `bidirectionalProviderIds` 只列出可以与该上游
+双向续接的其他上游 id。
 
 系统：
 

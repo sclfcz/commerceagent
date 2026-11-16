@@ -70,7 +70,16 @@ import {
   getRunContextSnapshot,
   hashRuntimePolicy,
 } from '../run-context-snapshot.js';
-import { getDefaultProviderId, getProviders } from '../runtime-config.js';
+import {
+  getDefaultProviderId,
+  getProviders,
+  getSystemSettings,
+  type UnifiedProvider,
+} from '../runtime-config.js';
+import {
+  summarizeProviderContinuity,
+  type ProviderContinuitySummary,
+} from '../session-continuity.js';
 
 const agentProfileRoutes = new Hono<{ Variables: Variables }>();
 const AVATARS_DIR = path.join(DATA_DIR, 'avatars');
@@ -109,6 +118,7 @@ function usesFourPartPromptPayload(input: {
 agentProfileRoutes.get('/', authMiddleware, (c) => {
   const user = c.get('user') as AuthUser;
   const profiles = listAgentProfilesForUser(user.id);
+  const providers = getProviders();
   const defaultModelConfigId = getDefaultProviderId();
   return c.json({
     profiles: profiles.map((profile) => ({
@@ -119,20 +129,97 @@ agentProfileRoutes.get('/', authMiddleware, (c) => {
         resolveEffectiveAgentProfile(profile)?.runtime_policy ??
         profile.runtime_policy,
     })),
-    model_configs: getProviders().map((provider) => ({
+    model_configs: providers.map((provider) => ({
       id: provider.id,
       name: provider.name,
       type: provider.type,
       enabled: provider.enabled,
       anthropic_model: provider.anthropicModel,
       is_default: provider.id === defaultModelConfigId,
+      session_continuity: summarizeProviderContinuity(provider, providers),
     })),
     default_model_config_id: defaultModelConfigId,
   });
 });
 
-function modelConfigExists(modelConfigId: string): boolean {
-  return getProviders().some((provider) => provider.id === modelConfigId);
+interface ModelConfigWarning {
+  code: 'session_continuity_unverified';
+  message: string;
+}
+
+interface ModelConfigRefusal {
+  error: string;
+  code: 'session_continuity_failed' | 'session_continuity_unverified';
+  session_continuity: ProviderContinuitySummary;
+}
+
+type ModelConfigSelection =
+  | { kind: 'not_found' }
+  | { kind: 'refused'; refusal: ModelConfigRefusal }
+  | {
+      kind: 'accepted';
+      provider: UnifiedProvider;
+      continuity: ProviderContinuitySummary;
+      warning: ModelConfigWarning | null;
+    };
+
+/**
+ * Model catalog admission. An upstream whose own resume baseline failed can
+ * never back an Agent: switching to it silently drops the SDK session. An
+ * upstream that was simply never probed stays selectable by default (with a
+ * warning in the response) unless the deployment opts into strict mode via
+ * the `blockUnverifiedModelConfigs` system setting.
+ */
+function resolveModelConfigSelection(
+  modelConfigId: string,
+): ModelConfigSelection {
+  const providers = getProviders();
+  const provider = providers.find((item) => item.id === modelConfigId);
+  if (!provider) return { kind: 'not_found' };
+  const continuity = summarizeProviderContinuity(provider, providers);
+  if (continuity.status === 'failed') {
+    return {
+      kind: 'refused',
+      refusal: {
+        error: `所选模型配置「${provider.name}」未通过会话续接基线验证，切换后已有会话将无法继续。请先修复该上游，或在服务器上运行 npm run probe:session-continuity 重新验证。`,
+        code: 'session_continuity_failed',
+        session_continuity: continuity,
+      },
+    };
+  }
+  if (
+    continuity.status === 'unverified' &&
+    getSystemSettings().blockUnverifiedModelConfigs
+  ) {
+    return {
+      kind: 'refused',
+      refusal: {
+        error: `当前系统要求模型配置必须通过会话续接验证，所选模型配置「${provider.name}」尚未验证。请在服务器上运行 npm run probe:session-continuity 完成验证后再选择。`,
+        code: 'session_continuity_unverified',
+        session_continuity: continuity,
+      },
+    };
+  }
+  return {
+    kind: 'accepted',
+    provider,
+    continuity,
+    warning:
+      continuity.status === 'unverified'
+        ? {
+            code: 'session_continuity_unverified',
+            message: `所选模型配置「${provider.name}」尚未通过会话续接验证：切换到其他模型配置时，该智能体的会话会以新会话继续，需要重新提供上下文。`,
+          }
+        : null,
+  };
+}
+
+function selectionWarning(selection: ModelConfigSelection | undefined): {
+  warnings?: ModelConfigWarning[];
+} {
+  return selection?.kind === 'accepted' && selection.warning
+    ? { warnings: [selection.warning] }
+    : {};
 }
 
 agentProfileRoutes.post('/', authMiddleware, async (c) => {
@@ -148,11 +235,14 @@ agentProfileRoutes.post('/', authMiddleware, async (c) => {
   if (isUnauthorizedHostSkills(user, parsed.data.runtime_policy)) {
     return c.json({ error: 'host skills require an admin role' }, 403);
   }
-  if (
-    parsed.data.model_config_id &&
-    !modelConfigExists(parsed.data.model_config_id)
-  ) {
+  const modelSelection = parsed.data.model_config_id
+    ? resolveModelConfigSelection(parsed.data.model_config_id)
+    : undefined;
+  if (modelSelection?.kind === 'not_found') {
     return c.json({ error: '所选模型配置不存在' }, 400);
+  }
+  if (modelSelection?.kind === 'refused') {
+    return c.json(modelSelection.refusal, 400);
   }
   const runtimePolicy = normalizeAgentProfileRuntimePolicy(
     parsed.data.runtime_policy,
@@ -205,7 +295,7 @@ agentProfileRoutes.post('/', authMiddleware, async (c) => {
         modelConfigId: parsed.data.model_config_id,
         runtimePolicy,
       });
-      return c.json({ profile }, 201);
+      return c.json({ profile, ...selectionWarning(modelSelection) }, 201);
     },
   );
 });
@@ -507,11 +597,14 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
         // from being published between snapshot and post-commit cleanup.
         const existing = getAgentProfileForUser(id, user.id);
         if (!existing) return c.json({ error: '智能体配置不存在' }, 404);
-        if (
-          parsed.data.model_config_id &&
-          !modelConfigExists(parsed.data.model_config_id)
-        ) {
+        const modelSelection = parsed.data.model_config_id
+          ? resolveModelConfigSelection(parsed.data.model_config_id)
+          : undefined;
+        if (modelSelection?.kind === 'not_found') {
           return c.json({ error: '所选模型配置不存在' }, 400);
+        }
+        if (modelSelection?.kind === 'refused') {
+          return c.json(modelSelection.refusal, 400);
         }
 
         const effectiveRuntimePolicy =
@@ -682,6 +775,7 @@ agentProfileRoutes.patch('/:id', authMiddleware, async (c) => {
         return c.json({
           profile,
           invalidated_runtime_jids: invalidatedRuntimeJids,
+          ...selectionWarning(modelSelection),
         });
       }),
   );

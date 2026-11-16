@@ -472,7 +472,10 @@ describe('provider runtime apply is a lossless configuration mutation', () => {
     });
     expect(retryResponse.status).toBe(200);
     expect(restartedQueue.isGroupRuntimeSafetyBlocked(jid)).toBe(false);
-    expect(db.getSession(folder)).toBeUndefined();
+    // The conversation survives the invalidation; the next resume strips the
+    // thinking blocks the new upstream cannot verify.
+    expect(db.getSession(folder)).toBe(staleSessionId);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(true);
     expect(
       runtimeConfig.getProviders().find((item) => item.id === provider.id)
         ?.anthropicModel,
@@ -594,7 +597,8 @@ describe('provider runtime apply is a lossless configuration mutation', () => {
       anthropicModel: 'persisted-model',
     });
     expect(repairResponse.status).toBe(200);
-    expect(db.getSession(folder)).toBeUndefined();
+    expect(db.getSession(folder)).toBe(staleSessionId);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(true);
     expect(restartedQueue.isGroupRuntimeSafetyBlocked(jid)).toBe(false);
   });
 
@@ -662,7 +666,8 @@ describe('provider runtime apply is a lossless configuration mutation', () => {
             true,
       ),
     );
-    expect(db.getSession(folder)).toBeUndefined();
+    expect(db.getSession(folder)).toBe(staleSessionId);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(true);
     expect(
       db.getRouterState(`provider_session_invalidation_pending:${target.id}`),
     ).toBeUndefined();
@@ -794,7 +799,7 @@ describe('provider runtime apply is a lossless configuration mutation', () => {
   );
 });
 
-describe('provider session invalidation only removes attributable sessions', () => {
+describe('provider session invalidation only marks attributable sessions', () => {
   function bindIdleWorkspace(jid: string, folder: string, sessionId: string) {
     const group = registerWorkspace(jid, folder);
     const sessions = { [folder]: sessionId };
@@ -863,7 +868,7 @@ describe('provider session invalidation only removes attributable sessions', () 
     expect(db.getSession(folder)).toBe(sessionId);
   });
 
-  test('clears an unbound session when credentials override but the changed model does not', async () => {
+  test('marks an unbound session when credentials override but the changed model does not', async () => {
     const folder = unique('credential-only-override');
     const jid = `web:${folder}`;
     const sessionId = unique('credential-override-session');
@@ -885,10 +890,11 @@ describe('provider session invalidation only removes attributable sessions', () 
     });
 
     expect(response.status).toBe(200);
-    expect(db.getSession(folder)).toBeUndefined();
+    expect(db.getSession(folder)).toBe(sessionId);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(true);
   });
 
-  test('clears an unbound session unless every changed protocol field is overridden', async () => {
+  test('marks an unbound session unless every changed protocol field is overridden', async () => {
     const folder = unique('partial-protocol-override');
     const jid = `web:${folder}`;
     const sessionId = unique('partial-override-session');
@@ -912,7 +918,8 @@ describe('provider session invalidation only removes attributable sessions', () 
     });
 
     expect(response.status).toBe(200);
-    expect(db.getSession(folder)).toBeUndefined();
+    expect(db.getSession(folder)).toBe(sessionId);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(true);
   });
 
   test('repairs a corrupt durable invalidation marker instead of leaving a permanent gate', async () => {
@@ -945,7 +952,8 @@ describe('provider session invalidation only removes attributable sessions', () 
     });
 
     expect(response.status).toBe(200);
-    expect(db.getSession(folder)).toBeUndefined();
+    expect(db.getSession(folder)).toBe(sessionId);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(true);
     expect(restartedQueue.isGroupRuntimeSafetyBlocked(jid)).toBe(false);
     expect(
       db.getRouterState(`provider_session_invalidation_pending:${provider.id}`),
@@ -981,7 +989,7 @@ describe('provider session invalidation only removes attributable sessions', () 
     expect(db.getSession(folder)).toBe(sessionId);
   });
 
-  test('still clears a legacy unbound session in a true single-provider workspace', async () => {
+  test('marks a legacy unbound session in a true single-provider workspace', async () => {
     const folder = unique('single-provider');
     const jid = `web:${folder}`;
     const sessionId = unique('legacy-session');
@@ -1000,10 +1008,11 @@ describe('provider session invalidation only removes attributable sessions', () 
     });
 
     expect(response.status).toBe(200);
-    expect(db.getSession(folder)).toBeUndefined();
+    expect(db.getSession(folder)).toBe(sessionId);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(true);
   });
 
-  test('clears a bound third-party session for a model-only change', async () => {
+  test('marks a bound third-party session for a model-only change', async () => {
     const folder = unique('third-party-model');
     const jid = `web:${folder}`;
     const sessionId = unique('bound-session');
@@ -1024,8 +1033,11 @@ describe('provider session invalidation only removes attributable sessions', () 
     });
 
     expect(response.status).toBe(200);
-    expect(db.getSession(folder)).toBeUndefined();
-    expect(db.getSessionProviderId(folder)).toBeUndefined();
+    expect(db.getSession(folder)).toBe(sessionId);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(true);
+    // The binding stays: the upstream is still the one this session resumes
+    // under, only its thinking signatures are stale.
+    expect(db.getSessionProviderId(folder)).toBe(provider.id);
   });
 
   test('does not clear a provider session when the requested config is invalid', async () => {
@@ -1088,7 +1100,9 @@ describe('provider session invalidation only removes attributable sessions', () 
 
     expect(response.status).toBe(200);
     expect(db.getSession(folder)).toBe(mainSessionId);
-    expect(db.getSession(folder, 'agent-a')).toBeUndefined();
+    expect(db.getSession(folder, 'agent-a')).toBe(agentSessionId);
+    expect(db.getSessionResumeStripThinking(folder, 'agent-a')).toBe(true);
+    expect(db.getSessionResumeStripThinking(folder)).toBe(false);
     expect(sessions[folder]).toBe(mainSessionId);
   });
 });
