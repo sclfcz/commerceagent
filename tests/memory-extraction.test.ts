@@ -32,6 +32,8 @@ const memoryStore = await import('../src/memory-store.js');
 const candidateStore = await import('../src/memory-candidate-store.js');
 const memoryService = await import('../src/memory-service.js');
 const extraction = await import('../src/memory-extraction/index.js');
+const { parseExtractionResponse } =
+  await import('../src/memory-extraction/schema.js');
 const {
   MEMORY_EXTRACTION_CANDIDATE_TTL_DAYS,
   MEMORY_EXTRACTION_MAX_CANDIDATES,
@@ -644,5 +646,47 @@ describe('Workspace Memory extraction', () => {
     });
     expect(result.outcome).toBe('no_human_message');
     expect(llm).not.toHaveBeenCalled();
+  });
+});
+
+describe('extraction response parser', () => {
+  test('keeps the first complete object when prose with braces follows it', () => {
+    const raw = [
+      '```json',
+      JSON.stringify({ candidates: [candidate()] }),
+      '```',
+      '说明：上面的 {candidates} 字段已经按格式输出。',
+    ].join('\n');
+    const parsed = parseExtractionResponse(raw);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.candidates).toHaveLength(1);
+  });
+
+  test('tolerates trailing commas emitted by the model', () => {
+    const raw =
+      '{"candidates":[{"kind":"decision","title":"t","content":"c","confidence":0.9,"importance":0.5,"evidence_message_ids":[],},],}';
+    const parsed = parseExtractionResponse(raw);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.candidates[0]?.title).toBe('t');
+  });
+
+  test('leaves comma-before-bracket text inside string values untouched', () => {
+    const raw =
+      '{"candidates":[{"kind":"decision","title":"t","content":"示例 {\\"a\\": 1,} 和 [1, ]","confidence":0.9,"importance":0.5,"evidence_message_ids":[],},],}';
+    const parsed = parseExtractionResponse(raw);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.candidates[0]?.content).toBe('示例 {"a": 1,} 和 [1, ]');
+    }
+  });
+
+  test('does not echo response content in the rejection reason', () => {
+    const secret = '不该出现在错误信息里的对话内容';
+    const parsed = parseExtractionResponse(`前缀 ${secret} {"candidates": [}`);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.reason).toContain('response is not valid JSON');
+      expect(parsed.reason).not.toContain(secret);
+    }
   });
 });
