@@ -4307,7 +4307,10 @@ export interface MemoryExtractionMessage {
  * final answers, because a session summary has to describe what was concluded,
  * not just what was asked. Scheduled-task turns, slash commands and queued
  * follow-ups are excluded here so a scheduled run can never become the source
- * of a candidate — extraction is for human-initiated conversation only.
+ * of a candidate — extraction is for human-initiated conversation only. The
+ * task's terminal summary row carries `task_id = NULL` but
+ * `source_kind = 'scheduled_task_result'`, so the source-kind filter (not the
+ * task filter) is what keeps it out of the transcript.
  */
 export function getMemoryExtractionMessages(
   chatJid: string,
@@ -4321,7 +4324,9 @@ export function getMemoryExtractionMessages(
        WHERE chat_jid = ?
          AND (timestamp > ? OR (timestamp = ? AND id > ?))
          AND task_id IS NULL
-         AND COALESCE(source_kind, '') NOT IN ('user_command', 'scheduled_task_prompt')
+         AND COALESCE(source_kind, '') NOT IN (
+           'user_command', 'scheduled_task_prompt', 'scheduled_task_result'
+         )
          AND COALESCE(delivery_status, '') NOT IN ('queued', 'promoting', 'cancelled')
        ORDER BY timestamp ASC, id ASC
        LIMIT ?`,

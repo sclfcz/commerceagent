@@ -63,6 +63,7 @@ function storeMessage(input: {
   isFromMe: boolean;
   minutesAgo: number;
   chatJid?: string;
+  meta?: { sourceKind: 'scheduled_task_result'; taskId?: string | null };
 }): { id: string; timestamp: string } {
   messageSeq += 1;
   const timestamp = new Date(
@@ -77,6 +78,7 @@ function storeMessage(input: {
     input.content,
     timestamp,
     input.isFromMe,
+    input.meta ? { meta: input.meta } : undefined,
   );
   return { id, timestamp };
 }
@@ -646,6 +648,43 @@ describe('Workspace Memory extraction', () => {
     });
     expect(result.outcome).toBe('no_human_message');
     expect(llm).not.toHaveBeenCalled();
+  });
+
+  test('scheduled task results never enter the extraction transcript', async () => {
+    storeMessage({
+      content: '售后口径按定稿版本对外。',
+      isFromMe: false,
+      minutesAgo: 90,
+    });
+    const answer = storeMessage({
+      content: '已按定稿口径输出，未定项单独列出。',
+      isFromMe: true,
+      minutesAgo: 89,
+    });
+    // The terminal summary row of a scheduled run: `task_id` is NULL, so only
+    // the source-kind filter can keep it out of the transcript.
+    storeMessage({
+      content: '## 定时任务执行完成：本次只提交待确认候选',
+      isFromMe: true,
+      minutesAgo: 60,
+      meta: { sourceKind: 'scheduled_task_result' },
+    });
+    const llm = fakeLlm([]);
+
+    const result = await extraction.runMemoryExtractionForSession(session(), {
+      llm,
+      now: () => NOW,
+      settings: IDLE_SETTINGS,
+    });
+
+    expect(result.outcome).toBe('no_candidates');
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(llm.mock.calls[0][0]).not.toContain('定时任务执行完成');
+    const cursor = await candidateStore.getWorkspaceMemoryExtractionCursor(
+      WORKSPACE_JID,
+      CHAT_JID,
+    );
+    expect(cursor?.lastMessageId).toBe(answer.id);
   });
 });
 
