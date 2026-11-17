@@ -13,6 +13,7 @@
 - 系统设置及默认值：`src/runtime-config.ts`
 - 渠道能力与会话路由：`src/im-channel-capabilities.ts`、`src/channel-mount-service.ts`
 - StreamEvent：`shared/stream-event.ts`
+- 会话连续性（配置变更、账号轮换与模型切换）：`docs/session-continuity.md`
 
 `docs/agent-first-architecture-plan.md` 和
 `docs/claude-code-plugin-automation-design.md` 是历史设计记录，不作为当前接口或数据结构的真相源。
