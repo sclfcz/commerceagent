@@ -2130,6 +2130,19 @@ export function buildContainerArgs(
   return args;
 }
 
+/**
+ * Agent-runner containers are named `commerceagent-<folder>[-<agentId>]-<epochMillis>`
+ * and run with `--rm`, so a name only survives when the runner crashed. Startup
+ * cleanup must match this shape exactly: a plain `commerceagent-` name filter
+ * also catches unrelated containers such as the `commerceagent-dist-*` services
+ * from docker-compose.distributed.yml.
+ */
+const AGENT_RUNNER_CONTAINER_NAME = /^commerceagent-.+-\d{13}$/;
+
+export function isAgentRunnerContainerName(name: string): boolean {
+  return AGENT_RUNNER_CONTAINER_NAME.test(name);
+}
+
 export function shouldAddHostGateway(
   proxyRequestedGateway: boolean,
   environment: NodeJS.ProcessEnv = process.env,

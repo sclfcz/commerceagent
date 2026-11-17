@@ -68,6 +68,7 @@ import {
   ContainerOutput,
   cleanupContainerTaskRuntimeEnvDirs,
   closeRunnerAfterRotatingProviderTurn,
+  isAgentRunnerContainerName,
   runContainerAgent,
   runHostAgent,
   runAgentWithModelFallback,
@@ -17876,7 +17877,11 @@ async function ensureDockerRunning(): Promise<void> {
     }
   }
 
-  // Kill and clean up orphaned commerceagent containers from previous runs
+  // Kill and clean up orphaned commerceagent agent-runner containers from
+  // previous runs. The name filter is a cheap server-side narrowing; the actual
+  // selection uses the runner naming scheme so unrelated containers that merely
+  // start with "commerceagent-" (docker-compose.distributed.yml services, for
+  // example) are left alone.
   try {
     const { stdout } = await execFileAsync(
       'docker',
@@ -17884,7 +17889,11 @@ async function ensureDockerRunning(): Promise<void> {
       { timeout: 10000 },
     );
     const output = typeof stdout === 'string' ? stdout : String(stdout);
-    const orphans = output.trim().split('\n').filter(Boolean);
+    const orphans = output
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .filter(isAgentRunnerContainerName);
     for (const name of orphans) {
       try {
         await execFileAsync('docker', ['stop', name], { timeout: 10000 });
