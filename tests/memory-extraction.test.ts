@@ -32,6 +32,8 @@ const memoryStore = await import('../src/memory-store.js');
 const candidateStore = await import('../src/memory-candidate-store.js');
 const memoryService = await import('../src/memory-service.js');
 const extraction = await import('../src/memory-extraction/index.js');
+const { parseExtractionResponse } =
+  await import('../src/memory-extraction/schema.js');
 const {
   MEMORY_EXTRACTION_CANDIDATE_TTL_DAYS,
   MEMORY_EXTRACTION_MAX_CANDIDATES,
@@ -61,6 +63,7 @@ function storeMessage(input: {
   isFromMe: boolean;
   minutesAgo: number;
   chatJid?: string;
+  meta?: { sourceKind: 'scheduled_task_result'; taskId?: string | null };
 }): { id: string; timestamp: string } {
   messageSeq += 1;
   const timestamp = new Date(
@@ -75,6 +78,7 @@ function storeMessage(input: {
     input.content,
     timestamp,
     input.isFromMe,
+    input.meta ? { meta: input.meta } : undefined,
   );
   return { id, timestamp };
 }
@@ -644,5 +648,84 @@ describe('Workspace Memory extraction', () => {
     });
     expect(result.outcome).toBe('no_human_message');
     expect(llm).not.toHaveBeenCalled();
+  });
+
+  test('scheduled task results never enter the extraction transcript', async () => {
+    storeMessage({
+      content: '售后口径按定稿版本对外。',
+      isFromMe: false,
+      minutesAgo: 90,
+    });
+    const answer = storeMessage({
+      content: '已按定稿口径输出，未定项单独列出。',
+      isFromMe: true,
+      minutesAgo: 89,
+    });
+    // The terminal summary row of a scheduled run: `task_id` is NULL, so only
+    // the source-kind filter can keep it out of the transcript.
+    storeMessage({
+      content: '## 定时任务执行完成：本次只提交待确认候选',
+      isFromMe: true,
+      minutesAgo: 60,
+      meta: { sourceKind: 'scheduled_task_result' },
+    });
+    const llm = fakeLlm([]);
+
+    const result = await extraction.runMemoryExtractionForSession(session(), {
+      llm,
+      now: () => NOW,
+      settings: IDLE_SETTINGS,
+    });
+
+    expect(result.outcome).toBe('no_candidates');
+    expect(llm).toHaveBeenCalledTimes(1);
+    expect(llm.mock.calls[0][0]).not.toContain('定时任务执行完成');
+    const cursor = await candidateStore.getWorkspaceMemoryExtractionCursor(
+      WORKSPACE_JID,
+      CHAT_JID,
+    );
+    expect(cursor?.lastMessageId).toBe(answer.id);
+  });
+});
+
+describe('extraction response parser', () => {
+  test('keeps the first complete object when prose with braces follows it', () => {
+    const raw = [
+      '```json',
+      JSON.stringify({ candidates: [candidate()] }),
+      '```',
+      '说明：上面的 {candidates} 字段已经按格式输出。',
+    ].join('\n');
+    const parsed = parseExtractionResponse(raw);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.candidates).toHaveLength(1);
+  });
+
+  test('tolerates trailing commas emitted by the model', () => {
+    const raw =
+      '{"candidates":[{"kind":"decision","title":"t","content":"c","confidence":0.9,"importance":0.5,"evidence_message_ids":[],},],}';
+    const parsed = parseExtractionResponse(raw);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.candidates[0]?.title).toBe('t');
+  });
+
+  test('leaves comma-before-bracket text inside string values untouched', () => {
+    const raw =
+      '{"candidates":[{"kind":"decision","title":"t","content":"示例 {\\"a\\": 1,} 和 [1, ]","confidence":0.9,"importance":0.5,"evidence_message_ids":[],},],}';
+    const parsed = parseExtractionResponse(raw);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.candidates[0]?.content).toBe('示例 {"a": 1,} 和 [1, ]');
+    }
+  });
+
+  test('does not echo response content in the rejection reason', () => {
+    const secret = '不该出现在错误信息里的对话内容';
+    const parsed = parseExtractionResponse(`前缀 ${secret} {"candidates": [}`);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) {
+      expect(parsed.reason).toContain('response is not valid JSON');
+      expect(parsed.reason).not.toContain(secret);
+    }
   });
 });
