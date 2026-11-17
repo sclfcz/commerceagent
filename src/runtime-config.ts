@@ -4362,37 +4362,22 @@ function readSystemSettingsFromFile(): SystemSettings | null {
   const raw = JSON.parse(
     fs.readFileSync(SYSTEM_SETTINGS_FILE, 'utf-8'),
   ) as Record<string, unknown>;
+  // A persisted file only owns the keys it actually contains. Everything else
+  // still follows the documented "Web 持久设置 > 环境变量 > 代码默认值"
+  // precedence, so `MEMORY_EXTRACTION_ENABLED=false` or `CONTAINER_TIMEOUT`
+  // keep working on an install that has saved some unrelated setting.
+  if (
+    raw.mainAgentAutoCompactWindow === undefined &&
+    raw.autoCompactWindow !== undefined
+  ) {
+    // The former system-wide alias must win for upgraded files even though the
+    // env-derived settings below always define the new key.
+    raw.mainAgentAutoCompactWindow = raw.autoCompactWindow;
+  }
   return normalizeSystemSettings(
-    {
-      observabilityEnabled:
-        raw.observabilityEnabled ??
-        parseEnvBoolean(process.env.COMMERCEAGENT_OTEL_ENABLED),
-      observabilityEndpoint:
-        raw.observabilityEndpoint ?? process.env.COMMERCEAGENT_OTEL_ENDPOINT,
-      observabilityPublicKey:
-        raw.observabilityPublicKey ?? process.env.COMMERCEAGENT_OTEL_PUBLIC_KEY,
-      observabilitySampleRate:
-        raw.observabilitySampleRate ??
-        parseEnvNumber(process.env.COMMERCEAGENT_OTEL_SAMPLE_RATE),
-      observabilityIncludeContent:
-        raw.observabilityIncludeContent ??
-        parseEnvBoolean(process.env.COMMERCEAGENT_OTEL_INCLUDE_CONTENT),
-      ...raw,
-    },
+    { ...buildEnvFallbackSettings(), ...raw },
     'file',
   );
-}
-
-function parseEnvBoolean(value: string | undefined): boolean | undefined {
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  return undefined;
-}
-
-function parseEnvNumber(value: string | undefined): number | undefined {
-  if (!value?.trim()) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 export function isSafeOtelEndpoint(value: string): boolean {
