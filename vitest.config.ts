@@ -21,6 +21,12 @@ export default defineConfig({
     },
   },
   test: {
+    // Workspace Memory tests boot a real embedded PostgreSQL (PGlite) per test
+    // file. Under parallel load the first WASM compile can exceed Vitest's 5s
+    // default, which made those suites flaky on a cold cache. The limits stay
+    // bounded so a genuine hang still fails the run.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     exclude: [
       '**/node_modules/**',
       '**/dist/**',

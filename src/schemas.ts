@@ -489,11 +489,17 @@ export const WorkspaceMemoryProvenanceSchema = z
   })
   .strict();
 
+const WorkspaceMemorySearchKeysSchema = z
+  .array(z.string().trim().min(1).max(32))
+  .max(12);
+
 const WorkspaceMemoryValueFields = {
   kind: WorkspaceMemoryKindSchema,
   title: z.string().trim().min(1).max(500).nullable().optional(),
   content: z.string().trim().min(1).max(32_768),
   canonicalKey: z.string().trim().min(1).max(500).nullable().optional(),
+  searchKeys: WorkspaceMemorySearchKeysSchema.nullable().optional(),
+  pinned: z.boolean().optional(),
   status: WritableWorkspaceMemoryStatusSchema.optional(),
   importance: z.number().min(0).max(1).optional(),
   confidence: z.number().min(0).max(1).optional(),
@@ -536,6 +542,8 @@ export const WorkspaceMemoryPatchSchema = z
     title: WorkspaceMemoryValueFields.title,
     content: WorkspaceMemoryValueFields.content.optional(),
     canonicalKey: WorkspaceMemoryValueFields.canonicalKey,
+    searchKeys: WorkspaceMemorySearchKeysSchema.nullable().optional(),
+    pinned: z.boolean().optional(),
     status: WritableWorkspaceMemoryStatusSchema.optional(),
     importance: WorkspaceMemoryValueFields.importance,
     confidence: WorkspaceMemoryValueFields.confidence,
@@ -553,6 +561,8 @@ export const WorkspaceMemoryPatchSchema = z
         'title',
         'content',
         'canonicalKey',
+        'searchKeys',
+        'pinned',
         'status',
         'importance',
         'confidence',
@@ -574,6 +584,26 @@ export const WorkspaceMemoryForgetSchema = z
     idempotencyKey: z.string().trim().min(1).max(128).optional(),
     reason: z.string().trim().min(1).max(1000).nullable().optional(),
     provenance: WorkspaceMemoryProvenanceSchema.optional(),
+  })
+  .strict();
+
+export const WorkspaceMemoryCandidateConfirmSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
+    kind: WorkspaceMemoryKindSchema.optional(),
+    title: WorkspaceMemoryValueFields.title,
+    content: WorkspaceMemoryValueFields.content.optional(),
+    canonicalKey: WorkspaceMemoryValueFields.canonicalKey,
+    importance: WorkspaceMemoryValueFields.importance,
+    confidence: WorkspaceMemoryValueFields.confidence,
+  })
+  .strict();
+
+export const WorkspaceMemoryCandidateRejectSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
   })
   .strict();
 
@@ -722,12 +752,31 @@ export const SystemSettingsSchema = z
     loginLockoutMinutes: z.number().int().min(1).max(1440).optional(),
     fallbackModel: z.string().max(64).optional(),
     blockUnverifiedModelConfigs: z.boolean().optional(),
+    memoryExtractionEnabled: z.boolean().optional(),
+    memoryExtractionIdleMs: z
+      .number()
+      .int()
+      .min(60_000)
+      .max(86_400_000)
+      .optional(),
     observabilityEnabled: z.boolean().optional(),
     observabilityEndpoint: z.string().max(512).optional(),
     observabilityPublicKey: z.string().max(256).optional(),
     observabilitySampleRate: z.number().min(0).max(1).optional(),
     observabilityIncludeContent: z.boolean().optional(),
     observabilitySecretKey: z.string().max(2048).optional(),
+    memoryConsolidationEnabled: z.boolean().optional(),
+    memoryConsolidationTime: z
+      .string()
+      .regex(/^([01][0-9]|2[0-3]):[0-5][0-9]$/, 'Must be HH:MM (24-hour)')
+      .optional(),
+    memoryConsolidationBatchSize: z.number().int().min(1).max(1000).optional(),
+    memoryConsolidationMaxRuntimeMs: z
+      .number()
+      .int()
+      .min(10000)
+      .max(3600000)
+      .optional(),
   })
   .strict();
 

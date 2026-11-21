@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-import Database from 'better-sqlite3';
 import {
   afterAll,
   afterEach,
@@ -33,7 +32,8 @@ vi.mock('../src/logger.js', () => ({
 }));
 vi.mock('../src/middleware/auth.ts', () => ({
   authMiddleware: async (c: any, next: any) => {
-    const id = process.env.COMMERCEAGENT_OWNER_PROFILE_ROUTE_USER ?? 'route-owner';
+    const id =
+      process.env.COMMERCEAGENT_OWNER_PROFILE_ROUTE_USER ?? 'route-owner';
     c.set('user', {
       id,
       username: id,
@@ -83,6 +83,17 @@ function asUser(id: string, role: 'member' | 'admin' = 'member'): void {
 
 function requestHash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+async function memoryRows<T extends Record<string, unknown>>(
+  sql: string,
+  ...params: unknown[]
+): Promise<T[]> {
+  const result = await memoryStore.queryWorkspaceMemoryStoreDatabase<T>(
+    sql,
+    params,
+  );
+  return result.rows;
 }
 
 async function ownerProfileRequest(
@@ -152,7 +163,8 @@ afterEach(() => {
   delete process.env.COMMERCEAGENT_OWNER_PROFILE_ROUTE_ROLE;
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await memoryStore.closeWorkspaceMemoryStore();
   if (db.isDatabaseInitialized()) db.closeDatabase();
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -239,26 +251,19 @@ describe('/api/workspaces/:jid/owner-profile', () => {
       },
     });
 
-    const raw = new Database(path.join(storeDir, 'messages.db'), {
-      readonly: true,
-    });
-    const actors = raw
-      .prepare(
-        `SELECT actor_id
-         FROM workspace_memory_versions
-         WHERE workspace_jid = ? AND canonical_key = ?
-         ORDER BY revision`,
-      )
-      .all(
-        homeJid,
-        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-      ) as Array<{ actor_id: string }>;
+    const actors = await memoryRows<{ actor_id: string }>(
+      `SELECT actor_id
+       FROM workspace_memory_versions
+       WHERE workspace_jid = $1 AND canonical_key = $2
+       ORDER BY revision`,
+      homeJid,
+      memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+    );
     expect(actors).toEqual([
       { actor_id: OWNER_ID },
       { actor_id: OWNER_ID },
       { actor_id: OWNER_ID },
     ]);
-    raw.close();
   });
 
   test('owner can permanently skip first-wake onboarding', async () => {
@@ -352,24 +357,23 @@ describe('/api/workspaces/:jid/owner-profile', () => {
     const genericCreate = await genericMemoryRequest(skipHomeJid, '', 'POST', {
       kind: 'fact',
       content: 'generic create',
-      canonicalKey: memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+      canonicalKey:
+        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
     });
     expect(genericCreate).toMatchObject({
       status: 400,
       body: { error: 'reserved_canonical_key' },
     });
 
-    const raw = new Database(path.join(storeDir, 'messages.db'));
-    const item = raw
-      .prepare(
+    const item = (
+      await memoryRows<{ id: string; store_id: string; revision: number }>(
         `SELECT id, store_id, revision
          FROM workspace_memory_items
-         WHERE workspace_jid = ? AND canonical_key = ?`,
-      )
-      .get(
+         WHERE workspace_jid = $1 AND canonical_key = $2`,
         skipHomeJid,
         memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-      ) as { id: string; store_id: string; revision: number };
+      )
+    )[0];
     const legacyCreateKey = 'route-legacy-generic-create-replay';
     const legacyUpdateKey = 'route-legacy-generic-update-replay';
     const legacyForgetKey = 'route-legacy-generic-forget-replay';
@@ -384,13 +388,12 @@ describe('/api/workspaces/:jid/owner-profile', () => {
       expectedRevision: item.revision,
       reason: null,
     });
-    raw
-      .prepare(
-        `UPDATE workspace_memory_items
-       SET create_idempotency_key = ?, create_request_hash = NULL
-       WHERE id = ?`,
-      )
-      .run(legacyCreateKey, item.id);
+    await memoryStore.queryWorkspaceMemoryStoreDatabase(
+      `UPDATE workspace_memory_items
+       SET create_idempotency_key = $1, create_request_hash = NULL
+       WHERE id = $2`,
+      [legacyCreateKey, item.id],
+    );
     const leakedReplay = JSON.stringify({
       store: { id: item.store_id, workspaceJid: skipHomeJid, revision: 1 },
       item: {
@@ -402,16 +405,14 @@ describe('/api/workspaces/:jid/owner-profile', () => {
         revision: item.revision,
       },
     });
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_mutation_requests (
+    await memoryStore.queryWorkspaceMemoryStoreDatabase(
+      `INSERT INTO workspace_memory_mutation_requests (
         store_id, idempotency_key, operation, item_id, request_hash,
         response_json, created_at
       ) VALUES
-        (?, ?, 'update', ?, ?, ?, ?),
-        (?, ?, 'forget', ?, ?, ?, ?)`,
-      )
-      .run(
+        ($1, $2, 'update', $3, $4, $5, $6),
+        ($7, $8, 'forget', $9, $10, $11, $12)`,
+      [
         item.store_id,
         legacyUpdateKey,
         item.id,
@@ -424,8 +425,8 @@ describe('/api/workspaces/:jid/owner-profile', () => {
         legacyForgetHash,
         leakedReplay,
         '2026-07-28T15:00:00.000Z',
-      );
-    raw.close();
+      ],
+    );
 
     const genericUpdate = await genericMemoryRequest(
       skipHomeJid,

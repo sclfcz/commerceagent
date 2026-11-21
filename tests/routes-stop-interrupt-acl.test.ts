@@ -106,7 +106,7 @@ async function post(
   return { status: res.status, body: await res.json().catch(() => ({})) };
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   fs.mkdirSync(path.join(tmpDataDir, 'db'), { recursive: true });
   fs.mkdirSync(path.join(tmpDataDir, 'groups'), { recursive: true });
   db.initDatabase();
@@ -118,15 +118,15 @@ beforeAll(() => {
   } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   try {
-    db.deleteRegisteredGroup(GROUP_JID);
+    await db.deleteRegisteredGroup(GROUP_JID);
   } catch {
     /* ignore */
   }
 });
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env.COMMERCEAGENT_TEST_USER_ID;
   delete process.env.COMMERCEAGENT_TEST_USER_ROLE;
 });

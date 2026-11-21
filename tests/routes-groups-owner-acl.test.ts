@@ -95,7 +95,7 @@ function asUser(userId: string, role: 'admin' | 'member' = 'member'): void {
 // Persistent stub cache (see setWebDeps below) — stable across getRegisteredGroups() calls.
 const webDepsCache: Record<string, unknown> = {};
 
-beforeAll(() => {
+beforeAll(async () => {
   fs.mkdirSync(path.join(tmpDataDir, 'db'), { recursive: true });
   fs.mkdirSync(path.join(tmpDataDir, 'groups'), { recursive: true });
   db.initDatabase();
@@ -108,7 +108,7 @@ beforeAll(() => {
   } as unknown as Parameters<typeof webContext.setWebDeps>[0]);
 });
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env.COMMERCEAGENT_TEST_USER_ID;
   delete process.env.COMMERCEAGENT_TEST_USER_ROLE;
 });
@@ -117,7 +117,7 @@ describe('POST /:jid/reset-owner (admin break-glass)', () => {
   const JID = 'feishu:stuck-group';
   const FOLDER = 'stuck-group';
 
-  beforeEach(() => {
+  beforeEach(async () => {
     db.setRegisteredGroup(JID, {
       name: 'Stuck IM Group',
       folder: FOLDER,
@@ -131,9 +131,9 @@ describe('POST /:jid/reset-owner (admin break-glass)', () => {
     } as any);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      db.deleteRegisteredGroup(JID);
+      await db.deleteRegisteredGroup(JID);
     } catch {
       /* ignore */
     }
@@ -179,7 +179,7 @@ describe('PATCH /:jid preserves owner fields on rename (regression)', () => {
   const JID = 'web:rename-me';
   const FOLDER = 'rename-me';
 
-  beforeEach(() => {
+  beforeEach(async () => {
     db.setRegisteredGroup(JID, {
       name: 'Original',
       folder: FOLDER,
@@ -193,9 +193,9 @@ describe('PATCH /:jid preserves owner fields on rename (regression)', () => {
     } as any);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     try {
-      db.deleteRegisteredGroup(JID);
+      await db.deleteRegisteredGroup(JID);
     } catch {
       /* ignore */
     }
@@ -250,7 +250,7 @@ describe('PATCH /:jid execution mode runtime boundary', () => {
     } finally {
       runtimeConfig.saveSystemSettings({ adminHostOnlyMode: false });
       delete webDepsCache[jid];
-      db.deleteRegisteredGroup(jid);
+      await db.deleteRegisteredGroup(jid);
     }
   });
 
@@ -292,7 +292,7 @@ describe('PATCH /:jid execution mode runtime boundary', () => {
     expect(sessions[folder]).toBeUndefined();
     expect(stopGroup).toHaveBeenCalledTimes(2);
 
-    db.deleteGroupData(jid, folder);
+    await db.deleteGroupData(jid, folder);
   });
 });
 
@@ -303,7 +303,7 @@ describe('DELETE /:jid blocks channel_mounts-bound workspaces', () => {
   const HOME_JID = 'web:mounted-delete-home';
   const HOME_FOLDER = 'mounted-delete-home';
 
-  beforeEach(() => {
+  beforeEach(async () => {
     db.setRegisteredGroup(JID, {
       name: 'Mounted Workspace',
       folder: FOLDER,
@@ -338,11 +338,11 @@ describe('DELETE /:jid blocks channel_mounts-bound workspaces', () => {
     } as any);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const jid of [JID, IM_JID, HOME_JID]) {
       delete webDepsCache[jid];
       try {
-        db.deleteRegisteredGroup(jid);
+        await db.deleteRegisteredGroup(jid);
       } catch {
         /* ignore */
       }
@@ -605,7 +605,7 @@ describe('DELETE /:jid mutation pause', () => {
       await queue.shutdown(0);
       delete webDepsCache[jid];
       try {
-        db.deleteGroupData(jid, folder);
+        await db.deleteGroupData(jid, folder);
       } catch {
         /* ignore */
       }
@@ -662,7 +662,7 @@ describe('DELETE /:jid mutation pause', () => {
       expect(db.getWorkspaceAgentProfileId(folder)).toBe(profile.id);
       expect(fs.existsSync(workspaceDir)).toBe(true);
     } finally {
-      db.deleteGroupData(jid, folder);
+      await db.deleteGroupData(jid, folder);
       fs.rmSync(workspaceDir, { recursive: true, force: true });
     }
   });
@@ -701,7 +701,7 @@ describe('PATCH /:jid/agent-profile two-phase runtime quiesce', () => {
       code: 'HOME_WORKSPACE_AGENT_IMMUTABLE',
     });
     expect(db.getWorkspaceAgentProfileId(folder)).toBe(builtIn.id);
-    db.deleteRegisteredGroup(jid);
+    await db.deleteRegisteredGroup(jid);
   });
 
   test('pre-commit stop failure leaves the workspace AgentProfile unchanged', async () => {
@@ -750,7 +750,7 @@ describe('PATCH /:jid/agent-profile two-phase runtime quiesce', () => {
       retryable: true,
     });
     expect(db.getWorkspaceAgentProfileId(folder)).toBe(oldProfile.id);
-    db.deleteRegisteredGroup(jid);
+    await db.deleteRegisteredGroup(jid);
   });
 
   test('post-commit failure reports persisted and identical retry runs both cleanup passes', async () => {
@@ -815,7 +815,7 @@ describe('PATCH /:jid/agent-profile two-phase runtime quiesce', () => {
     });
     expect(stopGroup).toHaveBeenCalledTimes(4);
     expect(db.getWorkspaceAgentProfileId(folder)).toBe(newProfile.id);
-    db.deleteRegisteredGroup(jid);
+    await db.deleteRegisteredGroup(jid);
   });
 
   test('B→A migration waits for an A patch lock and only quiesces against A-new', async () => {
@@ -904,8 +904,8 @@ describe('PATCH /:jid/agent-profile two-phase runtime quiesce', () => {
       targetA.version + 1,
       targetA.version + 1,
     ]);
-    db.deleteRegisteredGroup(jid);
-    db.deleteRegisteredGroup(existingAJid);
+    await db.deleteRegisteredGroup(jid);
+    await db.deleteRegisteredGroup(existingAJid);
   });
 
   test('migration releases wrongly-observed old lock and retries with the current old profile', async () => {
@@ -999,7 +999,7 @@ describe('PATCH /:jid/agent-profile two-phase runtime quiesce', () => {
     expect(migrationResponse.status).toBe(200);
     expect(db.getWorkspaceAgentProfileId(folder)).toBe(targetB.id);
     expect(stopGroup).toHaveBeenCalledTimes(2);
-    db.deleteRegisteredGroup(jid);
+    await db.deleteRegisteredGroup(jid);
   });
 
   test('archived target wins the lock and migration cannot publish a dangling mapping', async () => {
@@ -1064,7 +1064,7 @@ describe('PATCH /:jid/agent-profile two-phase runtime quiesce', () => {
     expect(migrationResponse.status).toBe(409);
     expect(db.getWorkspaceAgentProfileId(folder)).toBe(oldProfile.id);
     expect(db.getAgentProfile(target.id)?.status).toBe('archived');
-    db.deleteRegisteredGroup(jid);
+    await db.deleteRegisteredGroup(jid);
   });
 
   test('workspace deletion during migration pre-stop wins without resurrecting its mapping', async () => {
@@ -1217,7 +1217,7 @@ describe('POST / workspace Agent membership publication lock', () => {
     });
     expect(db.getWorkspaceAgentProfileId(body.group.folder)).toBe(target.id);
     expect(ensureTerminalContainerStarted).toHaveBeenCalledWith(body.jid);
-    db.deleteGroupData(body.jid, body.group.folder);
+    await db.deleteGroupData(body.jid, body.group.folder);
   });
 
   test('slow failing initialization never publishes a group or Agent mapping', async () => {

@@ -159,7 +159,7 @@ describe('Workspace Memory runtime boundary', () => {
     revokeWorkspaceMemoryWriteCapability(scope, capability.runnerInstanceId);
   });
 
-  test('scheduled/group-task MCP surfaces are read-only', () => {
+  test('scheduled/group-task MCP surfaces are read-only except for proposals', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-memory-ro-'));
     roots.push(root);
     for (const ctx of [
@@ -168,9 +168,210 @@ describe('Workspace Memory runtime boundary', () => {
     ]) {
       const names = createMcpTools(ctx).map((tool) => tool.name);
       expect(names).toContain('workspace_memory_search');
+      // A proposal is inert until a human confirms it, so non-interactive turns
+      // may hand a learning back without gaining active-memory write access.
+      expect(names).toContain('workspace_memory_propose');
+      expect(names).not.toContain('workspace_memory_review');
       expect(names).not.toContain('workspace_memory_remember');
       expect(names).not.toContain('workspace_memory_update');
       expect(names).not.toContain('workspace_memory_forget');
+    }
+    const topLevel = createMcpTools(context(root)).map((tool) => tool.name);
+    expect(topLevel).toEqual(
+      expect.arrayContaining([
+        'workspace_memory_propose',
+        'workspace_memory_review',
+      ]),
+    );
+  });
+
+  test('sub-agent guard denies candidate review but allows proposals', async () => {
+    const guard = createWorkspaceMemoryWriteGuard();
+    const base = {
+      hook_event_name: 'PreToolUse',
+      session_id: 's',
+      transcript_path: '/tmp/t',
+      cwd: '/tmp',
+      tool_input: {},
+      tool_use_id: 'tool-review',
+    } as const;
+    const denied = await guard(
+      {
+        ...base,
+        agent_id: 'sdk-subagent-1',
+        tool_name: 'mcp__commerceagent__workspace_memory_review',
+      } as never,
+      'tool-review',
+      { signal: new AbortController().signal },
+    );
+    expect(denied).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+      },
+    });
+    await expect(
+      guard(
+        {
+          ...base,
+          agent_id: 'sdk-subagent-1',
+          tool_name: 'mcp__commerceagent__workspace_memory_propose',
+        } as never,
+        'tool-propose',
+        { signal: new AbortController().signal },
+      ),
+    ).resolves.toEqual({});
+  });
+
+  test('propose and review tools emit signed IPC operations', async () => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'workspace-memory-review-'),
+    );
+    roots.push(root);
+    const scope = { groupFolder: 'workspace-folder' };
+    const capability = issueWorkspaceMemoryWriteCapability(scope, 'turn-1');
+    const tools = createMcpTools(
+      context(root, {
+        workspaceMemoryMutationAuth: {
+          runnerInstanceId: capability.runnerInstanceId,
+          secret: capability.signingSecret,
+        },
+      }),
+    );
+
+    const propose = tools.find(
+      (tool) => tool.name === 'workspace_memory_propose',
+    );
+    expect(propose).toBeDefined();
+    const pendingPropose = propose!.handler(
+      {
+        kind: 'lesson',
+        title: 'Deploy lessons',
+        content: 'Deploy after the schema gate passes.',
+        confidence: 0.82,
+        importance: 0.6,
+        applies_when: '部署到生产前',
+      },
+      {} as never,
+    );
+    const proposeRequest = await readMemoryRequest(root);
+    expect(proposeRequest).toMatchObject({
+      type: 'workspace_memory',
+      operation: 'propose',
+      kind: 'lesson',
+      appliesWhen: '部署到生产前',
+      confidence: 0.82,
+      importance: 0.6,
+    });
+    expect(proposeRequest).not.toHaveProperty('workspaceJid');
+    expect(proposeRequest).not.toHaveProperty('sourceType');
+    expect(
+      verifyAndConsumeWorkspaceMemoryMutation(
+        scope,
+        proposeRequest,
+        proposeRequest.mutationSignature,
+      ),
+    ).toBe(true);
+    acknowledge(root, proposeRequest.requestId as string, {
+      item: { id: 'cand-1', revision: 1, status: 'proposed' },
+      candidate: { itemId: 'cand-1', state: 'pending' },
+    });
+    const proposeResponse = await pendingPropose;
+    expect(
+      (proposeResponse.content as Array<{ text: string }>)[0].text,
+    ).toContain('cand-1');
+    // The runner (not the host) removes a request it has seen answered; mirror
+    // that here so the next request is the only pending file.
+    for (const name of fs.readdirSync(path.join(root, 'tasks'))) {
+      if (!name.startsWith('workspace_memory_result_')) {
+        fs.rmSync(path.join(root, 'tasks', name));
+      }
+    }
+
+    const review = tools.find(
+      (tool) => tool.name === 'workspace_memory_review',
+    );
+    expect(review).toBeDefined();
+    const pendingConfirm = review!.handler(
+      {
+        action: 'confirm',
+        item_id: 'cand-1',
+        expected_revision: 1,
+        limit: 20,
+      },
+      {} as never,
+    );
+    const confirmRequest = await readMemoryRequest(root);
+    expect(confirmRequest).toMatchObject({
+      operation: 'review_confirm',
+      itemId: 'cand-1',
+      expectedRevision: 1,
+    });
+    expect(
+      verifyAndConsumeWorkspaceMemoryMutation(
+        scope,
+        confirmRequest,
+        confirmRequest.mutationSignature,
+      ),
+    ).toBe(true);
+    acknowledge(root, confirmRequest.requestId as string, {
+      item: { id: 'cand-1', revision: 2, status: 'active' },
+      storeRevision: 3,
+    });
+    const confirmResponse = await pendingConfirm;
+    expect(
+      (confirmResponse.content as Array<{ text: string }>)[0].text,
+    ).toContain('"status": "active"');
+    revokeWorkspaceMemoryWriteCapability(scope, capability.runnerInstanceId);
+  });
+
+  test('only proposals can come from scheduled runs or sub-agents at the host boundary', () => {
+    for (const input of [
+      {
+        operation: 'propose',
+        hostTurnKind: 'scheduled' as const,
+        runtimeAgentId: null,
+        runtimeAgentKind: null,
+        capabilityValid: false,
+      },
+      {
+        operation: 'propose',
+        hostTurnKind: 'interactive' as const,
+        runtimeAgentId: 'spawn-1',
+        runtimeAgentKind: 'spawn' as const,
+        capabilityValid: false,
+      },
+    ]) {
+      expect(workspaceMemoryWriteRejection(input)).toBeNull();
+    }
+    for (const operation of ['review_confirm', 'review_reject'] as const) {
+      expect(
+        workspaceMemoryWriteRejection({
+          operation,
+          hostTurnKind: 'scheduled',
+          runtimeAgentId: null,
+          runtimeAgentKind: null,
+          capabilityValid: true,
+        }),
+      ).toMatchObject({ code: 'scheduled_memory_read_only' });
+      expect(
+        workspaceMemoryWriteRejection({
+          operation,
+          hostTurnKind: 'interactive',
+          runtimeAgentId: 'task-1',
+          runtimeAgentKind: 'task',
+          capabilityValid: true,
+        }),
+      ).toMatchObject({ code: 'runtime_agent_memory_read_only' });
+      expect(
+        workspaceMemoryWriteRejection({
+          operation,
+          hostTurnKind: 'interactive',
+          runtimeAgentId: null,
+          runtimeAgentKind: null,
+          capabilityValid: true,
+        }),
+      ).toBeNull();
     }
   });
 

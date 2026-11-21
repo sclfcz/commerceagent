@@ -80,6 +80,9 @@ Public：
 修改还要求调用者角色为 admin；其他系统配置仍按原权限策略处理。系统设置响应包含
 `blockUnverifiedModelConfigs`（默认 `false`：Agent 仍可选择尚未验证续接的上游，
 只在响应里带提示；`true` 时只有续接基线已验证的上游可以作为 Agent 的模型配置），
+`memoryExtractionEnabled`（默认 `true`）和 `memoryExtractionIdleMs`（默认
+`900000`，允许 60000–86400000 毫秒，单位为毫秒）控制候选记忆的自动提炼；两者
+不涉及 Secret，任何拥有 `manage_system_config` 的用户都可以修改，
 `observabilityEnabled`、`observabilityEndpoint`、`observabilityPublicKey`、
 `observabilitySampleRate`、`observabilityIncludeContent` 和只读的
 `observabilityHasSecretKey`。写入请求可带 `observabilitySecretKey`；Secret Key
@@ -445,7 +448,8 @@ Workspace Memory 是 Workspace 范围内、跨 Session 复用的结构化知识�
   - 返回 `{ storeRevision, items, nextCursor }`。
 - `GET /api/memory/workspaces/:workspaceJid/items/search`
   - Query：必填 `q`，可选 `kind`、`limit=1..100`。
-  - 返回 `{ storeRevision, hits: [{ item, rank, snippet }] }`。
+  - 返回 `{ storeRevision, hits: [{ item, rank, snippet, searchKeyHits }] }`。
+    `searchKeyHits` 是命中的检索关键词数量，`rank` 已把它折算进 0–1 分数。
 - `GET /api/memory/workspaces/:workspaceJid/items/:itemId`
   - 返回 `{ storeRevision, item }`。
 - `GET /api/memory/workspaces/:workspaceJid/items/:itemId/versions`
@@ -464,6 +468,8 @@ Workspace Memory 是 Workspace 范围内、跨 Session 复用的结构化知识�
   "title": "采用 SQLite",
   "content": "Workspace Memory 以 SQLite 为唯一真相源。",
   "canonicalKey": "memory-store",
+  "searchKeys": ["memory-store", "sqlite"],
+  "pinned": false,
   "status": "active",
   "importance": 0.9,
   "confidence": 1,
@@ -483,8 +489,59 @@ Workspace Memory 是 Workspace 范围内、跨 Session 复用的结构化知识�
 }
 ```
 
-Version 还包含 `changeType: create | update | forget` 和
+Version 还包含 `changeType: create | update | forget`、`searchKeys`、`pinned` 和
 `actor: { type, id }`，用于展示修订来源；历史版本不可通过 API 原地修改。
+
+### 待确认候选
+
+自动提炼与 Agent `propose` 写入的 Memory 是 `status = 'proposed'` 的候选，不会出现
+在 snapshot、搜索或活跃列表中，必须先确认。
+
+- `GET /api/memory/workspaces/:workspaceJid/candidates`
+  - Query：可选 `limit=1..100`，默认 50。
+  - 返回 `{ storeRevision, candidates: [{ item, candidate }] }`，按创建时间从新到旧。
+- `POST /api/memory/workspaces/:workspaceJid/items/:itemId/confirm`
+- `POST /api/memory/workspaces/:workspaceJid/items/:itemId/reject`
+
+`candidate` 描述候选本身，不属于 item：
+
+```json
+{
+  "itemId": "mem_...",
+  "sessionKey": "web:...",
+  "sessionId": "session-id",
+  "runId": "mer_...",
+  "appliesWhen": "部署到生产前",
+  "searchKeys": ["发布", "回滚"],
+  "evidenceMessageIds": ["msg-1", "msg-2"],
+  "state": "pending",
+  "model": null,
+  "createdAt": "2026-07-28T08:00:00.000Z",
+  "expiresAt": "2026-08-11T08:00:00.000Z",
+  "decidedAt": null,
+  "decidedBy": null
+}
+```
+
+确认请求必须携带 `expectedRevision`，可选地同时提交
+`kind`、`title`、`content`、`canonicalKey`、`importance`、`confidence`
+（“编辑后确认”）以及 `idempotencyKey`：
+
+```json
+{
+  "expectedRevision": 1,
+  "title": "确认后的标题",
+  "content": "确认后的内容",
+  "idempotencyKey": "confirm-mem_..."
+}
+```
+
+拒绝请求只接受 `expectedRevision` 和可选的 `idempotencyKey`；服务端以
+`reason: "rejected"` 写入 tombstone。两者都返回
+`{ storeRevision, item, replayed }`，item 分别为 `active`（确认）和
+`deleted`（拒绝）。候选已被他人处理时返回 409 `revision_conflict`，状态不是
+`proposed` 时返回 400 `invalid_request`。候选超过 14 天未确认会自动转为
+`superseded`。
 
 ### 创建、编辑与忘记
 
@@ -493,9 +550,10 @@ Version 还包含 `changeType: create | update | forget` 和
 - `DELETE /api/memory/workspaces/:workspaceJid/items/:itemId`
 
 创建请求必须包含 `kind` 和非空 `content`，可以包含 `title`、`canonicalKey`、
-`status`、`importance`、`confidence`、有效期字段、`provenance` 和
-`idempotencyKey`。Web 客户端不能提交 `sourceType` 或 writer 身份；服务端根据认证
-上下文生成它们。示例：
+`searchKeys`、`pinned`、`status`、`importance`、`confidence`、有效期字段、
+`provenance` 和 `idempotencyKey`。`searchKeys` 最多 12 项、每项 1–32 字符，省略或
+传 `null` 时由宿主按标题和正文派生；`pinned` 只应为核心店铺画像或身份偏好设置。
+Web 客户端不能提交 `sourceType` 或 writer 身份；服务端根据认证上下文生成它们。示例：
 
 ```json
 {
@@ -597,6 +655,7 @@ Web 和 Runtime 不再把它们当作第二个可写真相源。
 
 - `GET /api/health`，Public
 - `GET /api/status`
+- `GET /api/status/memory-consolidation`
 - `POST /api/status/groups/:folder/switch-provider`
 - `GET /api/status/channel-outbox/uncertain`
 - `POST /api/status/channel-outbox/:id/resolve`
@@ -609,6 +668,12 @@ Agent 镜像只由 `main` 分支的 GitHub Actions 构建并发布。该接口�
 确认后放行。`resolve` 使用 `expectedRevision` 做 compare-and-set，取值为
 `delivered`（需要 `providerMessageId`）或 `failed`；revision 过期返回 409，
 调用方必须重新读取后再决定，不能盲目重试。列表不返回 payload。
+
+`GET /api/status/memory-consolidation` 需要 `manage_system_config`，返回夜间整理
+的当前配置（`enabled`、`time`、`batchSize`、`maxRuntimeMs`）和每个 Workspace
+最近一次运行的结果，字段包括 `lastRunAt`、`lastStatus`、`processed`、`merged`、
+`demoted`、`skippedGroups`、`lastError`、`durationMs` 以及仍在生效的
+`leaseOwner`/`leaseExpiresAt`。响应只有计数器，不含任何 Memory 内容。
 
 问题报告：
 

@@ -13,6 +13,7 @@
 - 系统设置及默认值：`src/runtime-config.ts`
 - 渠道能力与会话路由：`src/im-channel-capabilities.ts`、`src/channel-mount-service.ts`
 - StreamEvent：`shared/stream-event.ts`
+- 会话连续性（配置变更、账号轮换与模型切换）：`docs/session-continuity.md`
 
 `docs/agent-first-architecture-plan.md` 和
 `docs/claude-code-plugin-automation-design.md` 是历史设计记录，不作为当前接口或数据结构的真相源。
@@ -223,6 +224,7 @@ Host 模式没有 `maxConcurrentHostProcesses`。旧客户端提交该字段时�
 ```text
 data/
 ├── db/messages.db
+├── memory-pg/
 ├── config/
 ├── groups/{folder}/
 ├── sessions/{folder}/.claude/
@@ -241,6 +243,15 @@ data/
 
 主要数据库当前 Schema 版本以 `src/db.ts` 的 `CURRENT_SCHEMA_VERSION` 为准。
 不要在文档中复制版本号；迁移必须同时具备备份、前向升级和拒绝降级保护。
+
+Workspace Memory v2 不在 SQLite：它使用独立 PostgreSQL 库（`MEMORY_DATABASE_URL`
+或 `data/memory-pg/` 的 PGlite），schema 版本在
+`workspace_memory_schema_migrations` 中管理，迁移文件位于
+`src/memory-pg/migrations/`。Memory 与 SQLite 不能共享事务，跨库写入固定为
+“Memory 先提交、SQLite 后提交”，详见 `docs/workspace-memory-v2.md`。
+
+`src/memory-consolidation/` 是宿主机每日后台维护：确定性去重合并与过期降级，
+按 Workspace 加租约串行执行，不进入定时任务列表。
 
 核心表族：
 
@@ -281,18 +292,25 @@ Web 持久设置 > 环境变量 > 代码默认值
 
 常用环境变量：
 
-| 变量                        | 默认值                            | 说明                              |
-| --------------------------- | --------------------------------- | --------------------------------- |
-| `WEB_PORT`                  | `3000`                            | HTTP、WebSocket 端口              |
-| `WEB_SESSION_SECRET`        | 自动生成并持久化                  | Cookie 签名                       |
-| `CONTAINER_IMAGE`           | `riba2534/happyclaw-agent:latest` | GitHub Actions 发布的 Runner 镜像 |
-| `CONTAINER_TIMEOUT`         | `1800000`                         | 默认运行超时                      |
-| `IDLE_TIMEOUT`              | `1800000`                         | 暖 Runner 空闲时间                |
-| `MAX_CONCURRENT_CONTAINERS` | `20`                              | Docker 并发                       |
-| `MAX_FILE_SIZE_MB`          | `50`                              | Web/IM 入站文件上限               |
-| `CORS_ALLOWED_ORIGINS`      | 仅 localhost                      | WebSocket Origin 白名单           |
-| `TRUST_PROXY`               | `false`                           | 是否信任反向代理来源头            |
-| `TZ`                        | 系统时区                          | 调度时区                          |
+| 变量                                  | 默认值                            | 说明                                                                                         |
+| ------------------------------------- | --------------------------------- | -------------------------------------------------------------------------------------------- |
+| `WEB_PORT`                            | `3000`                            | HTTP、WebSocket 端口                                                                         |
+| `WEB_SESSION_SECRET`                  | 自动生成并持久化                  | Cookie 签名                                                                                  |
+| `CONTAINER_IMAGE`                     | `riba2534/happyclaw-agent:latest` | GitHub Actions 发布的 Runner 镜像                                                            |
+| `MEMORY_DATABASE_URL`                 | 未设置                            | Workspace Memory 的 PostgreSQL 连接串；未设置时使用 `data/memory-pg/` 下的 PGlite 嵌入式实例 |
+| `MEMORY_EXTRACTION_ENABLED`           | `true`                            | 是否为顶层交互会话自动提炼候选记忆（默认值也可在 Web 系统设置覆盖）                          |
+| `MEMORY_EXTRACTION_IDLE_MS`           | `900000`                          | 触发一次候选提炼所需的空闲时长（毫秒，60000–86400000）                                       |
+| `MEMORY_CONSOLIDATION_ENABLED`        | `true`                            | 是否启用 Memory 夜间整理（去重合并 + 过期降级）                                              |
+| `MEMORY_CONSOLIDATION_TIME`           | `03:30`                           | 夜间整理的本地墙钟时间 `HH:MM`，按 `TZ` 解释                                                 |
+| `MEMORY_CONSOLIDATION_BATCH_SIZE`     | `200`                             | 夜间整理单批条目上限                                                                         |
+| `MEMORY_CONSOLIDATION_MAX_RUNTIME_MS` | `600000`                          | 单个 Workspace 单轮整理时长上限                                                              |
+| `CONTAINER_TIMEOUT`                   | `1800000`                         | 默认运行超时                                                                                 |
+| `IDLE_TIMEOUT`                        | `1800000`                         | 暖 Runner 空闲时间                                                                           |
+| `MAX_CONCURRENT_CONTAINERS`           | `20`                              | Docker 并发                                                                                  |
+| `MAX_FILE_SIZE_MB`                    | `50`                              | Web/IM 入站文件上限                                                                          |
+| `CORS_ALLOWED_ORIGINS`                | 仅 localhost                      | WebSocket Origin 白名单                                                                      |
+| `TRUST_PROXY`                         | `false`                           | 是否信任反向代理来源头                                                                       |
+| `TZ`                                  | 系统时区                          | 调度时区                                                                                     |
 
 Provider 和渠道账号应优先通过 Web 配置。Legacy `/api/config/user-im/*` 只用于兼容，
 新功能统一使用 `/api/channel-accounts`。
@@ -334,6 +352,7 @@ npm run self-test
 - SDK/CLI 升级必须显式执行 `make update-sdk`，验证后提交 package.json 与 lockfile。
 - 容器以非 root 用户执行 Agent；修改 Dockerfile 或 entrypoint 后需要重建镜像。
 - 分布式层的测试需要 `DIST_MYSQL_TEST_URL` / `DIST_AMQP_TEST_URL` / `DIST_REDIS_TEST_URL`，未设置时自动跳过；本地环境用 `docker compose -f docker-compose.distributed.yml up -d`，一键演示用 `npm run dist:demo`。
+- Workspace Memory 外部 PG 测试用 `MEMORY_PG_TEST_URL` 开启：先运行 `docker compose -f docker-compose.distributed.yml up -d postgres`，再运行 `MEMORY_PG_TEST_URL=postgres://memtest:memtest@localhost:55432/memtest npm run test:memory-pg`。服务使用 PostgreSQL 18，宿主端口用 `MEMORY_PG_HOST_PORT` 覆盖；每个测试文件创建独立数据库并清理，测试账号需要 CREATEDB / CREATEROLE（Compose 默认账号满足）。不设置 URL 时真实 PG 用例自动跳过，`make test` 仍使用 PGlite；完整双后端验证需分别运行两条测试命令。详见 `docs/workspace-memory-v2.md` 的“真实 PostgreSQL 测试”。
 - 停止服务只能杀监听进程：`lsof -ti:PORT -sTCP:LISTEN | xargs kill`。
 - 不要使用会杀死连接方或 Docker 网络代理的宽泛端口 kill 命令。
 

@@ -59,33 +59,97 @@ function rawDatabase(): Database.Database {
   return new Database(path.join(storeDir, 'messages.db'));
 }
 
+async function memoryRows<T extends Record<string, unknown>>(
+  sql: string,
+  ...params: unknown[]
+): Promise<T[]> {
+  const result = await memoryStore.queryWorkspaceMemoryStoreDatabase<T>(
+    sql,
+    params,
+  );
+  return result.rows;
+}
+
+async function memoryRun(sql: string, ...params: unknown[]): Promise<void> {
+  await memoryStore.queryWorkspaceMemoryStoreDatabase(sql, params);
+}
+
+/** Read a row from the SQLite control-plane tables (not Workspace Memory). */
+function sqliteRow<T>(sql: string, ...params: unknown[]): T | undefined {
+  const raw = rawDatabase();
+  try {
+    return raw.prepare(sql).get(...(params as never[])) as T | undefined;
+  } finally {
+    raw.close();
+  }
+}
+
+function ownerOnboardingRow(workspaceJid: string) {
+  return sqliteRow<{
+    state: string;
+    revision: number;
+    skipped_at: string | null;
+    updated_at: string;
+  }>(
+    `SELECT state, revision, skipped_at, updated_at
+     FROM workspace_onboarding_states
+     WHERE workspace_jid = ? AND flow_key = ?`,
+    workspaceJid,
+    ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY,
+  );
+}
+
+/**
+ * Simulate a process restart: the PostgreSQL store is closed and reopened on
+ * the same embedded data directory, which is what a real restart does.
+ */
+async function restartDatabase(): Promise<void> {
+  await memoryStore.closeWorkspaceMemoryStore();
+  db.closeDatabase();
+  db.initDatabase();
+  await memoryStore.initWorkspaceMemoryStore();
+}
+
 function requestHash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 
-function reservedRows(raw: Database.Database, workspaceJid: string) {
-  return raw
-    .prepare(
-      `SELECT id, content, status, revision, created_at, updated_at
-       FROM workspace_memory_items
-       WHERE workspace_jid = ? AND canonical_key = ?
-       ORDER BY created_at ASC, id ASC`,
-    )
-    .all(
-      workspaceJid,
-      memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-    ) as Array<{
+async function reservedRows(workspaceJid: string) {
+  return await memoryRows<{
     id: string;
     content: string;
     status: string;
     revision: number;
     created_at: string;
     updated_at: string;
-  }>;
+  }>(
+    `SELECT id, content, status, revision, created_at, updated_at
+     FROM workspace_memory_items
+     WHERE workspace_jid = $1 AND canonical_key = $2
+     ORDER BY created_at ASC, id ASC`,
+    workspaceJid,
+    memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+  );
 }
 
-beforeAll(() => {
+async function itemArtifacts(itemId: string) {
+  const rows = await memoryRows<{
+    versions: number;
+    audits: number;
+    outbox: number;
+  }>(
+    `SELECT
+       (SELECT COUNT(*)::int FROM workspace_memory_versions WHERE item_id = $1) AS versions,
+       (SELECT COUNT(*)::int FROM workspace_memory_audit_events WHERE item_id = $1) AS audits,
+       (SELECT COUNT(*)::int FROM workspace_memory_outbox WHERE item_id = $1) AS outbox`,
+    itemId,
+  );
+  return rows[0];
+}
+
+beforeAll(async () => {
   db.initDatabase();
+  await memoryStore.initWorkspaceMemoryStore();
   const now = new Date().toISOString();
   db.createUser({
     id: OWNER_ID,
@@ -100,16 +164,18 @@ beforeAll(() => {
   });
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await memoryStore.closeWorkspaceMemoryStore();
   if (db.isDatabaseInitialized()) db.closeDatabase();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
 describe('CommerceAgent owner preferred-address facade', () => {
-  test('set is no-op aware, updates with CAS, clears, and restores without losing history', () => {
+  test('set is no-op aware, updates with CAS, clears, and restores without losing history', async () => {
     const workspaceJid = createWorkspace('lifecycle');
 
-    const empty = ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
+    const empty =
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
     expect(empty).toMatchObject({
       workspaceJid,
       preferredAddress: null,
@@ -117,7 +183,7 @@ describe('CommerceAgent owner preferred-address facade', () => {
       onboarding: { state: 'pending' },
     });
 
-    const created = ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    const created = await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '小何',
       expectedRevision: 0,
@@ -133,25 +199,16 @@ describe('CommerceAgent owner preferred-address facade', () => {
       },
     });
 
-    const raw = rawDatabase();
-    const canonicalAfterCreate = reservedRows(raw, workspaceJid);
+    const canonicalAfterCreate = await reservedRows(workspaceJid);
     expect(canonicalAfterCreate).toHaveLength(1);
     const firstItemId = canonicalAfterCreate[0].id;
-    const countsAfterCreate = raw
-      .prepare(
-        `SELECT
-          (SELECT COUNT(*) FROM workspace_memory_versions WHERE item_id = ?) AS versions,
-          (SELECT COUNT(*) FROM workspace_memory_audit_events WHERE item_id = ?) AS audits,
-          (SELECT COUNT(*) FROM workspace_memory_outbox WHERE item_id = ?) AS outbox`,
-      )
-      .get(firstItemId, firstItemId, firstItemId) as {
-      versions: number;
-      audits: number;
-      outbox: number;
-    };
-    expect(countsAfterCreate).toEqual({ versions: 1, audits: 1, outbox: 1 });
+    expect(await itemArtifacts(firstItemId)).toEqual({
+      versions: 1,
+      audits: 1,
+      outbox: 1,
+    });
 
-    const noOp = ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    const noOp = await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '  小何  ',
       expectedRevision: 1,
@@ -163,14 +220,13 @@ describe('CommerceAgent owner preferred-address facade', () => {
       projection: { preferredAddress: '小何', revision: 1 },
     });
     expect(
-      raw
-        .prepare(
-          'SELECT COUNT(*) AS count FROM workspace_memory_versions WHERE item_id = ?',
-        )
-        .get(firstItemId),
-    ).toEqual({ count: 1 });
+      await memoryRows(
+        'SELECT COUNT(*)::int AS count FROM workspace_memory_versions WHERE item_id = $1',
+        firstItemId,
+      ),
+    ).toEqual([{ count: 1 }]);
 
-    const updated = ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    const updated = await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '何先生',
       expectedRevision: 1,
@@ -181,32 +237,32 @@ describe('CommerceAgent owner preferred-address facade', () => {
       replayed: false,
       projection: { preferredAddress: '何先生', revision: 2 },
     });
-    expect(reservedRows(raw, workspaceJid)).toMatchObject([
+    expect(await reservedRows(workspaceJid)).toMatchObject([
       { id: firstItemId, content: '何先生', status: 'active', revision: 2 },
     ]);
     expect(
-      raw
-        .prepare(
-          `SELECT actor_id
-           FROM workspace_memory_versions
-           WHERE item_id = ? AND revision = 2`,
-        )
-        .get(firstItemId),
-    ).toEqual({ actor_id: ACTUAL_SENDER_ID });
+      await memoryRows(
+        `SELECT actor_id
+         FROM workspace_memory_versions
+         WHERE item_id = $1 AND revision = 2`,
+        firstItemId,
+      ),
+    ).toEqual([{ actor_id: ACTUAL_SENDER_ID }]);
     expect(
-      raw
-        .prepare(
-          `SELECT source_id, session_id
-           FROM workspace_memory_provenance
-           WHERE item_id = ? AND revision = 2`,
-        )
-        .get(firstItemId),
-    ).toEqual({
-      source_id: `message-from-${ACTUAL_SENDER_ID}`,
-      session_id: `session-for-${ACTUAL_SENDER_ID}`,
-    });
+      await memoryRows(
+        `SELECT source_id, session_id
+         FROM workspace_memory_provenance
+         WHERE item_id = $1 AND revision = 2`,
+        firstItemId,
+      ),
+    ).toEqual([
+      {
+        source_id: `message-from-${ACTUAL_SENDER_ID}`,
+        session_id: `session-for-${ACTUAL_SENDER_ID}`,
+      },
+    ]);
 
-    const cleared = ownerProfile.clearCommerceAgentOwnerPreferredAddress({
+    const cleared = await ownerProfile.clearCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       expectedRevision: 2,
       context: mutationContext(),
@@ -220,15 +276,16 @@ describe('CommerceAgent owner preferred-address facade', () => {
         onboarding: { state: 'completed' },
       },
     });
-    expect(reservedRows(raw, workspaceJid)).toMatchObject([
+    expect(await reservedRows(workspaceJid)).toMatchObject([
       { id: firstItemId, status: 'superseded', revision: 3 },
     ]);
 
     // Clearing the value is not an instruction to repeat first-wake.
-    const postClearClaim = ownerProfile.claimCommerceAgentOwnerIntroduction({
-      workspaceJid,
-      leaseOwner: 'new-session-after-clear',
-    });
+    const postClearClaim =
+      await ownerProfile.claimCommerceAgentOwnerIntroduction({
+        workspaceJid,
+        leaseOwner: 'new-session-after-clear',
+      });
     expect(postClearClaim).toMatchObject({
       claimed: false,
       projection: {
@@ -237,7 +294,7 @@ describe('CommerceAgent owner preferred-address facade', () => {
       },
     });
 
-    const restored = ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    const restored = await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '老何',
       expectedRevision: 3,
@@ -252,7 +309,7 @@ describe('CommerceAgent owner preferred-address facade', () => {
         onboarding: { state: 'completed' },
       },
     });
-    const allRows = reservedRows(raw, workspaceJid);
+    const allRows = await reservedRows(workspaceJid);
     expect(allRows).toHaveLength(1);
     expect(allRows[0]).toMatchObject({
       id: firstItemId,
@@ -261,31 +318,27 @@ describe('CommerceAgent owner preferred-address facade', () => {
     });
     expect(allRows.filter((row) => row.status === 'active')).toHaveLength(1);
     expect(
-      raw
-        .prepare(
-          `SELECT COUNT(*) AS count
-           FROM workspace_memory_versions
-           WHERE item_id IN (
-             SELECT id FROM workspace_memory_items
-             WHERE workspace_jid = ? AND canonical_key = ?
-           )`,
-        )
-        .get(
-          workspaceJid,
-          memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-        ),
-    ).toEqual({ count: 4 });
-    raw.close();
+      await memoryRows(
+        `SELECT COUNT(*)::int AS count
+         FROM workspace_memory_versions
+         WHERE item_id IN (
+           SELECT id FROM workspace_memory_items
+           WHERE workspace_jid = $1 AND canonical_key = $2
+         )`,
+        workspaceJid,
+        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+      ),
+    ).toEqual([{ count: 4 }]);
   });
 
-  test('stale set and clear compare-and-swap attempts preserve the winner', () => {
+  test('stale set and clear compare-and-swap attempts preserve the winner', async () => {
     const workspaceJid = createWorkspace('cas');
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '第一版',
       context: mutationContext(),
     });
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '获胜版本',
       expectedRevision: 1,
@@ -307,16 +360,16 @@ describe('CommerceAgent owner preferred-address facade', () => {
           context: mutationContext(),
         }),
     ]) {
-      expect(operation).toThrowError(
-        expect.objectContaining({ code: 'revision_conflict' }),
-      );
+      await expect(operation()).rejects.toMatchObject({
+        code: 'revision_conflict',
+      });
     }
     expect(
-      ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
     ).toMatchObject({ preferredAddress: '获胜版本', revision: 2 });
   });
 
-  test('replays a retried first set without creating another revision', () => {
+  test('replays a retried first set without creating another revision', async () => {
     const workspaceJid = createWorkspace('first-set-idempotency');
     const request = {
       workspaceJid,
@@ -325,8 +378,10 @@ describe('CommerceAgent owner preferred-address facade', () => {
       idempotencyKey: 'owner-profile-first-set',
       context: mutationContext(),
     };
-    const first = ownerProfile.setCommerceAgentOwnerPreferredAddress(request);
-    const replay = ownerProfile.setCommerceAgentOwnerPreferredAddress(request);
+    const first =
+      await ownerProfile.setCommerceAgentOwnerPreferredAddress(request);
+    const replay =
+      await ownerProfile.setCommerceAgentOwnerPreferredAddress(request);
     expect(first).toMatchObject({
       changed: true,
       replayed: false,
@@ -338,50 +393,48 @@ describe('CommerceAgent owner preferred-address facade', () => {
       projection: { preferredAddress: '幂等称呼', revision: 1 },
     });
 
-    const raw = rawDatabase();
-    const item = reservedRows(raw, workspaceJid)[0];
+    const item = (await reservedRows(workspaceJid))[0];
     expect(
-      raw
-        .prepare(
-          'SELECT COUNT(*) AS count FROM workspace_memory_versions WHERE item_id = ?',
-        )
-        .get(item.id),
-    ).toEqual({ count: 1 });
-    raw.close();
+      await memoryRows(
+        'SELECT COUNT(*)::int AS count FROM workspace_memory_versions WHERE item_id = $1',
+        item.id,
+      ),
+    ).toEqual([{ count: 1 }]);
 
-    expect(() =>
+    await expect(
       ownerProfile.setCommerceAgentOwnerPreferredAddress({
         ...request,
         preferredAddress: '复用 key 的不同请求',
       }),
-    ).toThrowError(expect.objectContaining({ code: 'idempotency_conflict' }));
+    ).rejects.toMatchObject({ code: 'idempotency_conflict' });
   });
 
-  test('projection is read-through on both cold and already-warm callers', () => {
+  test('projection is read-through on both cold and already-warm callers', async () => {
     const workspaceJid = createWorkspace('projection-refresh');
-    const cold = ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
+    const cold =
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
     expect(cold.preferredAddress).toBeNull();
 
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '冷启动称呼',
       context: mutationContext(),
     });
     const firstWarm =
-      ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
     expect(firstWarm).toMatchObject({
       preferredAddress: '冷启动称呼',
       revision: 1,
     });
 
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '热会话刷新称呼',
       expectedRevision: 1,
       context: mutationContext(),
     });
     const refreshed =
-      ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
     expect(refreshed).toMatchObject({
       preferredAddress: '热会话刷新称呼',
       revision: 2,
@@ -389,61 +442,57 @@ describe('CommerceAgent owner preferred-address facade', () => {
     expect(refreshed).not.toBe(firstWarm);
   });
 
-  test('restores a legacy deleted reserved item on the same revision lineage', () => {
+  test('restores a legacy deleted reserved item on the same revision lineage', async () => {
     const workspaceJid = createWorkspace('legacy-deleted-restore');
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '删除前称呼',
       expectedRevision: 0,
       context: mutationContext(),
     });
 
-    const raw = rawDatabase();
-    const item = reservedRows(raw, workspaceJid)[0];
+    const item = (await reservedRows(workspaceJid))[0];
     const deletedAt = '2026-07-28T11:00:00.000Z';
-    raw
-      .prepare(
-        `UPDATE workspace_memory_items
-       SET status = 'deleted', revision = 2, updated_at = ?, deleted_at = ?
-       WHERE id = ?`,
-      )
-      .run(deletedAt, deletedAt, item.id);
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_versions (
+    await memoryRun(
+      `UPDATE workspace_memory_items
+       SET status = 'deleted', revision = 2, updated_at = $1, deleted_at = $1
+       WHERE id = $2`,
+      deletedAt,
+      item.id,
+    );
+    await memoryRun(
+      `INSERT INTO workspace_memory_versions (
         item_id, revision, workspace_jid, kind, title, content, canonical_key,
         status, importance, confidence, valid_from, valid_until, expires_at,
         change_type, actor_type, actor_id, created_at
       ) VALUES (
-        ?, 2, ?, 'fact', '主人称呼', '删除前称呼', ?, 'deleted',
-        1, 1, NULL, NULL, NULL, 'forget', 'migration', 'legacy-delete', ?
+        $1, 2, $2, 'fact', '主人称呼', '删除前称呼', $3, 'deleted',
+        1, 1, NULL, NULL, NULL, 'forget', 'migration', 'legacy-delete', $4
       )`,
-      )
-      .run(
-        item.id,
-        workspaceJid,
-        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-        deletedAt,
-      );
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_provenance (
+      item.id,
+      workspaceJid,
+      memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+      deletedAt,
+    );
+    await memoryRun(
+      `INSERT INTO workspace_memory_provenance (
         item_id, revision, source_type, source_id, session_id, observed_at,
         recorded_at
-      ) VALUES (?, 2, 'migration', 'legacy-delete', NULL, NULL, ?)`,
-      )
-      .run(item.id, deletedAt);
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_tombstones (
+      ) VALUES ($1, 2, 'migration', 'legacy-delete', NULL, NULL, $2)`,
+      item.id,
+      deletedAt,
+    );
+    await memoryRun(
+      `INSERT INTO workspace_memory_tombstones (
         item_id, workspace_jid, deleted_revision, reason, actor_type, actor_id,
         deleted_at
-      ) VALUES (?, ?, 2, 'legacy clear', 'migration', 'legacy-delete', ?)`,
-      )
-      .run(item.id, workspaceJid, deletedAt);
-    raw.close();
+      ) VALUES ($1, $2, 2, 'legacy clear', 'migration', 'legacy-delete', $3)`,
+      item.id,
+      workspaceJid,
+      deletedAt,
+    );
 
-    const restored = ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    const restored = await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '恢复后的称呼',
       expectedRevision: 2,
@@ -457,8 +506,7 @@ describe('CommerceAgent owner preferred-address facade', () => {
       },
     });
 
-    const verified = rawDatabase();
-    expect(reservedRows(verified, workspaceJid)).toMatchObject([
+    expect(await reservedRows(workspaceJid)).toMatchObject([
       {
         id: item.id,
         content: '恢复后的称呼',
@@ -467,28 +515,25 @@ describe('CommerceAgent owner preferred-address facade', () => {
       },
     ]);
     expect(
-      verified
-        .prepare(
-          'SELECT COUNT(*) AS count FROM workspace_memory_versions WHERE item_id = ?',
-        )
-        .get(item.id),
-    ).toEqual({ count: 3 });
+      await memoryRows(
+        'SELECT COUNT(*)::int AS count FROM workspace_memory_versions WHERE item_id = $1',
+        item.id,
+      ),
+    ).toEqual([{ count: 3 }]);
     expect(
-      verified
-        .prepare(
-          'SELECT COUNT(*) AS count FROM workspace_memory_tombstones WHERE item_id = ?',
-        )
-        .get(item.id),
-    ).toEqual({ count: 0 });
-    verified.close();
+      await memoryRows(
+        'SELECT COUNT(*)::int AS count FROM workspace_memory_tombstones WHERE item_id = $1',
+        item.id,
+      ),
+    ).toEqual([{ count: 0 }]);
   });
 });
 
 describe('CommerceAgent owner introduction onboarding state', () => {
-  test('claims first wake without consuming it until a fenced acknowledgement', () => {
+  test('claims first wake without consuming it until a fenced acknowledgement', async () => {
     const workspaceJid = createWorkspace('onboarding-lease');
     const now = '2026-07-28T12:00:00.000Z';
-    const first = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const first = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid,
       leaseOwner: 'session-a',
       leaseMs: 60_000,
@@ -504,12 +549,13 @@ describe('CommerceAgent owner introduction onboarding state', () => {
       projection: { onboarding: { state: 'claimed' } },
     });
 
-    const sameRunnerBeforeAck = ownerProfile.claimCommerceAgentOwnerIntroduction({
-      workspaceJid,
-      leaseOwner: 'session-a',
-      leaseMs: 60_000,
-      now: '2026-07-28T12:00:15.000Z',
-    });
+    const sameRunnerBeforeAck =
+      await ownerProfile.claimCommerceAgentOwnerIntroduction({
+        workspaceJid,
+        leaseOwner: 'session-a',
+        leaseMs: 60_000,
+        now: '2026-07-28T12:00:15.000Z',
+      });
     expect(sameRunnerBeforeAck).toMatchObject({
       claimed: true,
       leaseAcquired: false,
@@ -517,7 +563,7 @@ describe('CommerceAgent owner introduction onboarding state', () => {
       leaseToken: first.leaseToken,
     });
 
-    const contending = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const contending = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid,
       leaseOwner: 'session-b',
       leaseMs: 60_000,
@@ -533,7 +579,7 @@ describe('CommerceAgent owner introduction onboarding state', () => {
       projection: { onboarding: { state: 'claimed' } },
     });
 
-    const reclaimed = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const reclaimed = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid,
       leaseOwner: 'session-b',
       leaseMs: 60_000,
@@ -549,29 +595,30 @@ describe('CommerceAgent owner introduction onboarding state', () => {
     });
     expect(reclaimed.leaseToken).toBeGreaterThan(first.leaseToken!);
 
-    expect(() =>
+    await expect(
       ownerProfile.acknowledgeCommerceAgentOwnerIntroduction({
         workspaceJid,
         leaseOwner: 'session-a',
         leaseToken: reclaimed.leaseToken!,
         now: '2026-07-28T12:01:17.000Z',
       }),
-    ).toThrow('lease no longer matches');
-    expect(() =>
+    ).rejects.toThrow('lease no longer matches');
+    await expect(
       ownerProfile.acknowledgeCommerceAgentOwnerIntroduction({
         workspaceJid,
         leaseOwner: 'session-b',
         leaseToken: first.leaseToken!,
         now: '2026-07-28T12:01:17.000Z',
       }),
-    ).toThrow('lease no longer matches');
+    ).rejects.toThrow('lease no longer matches');
 
-    const acknowledged = ownerProfile.acknowledgeCommerceAgentOwnerIntroduction({
-      workspaceJid,
-      leaseOwner: 'session-b',
-      leaseToken: reclaimed.leaseToken!,
-      now: '2026-07-28T12:01:17.000Z',
-    });
+    const acknowledged =
+      await ownerProfile.acknowledgeCommerceAgentOwnerIntroduction({
+        workspaceJid,
+        leaseOwner: 'session-b',
+        leaseToken: reclaimed.leaseToken!,
+        now: '2026-07-28T12:01:17.000Z',
+      });
     expect(acknowledged).toMatchObject({
       acknowledged: true,
       projection: {
@@ -582,7 +629,7 @@ describe('CommerceAgent owner introduction onboarding state', () => {
       },
     });
     expect(
-      ownerProfile.acknowledgeCommerceAgentOwnerIntroduction({
+      await ownerProfile.acknowledgeCommerceAgentOwnerIntroduction({
         workspaceJid,
         leaseOwner: 'session-b',
         leaseToken: reclaimed.leaseToken!,
@@ -590,7 +637,7 @@ describe('CommerceAgent owner introduction onboarding state', () => {
       }),
     ).toMatchObject({ acknowledged: false });
 
-    const skipped = ownerProfile.skipCommerceAgentOwnerIntroduction({
+    const skipped = await ownerProfile.skipCommerceAgentOwnerIntroduction({
       workspaceJid,
       expectedOnboardingRevision: acknowledged.projection.onboarding.revision,
       context: mutationContext(),
@@ -603,7 +650,7 @@ describe('CommerceAgent owner introduction onboarding state', () => {
       },
     });
     expect(
-      ownerProfile.claimCommerceAgentOwnerIntroduction({
+      await ownerProfile.claimCommerceAgentOwnerIntroduction({
         workspaceJid,
         leaseOwner: 'session-c',
         now: '2026-07-28T13:00:00.000Z',
@@ -614,9 +661,9 @@ describe('CommerceAgent owner introduction onboarding state', () => {
     });
   });
 
-  test('runner exit releases an unacknowledged lease without consuming first wake', () => {
+  test('runner exit releases an unacknowledged lease without consuming first wake', async () => {
     const workspaceJid = createWorkspace('onboarding-release');
-    const first = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const first = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid,
       leaseOwner: 'failed-runner',
       now: '2026-07-28T12:00:00.000Z',
@@ -629,7 +676,7 @@ describe('CommerceAgent owner introduction onboarding state', () => {
         '2026-07-28T12:00:01.000Z',
       ),
     ).toBe(1);
-    const retry = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const retry = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid,
       leaseOwner: 'retry-runner',
       now: '2026-07-28T12:00:02.000Z',
@@ -647,9 +694,9 @@ describe('CommerceAgent owner introduction onboarding state', () => {
     });
   });
 
-  test('normal database restart does not consume an unacknowledged first wake', () => {
+  test('normal database restart does not consume an unacknowledged first wake', async () => {
     const workspaceJid = createWorkspace('onboarding-restart');
-    const first = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const first = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid,
       leaseOwner: 'restart-runner',
       leaseMs: 60_000,
@@ -657,10 +704,9 @@ describe('CommerceAgent owner introduction onboarding state', () => {
     });
     expect(first).toMatchObject({ firstWake: true, leaseToken: 1 });
 
-    db.closeDatabase();
-    db.initDatabase();
+    await restartDatabase();
 
-    const resumed = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const resumed = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid,
       leaseOwner: 'restart-runner',
       leaseMs: 60_000,
@@ -675,11 +721,11 @@ describe('CommerceAgent owner introduction onboarding state', () => {
     });
   });
 
-  test('backfills first wake for pre-release v66 claimed rows without consuming it for fresh pending rows', () => {
+  test('backfills first wake for pre-release v66 claimed rows without consuming it for fresh pending rows', async () => {
     const historicalWorkspaceJid = createWorkspace(
       'pre-release-v66-first-wake',
     );
-    const original = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const original = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid: historicalWorkspaceJid,
       leaseOwner: 'historical-session',
       leaseMs: 60_000,
@@ -727,13 +773,15 @@ describe('CommerceAgent owner introduction onboarding state', () => {
     db.initDatabase();
 
     const historicalProjection =
-      ownerProfile.getCommerceAgentOwnerProfileProjection(historicalWorkspaceJid);
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(
+        historicalWorkspaceJid,
+      );
     expect(historicalProjection.onboarding).toMatchObject({
       state: 'claimed',
       leaseToken: 1,
       firstWakeAt: '2026-07-28T12:00:00.000Z',
     });
-    const reclaimed = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const reclaimed = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid: historicalWorkspaceJid,
       leaseOwner: 'reclaimed-session',
       leaseMs: 60_000,
@@ -748,7 +796,7 @@ describe('CommerceAgent owner introduction onboarding state', () => {
     });
 
     const freshWorkspaceJid = createWorkspace('fresh-v66-first-wake');
-    const fresh = ownerProfile.claimCommerceAgentOwnerIntroduction({
+    const fresh = await ownerProfile.claimCommerceAgentOwnerIntroduction({
       workspaceJid: freshWorkspaceJid,
       leaseOwner: 'fresh-session',
       leaseMs: 60_000,
@@ -765,40 +813,45 @@ describe('CommerceAgent owner introduction onboarding state', () => {
 });
 
 describe('v66 owner-profile migration boundary', () => {
-  test('does not mistake an address containing a legacy sentinel phrase for the sentinel itself', () => {
+  test('does not mistake an address containing a legacy sentinel phrase for the sentinel itself', async () => {
     const workspaceJid = createWorkspace('legacy-sentinel-substring');
     const legitimateAddress = '小何（不愿提供英文名）';
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: legitimateAddress,
       expectedRevision: 0,
       context: mutationContext(),
     });
 
-    const raw = rawDatabase();
-    const item = reservedRows(raw, workspaceJid)[0];
+    const item = (await reservedRows(workspaceJid))[0];
     const before = {
-      item: raw
-        .prepare(
+      item: (
+        await memoryRows(
           `SELECT content, status, revision
            FROM workspace_memory_items
-           WHERE id = ?`,
+           WHERE id = $1`,
+          item.id,
         )
-        .get(item.id),
-      versions: raw
-        .prepare(
-          `SELECT COUNT(*) AS count
+      )[0],
+      versions: (
+        await memoryRows(
+          `SELECT COUNT(*)::int AS count
            FROM workspace_memory_versions
-           WHERE item_id = ?`,
+           WHERE item_id = $1`,
+          item.id,
         )
-        .get(item.id),
+      )[0],
     };
+    const raw = rawDatabase();
     raw
       .prepare(
         `DELETE FROM workspace_onboarding_states
          WHERE workspace_jid = ? AND flow_key = ?`,
       )
-      .run(workspaceJid, ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY);
+      .run(
+        workspaceJid,
+        ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY,
+      );
     raw
       .prepare(
         `UPDATE router_state
@@ -808,147 +861,119 @@ describe('v66 owner-profile migration boundary', () => {
       .run();
     raw.close();
 
-    db.closeDatabase();
-    db.initDatabase();
+    await restartDatabase();
 
     expect(
-      ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
     ).toMatchObject({
       preferredAddress: legitimateAddress,
       revision: 1,
       onboarding: { state: 'completed' },
     });
-    const verified = rawDatabase();
     expect({
-      item: verified
-        .prepare(
+      item: (
+        await memoryRows(
           `SELECT content, status, revision
            FROM workspace_memory_items
-           WHERE id = ?`,
+           WHERE id = $1`,
+          item.id,
         )
-        .get(item.id),
-      versions: verified
-        .prepare(
-          `SELECT COUNT(*) AS count
+      )[0],
+      versions: (
+        await memoryRows(
+          `SELECT COUNT(*)::int AS count
            FROM workspace_memory_versions
-           WHERE item_id = ?`,
+           WHERE item_id = $1`,
+          item.id,
         )
-        .get(item.id),
+      )[0],
     }).toEqual(before);
-    verified.close();
   });
 
-  test('matches the exact legacy skip sentinel once and preserves skipped across later starts', () => {
+  test('matches the exact legacy skip sentinel once and preserves skipped across later starts', async () => {
     const workspaceJid = createWorkspace('legacy-exact-sentinel');
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '主人不愿提供称呼',
       expectedRevision: 0,
       context: mutationContext(),
     });
 
-    const legacy = rawDatabase();
-    const item = reservedRows(legacy, workspaceJid)[0];
-    legacy
+    const item = (await reservedRows(workspaceJid))[0];
+    const raw = rawDatabase();
+    raw
       .prepare(
         `DELETE FROM workspace_onboarding_states
          WHERE workspace_jid = ? AND flow_key = ?`,
       )
-      .run(workspaceJid, ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY);
-    legacy
+      .run(
+        workspaceJid,
+        ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY,
+      );
+    raw
       .prepare(
         `UPDATE router_state
          SET value = '65'
          WHERE key = 'schema_version'`,
       )
       .run();
-    legacy.close();
+    raw.close();
 
-    db.closeDatabase();
-    db.initDatabase();
+    await restartDatabase();
 
     expect(
-      ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
     ).toMatchObject({
       preferredAddress: null,
       revision: 2,
       onboarding: { state: 'skipped' },
     });
-    const migrated = rawDatabase();
-    expect(reservedRows(migrated, workspaceJid)).toMatchObject([
+    expect(await reservedRows(workspaceJid)).toMatchObject([
       { id: item.id, status: 'superseded', revision: 2 },
     ]);
     const onceOnlySnapshot = {
-      item: migrated
-        .prepare(
+      item: (
+        await memoryRows(
           `SELECT content, canonical_key, status, revision, updated_at
            FROM workspace_memory_items
-           WHERE id = ?`,
+           WHERE id = $1`,
+          item.id,
         )
-        .get(item.id),
-      onboarding: migrated
-        .prepare(
-          `SELECT state, revision, skipped_at, updated_at
-           FROM workspace_onboarding_states
-           WHERE workspace_jid = ? AND flow_key = ?`,
-        )
-        .get(workspaceJid, ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY),
-      artifacts: migrated
-        .prepare(
-          `SELECT
-            (SELECT COUNT(*) FROM workspace_memory_versions WHERE item_id = ?) AS versions,
-            (SELECT COUNT(*) FROM workspace_memory_audit_events WHERE item_id = ?) AS audits,
-            (SELECT COUNT(*) FROM workspace_memory_outbox WHERE item_id = ?) AS outbox`,
-        )
-        .get(item.id, item.id, item.id),
+      )[0],
+      onboarding: ownerOnboardingRow(workspaceJid),
+      artifacts: await itemArtifacts(item.id),
     };
-    migrated.close();
 
-    db.closeDatabase();
-    db.initDatabase();
+    await restartDatabase();
 
     expect(
-      ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
     ).toMatchObject({
       preferredAddress: null,
       revision: 2,
       onboarding: { state: 'skipped' },
     });
-    const restarted = rawDatabase();
     expect({
-      item: restarted
-        .prepare(
+      item: (
+        await memoryRows(
           `SELECT content, canonical_key, status, revision, updated_at
            FROM workspace_memory_items
-           WHERE id = ?`,
+           WHERE id = $1`,
+          item.id,
         )
-        .get(item.id),
-      onboarding: restarted
-        .prepare(
-          `SELECT state, revision, skipped_at, updated_at
-           FROM workspace_onboarding_states
-           WHERE workspace_jid = ? AND flow_key = ?`,
-        )
-        .get(workspaceJid, ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY),
-      artifacts: restarted
-        .prepare(
-          `SELECT
-            (SELECT COUNT(*) FROM workspace_memory_versions WHERE item_id = ?) AS versions,
-            (SELECT COUNT(*) FROM workspace_memory_audit_events WHERE item_id = ?) AS audits,
-            (SELECT COUNT(*) FROM workspace_memory_outbox WHERE item_id = ?) AS outbox`,
-        )
-        .get(item.id, item.id, item.id),
+      )[0],
+      onboarding: ownerOnboardingRow(workspaceJid),
+      artifacts: await itemArtifacts(item.id),
     }).toEqual(onceOnlySnapshot);
-    restarted.close();
   });
 });
 
 describe('reserved canonical-key integrity', () => {
-  test('generic memory mutations fail closed for the owner-profile key', () => {
+  test('generic memory mutations fail closed for the owner-profile key', async () => {
     const workspaceJid = createWorkspace('reserved-deny');
     const actor = { id: OWNER_ID, role: 'member' as const };
 
-    expect(() =>
+    await expect(
       memoryService.createWorkspaceMemory({
         actor,
         workspaceJid,
@@ -958,18 +983,16 @@ describe('reserved canonical-key integrity', () => {
         canonicalKey:
           memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
       }),
-    ).toThrowError(expect.objectContaining({ code: 'reserved_canonical_key' }));
+    ).rejects.toMatchObject({ code: 'reserved_canonical_key' });
 
-    const dedicated = ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    const dedicated = await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '专用接口写入',
       context: mutationContext(),
     });
-    const raw = rawDatabase();
-    const itemId = reservedRows(raw, workspaceJid)[0].id;
-    raw.close();
+    const itemId = (await reservedRows(workspaceJid))[0].id;
 
-    expect(() =>
+    await expect(
       memoryService.updateWorkspaceMemory({
         actor,
         workspaceJid,
@@ -978,8 +1001,8 @@ describe('reserved canonical-key integrity', () => {
         expectedRevision: dedicated.projection.revision!,
         content: 'generic update must not mutate the reserved item',
       }),
-    ).toThrowError(expect.objectContaining({ code: 'reserved_canonical_key' }));
-    expect(() =>
+    ).rejects.toMatchObject({ code: 'reserved_canonical_key' });
+    await expect(
       memoryService.forgetWorkspaceMemory({
         actor,
         workspaceJid,
@@ -987,16 +1010,16 @@ describe('reserved canonical-key integrity', () => {
         itemId,
         expectedRevision: dedicated.projection.revision!,
       }),
-    ).toThrowError(expect.objectContaining({ code: 'reserved_canonical_key' }));
+    ).rejects.toMatchObject({ code: 'reserved_canonical_key' });
 
-    const ordinary = memoryService.createWorkspaceMemory({
+    const ordinary = await memoryService.createWorkspaceMemory({
       actor,
       workspaceJid,
       sourceType: 'web_user',
       kind: 'fact',
       content: 'ordinary memory',
     });
-    expect(() =>
+    await expect(
       memoryService.updateWorkspaceMemory({
         actor,
         workspaceJid,
@@ -1006,129 +1029,105 @@ describe('reserved canonical-key integrity', () => {
         canonicalKey:
           memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
       }),
-    ).toThrowError(expect.objectContaining({ code: 'reserved_canonical_key' }));
+    ).rejects.toMatchObject({ code: 'reserved_canonical_key' });
 
     const projection =
-      ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid);
     expect(projection).toMatchObject({
       preferredAddress: '专用接口写入',
       revision: 1,
     });
 
     expect(
-      memoryService.listWorkspaceMemory({
-        actor,
-        workspaceJid,
-        status: 'active',
-      }).items,
+      (
+        await memoryService.listWorkspaceMemory({
+          actor,
+          workspaceJid,
+          status: 'active',
+        })
+      ).items,
     ).toEqual([expect.objectContaining({ id: ordinary.item.id })]);
     expect(
-      memoryService.searchWorkspaceMemory({
-        actor,
-        workspaceJid,
-        query: '专用接口写入',
-      }).hits,
+      (
+        await memoryService.searchWorkspaceMemory({
+          actor,
+          workspaceJid,
+          query: '专用接口写入',
+        })
+      ).hits,
     ).toEqual([]);
-    expect(() =>
+    await expect(
       memoryService.listWorkspaceMemoryVersions({
         actor,
         workspaceJid,
         itemId,
       }),
-    ).toThrowError(expect.objectContaining({ code: 'not_found' }));
+    ).rejects.toMatchObject({ code: 'not_found' });
   });
 
-  test('legacy duplicates are reconciled before a partial unique index is enforced', () => {
+  test('legacy duplicates are reconciled before a partial unique index is enforced', async () => {
     const workspaceJid = createWorkspace('legacy-reconcile');
     const actor = { id: OWNER_ID, role: 'member' as const };
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '当前称呼',
       context: mutationContext(),
     });
 
-    const raw = rawDatabase();
-    const uniqueIndexes = raw
-      .prepare(
-        `SELECT name
-         FROM sqlite_master
-         WHERE type = 'index'
-           AND tbl_name = 'workspace_memory_items'
-           AND sql LIKE 'CREATE UNIQUE INDEX%'
-           AND sql LIKE '%canonical_key%'`,
-      )
-      .all() as Array<{ name: string }>;
-    for (const index of uniqueIndexes) {
-      raw.exec(`DROP INDEX "${index.name.replaceAll('"', '""')}"`);
-    }
+    // Simulate a pre-v66 database: no reserved-key invariant existed yet.
+    await memoryRun(
+      'DROP INDEX IF EXISTS idx_workspace_memory_owner_address_unique',
+    );
 
-    const current = raw
-      .prepare(
+    const current = (
+      await memoryRows<Record<string, unknown>>(
         `SELECT *
          FROM workspace_memory_items
-         WHERE workspace_jid = ? AND canonical_key = ?`,
-      )
-      .get(
+         WHERE workspace_jid = $1 AND canonical_key = $2`,
         workspaceJid,
         memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-      ) as Record<string, unknown>;
+      )
+    )[0];
     const duplicateId = 'wmi_owner_profile_legacy_duplicate';
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_items (
+    await memoryRun(
+      `INSERT INTO workspace_memory_items (
         id, store_id, workspace_jid, kind, title, content, canonical_key,
         status, importance, confidence, valid_from, valid_until, expires_at,
         revision, create_idempotency_key, create_request_hash,
         created_at, updated_at, deleted_at
       ) VALUES (
-        ?, ?, ?, 'fact', '主人称呼', '旧重复称呼', ?, 'active',
-        1, 1, NULL, NULL, NULL, 1, NULL, NULL, ?, ?, NULL
+        $1, $2, $3, 'fact', '主人称呼', '旧重复称呼', $4, 'active',
+        1, 1, NULL, NULL, NULL, 1, NULL, NULL, $5, $5, NULL
       )`,
-      )
-      .run(
-        duplicateId,
-        current.store_id,
-        workspaceJid,
-        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-        '2026-01-01T00:00:00.000Z',
-        '2026-01-01T00:00:00.000Z',
-      );
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_versions (
+      duplicateId,
+      current.store_id,
+      workspaceJid,
+      memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+      '2026-01-01T00:00:00.000Z',
+    );
+    await memoryRun(
+      `INSERT INTO workspace_memory_versions (
         item_id, revision, workspace_jid, kind, title, content, canonical_key,
         status, importance, confidence, valid_from, valid_until, expires_at,
         change_type, actor_type, actor_id, created_at
       ) VALUES (
-        ?, 1, ?, 'fact', '主人称呼', '旧重复称呼', ?, 'active',
-        1, 1, NULL, NULL, NULL, 'create', 'migration', 'legacy', ?
+        $1, 1, $2, 'fact', '主人称呼', '旧重复称呼', $3, 'active',
+        1, 1, NULL, NULL, NULL, 'create', 'migration', 'legacy', $4
       )`,
-      )
-      .run(
-        duplicateId,
-        workspaceJid,
-        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-        '2026-01-01T00:00:00.000Z',
-      );
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_provenance (
+      duplicateId,
+      workspaceJid,
+      memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+      '2026-01-01T00:00:00.000Z',
+    );
+    await memoryRun(
+      `INSERT INTO workspace_memory_provenance (
         item_id, revision, source_type, source_id, session_id, observed_at,
         recorded_at
-      ) VALUES (?, 1, 'migration', 'legacy', NULL, NULL, ?)`,
-      )
-      .run(duplicateId, '2026-01-01T00:00:00.000Z');
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_fts (
-          item_id, workspace_jid, title, content, canonical_key
-        ) VALUES (?, ?, '主人称呼', '旧重复称呼', ?)`,
-      )
-      .run(
-        duplicateId,
-        workspaceJid,
-        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-      );
+      ) VALUES ($1, 1, 'migration', 'legacy', NULL, NULL, $2)`,
+      duplicateId,
+      '2026-01-01T00:00:00.000Z',
+    );
+    const raw = rawDatabase();
     raw
       .prepare(
         `UPDATE router_state
@@ -1138,73 +1137,70 @@ describe('reserved canonical-key integrity', () => {
       .run();
     raw.close();
 
-    db.closeDatabase();
-    db.initDatabase();
+    await restartDatabase();
 
-    const verified = rawDatabase();
-    const rows = reservedRows(verified, workspaceJid);
+    const rows = await reservedRows(workspaceJid);
     expect(rows.filter((row) => row.status === 'active')).toHaveLength(1);
     expect(
-      verified
-        .prepare(
+      (
+        await memoryRows(
           `SELECT canonical_key, status, revision
            FROM workspace_memory_items
-           WHERE id = ?`,
+           WHERE id = $1`,
+          duplicateId,
         )
-        .get(duplicateId),
+      )[0],
     ).toMatchObject({
       canonical_key: null,
       status: 'superseded',
       revision: 2,
     });
     expect(
-      verified
-        .prepare(
-          `SELECT COUNT(*) AS count
-           FROM workspace_memory_versions
-           WHERE item_id = ?`,
-        )
-        .get(duplicateId),
-    ).toEqual({ count: 2 });
+      await memoryRows(
+        `SELECT COUNT(*)::int AS count
+         FROM workspace_memory_versions
+         WHERE item_id = $1`,
+        duplicateId,
+      ),
+    ).toEqual([{ count: 2 }]);
     expect(
-      ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
+      await ownerProfile.getCommerceAgentOwnerProfileProjection(workspaceJid),
     ).toMatchObject({ preferredAddress: '当前称呼' });
-    const invariant = verified
-      .prepare(
-        `SELECT name, sql
-         FROM sqlite_master
-         WHERE type = 'index'
-           AND tbl_name = 'workspace_memory_items'
-           AND sql LIKE 'CREATE UNIQUE INDEX%'
-           AND sql LIKE '%canonical_key%'`,
-      )
-      .all() as Array<{ name: string; sql: string }>;
-    expect(invariant.some((index) => index.sql.includes('WHERE'))).toBe(true);
+    const invariant = await memoryRows<{ indexname: string; indexdef: string }>(
+      `SELECT indexname, indexdef
+       FROM pg_indexes
+       WHERE tablename = 'workspace_memory_items'
+         AND indexname = 'idx_workspace_memory_owner_address_unique'`,
+    );
+    expect(invariant).toHaveLength(1);
+    expect(invariant[0].indexdef).toContain('WHERE');
 
-    expect(() =>
+    await expect(
       memoryService.getWorkspaceMemory({
         actor,
         workspaceJid,
         itemId: duplicateId,
       }),
-    ).toThrowError(expect.objectContaining({ code: 'not_found' }));
+    ).rejects.toMatchObject({ code: 'not_found' });
     expect(
-      memoryService
-        .listWorkspaceMemory({
+      (
+        await memoryService.listWorkspaceMemory({
           actor,
           workspaceJid,
           status: 'superseded',
         })
-        .items.map((item) => item.id),
+      ).items.map((item) => item.id),
     ).not.toContain(duplicateId);
     expect(
-      memoryService.searchWorkspaceMemory({
-        actor,
-        workspaceJid,
-        query: '旧重复称呼',
-      }).hits,
+      (
+        await memoryService.searchWorkspaceMemory({
+          actor,
+          workspaceJid,
+          query: '旧重复称呼',
+        })
+      ).hits,
     ).toEqual([]);
-    expect(() =>
+    await expect(
       memoryService.updateWorkspaceMemory({
         actor,
         workspaceJid,
@@ -1213,8 +1209,8 @@ describe('reserved canonical-key integrity', () => {
         expectedRevision: 2,
         content: 'generic update must not revive retired owner data',
       }),
-    ).toThrowError(expect.objectContaining({ code: 'reserved_canonical_key' }));
-    expect(() =>
+    ).rejects.toMatchObject({ code: 'reserved_canonical_key' });
+    await expect(
       memoryService.forgetWorkspaceMemory({
         actor,
         workspaceJid,
@@ -1222,110 +1218,77 @@ describe('reserved canonical-key integrity', () => {
         itemId: duplicateId,
         expectedRevision: 2,
       }),
-    ).toThrowError(expect.objectContaining({ code: 'reserved_canonical_key' }));
-    expect(() =>
+    ).rejects.toMatchObject({ code: 'reserved_canonical_key' });
+    await expect(
       memoryService.listWorkspaceMemoryVersions({
         actor,
         workspaceJid,
         itemId: duplicateId,
       }),
-    ).toThrowError(expect.objectContaining({ code: 'not_found' }));
+    ).rejects.toMatchObject({ code: 'not_found' });
 
-    expect(() =>
-      verified
-        .prepare(
-          `INSERT INTO workspace_memory_items (
-            id, store_id, workspace_jid, kind, content, canonical_key, status,
-            importance, confidence, revision, created_at, updated_at
-          ) VALUES (?, ?, ?, 'fact', 'illegal duplicate', ?, 'active',
-            1, 1, 1, ?, ?)`,
-        )
-        .run(
-          'wmi_owner_profile_illegal_duplicate',
-          current.store_id,
-          workspaceJid,
-          memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-          '2026-07-28T14:00:00.000Z',
-          '2026-07-28T14:00:00.000Z',
-        ),
-    ).toThrow(/UNIQUE constraint failed/);
+    await expect(
+      memoryRun(
+        `INSERT INTO workspace_memory_items (
+          id, store_id, workspace_jid, kind, content, canonical_key, status,
+          importance, confidence, revision, created_at, updated_at
+        ) VALUES ($1, $2, $3, 'fact', 'illegal duplicate', $4, 'active',
+          1, 1, 1, $5, $5)`,
+        'wmi_owner_profile_illegal_duplicate',
+        current.store_id,
+        workspaceJid,
+        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+        '2026-07-28T14:00:00.000Z',
+      ),
+    ).rejects.toThrow(/duplicate key value violates unique constraint/);
 
     const onceOnlySnapshot = {
-      item: verified
-        .prepare(
+      item: (
+        await memoryRows(
           `SELECT canonical_key, status, revision, updated_at
            FROM workspace_memory_items
-           WHERE id = ?`,
+           WHERE id = $1`,
+          duplicateId,
         )
-        .get(duplicateId),
-      onboarding: verified
-        .prepare(
-          `SELECT state, revision, updated_at
-           FROM workspace_onboarding_states
-           WHERE workspace_jid = ? AND flow_key = ?`,
-        )
-        .get(workspaceJid, ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY),
-      artifacts: verified
-        .prepare(
-          `SELECT
-            (SELECT COUNT(*) FROM workspace_memory_versions WHERE item_id = ?) AS versions,
-            (SELECT COUNT(*) FROM workspace_memory_audit_events WHERE item_id = ?) AS audits,
-            (SELECT COUNT(*) FROM workspace_memory_outbox WHERE item_id = ?) AS outbox`,
-        )
-        .get(duplicateId, duplicateId, duplicateId),
+      )[0],
+      onboarding: ownerOnboardingRow(workspaceJid),
+      artifacts: await itemArtifacts(duplicateId),
     };
-    verified.close();
 
-    db.closeDatabase();
-    db.initDatabase();
-    const restarted = rawDatabase();
+    await restartDatabase();
+
     expect({
-      item: restarted
-        .prepare(
+      item: (
+        await memoryRows(
           `SELECT canonical_key, status, revision, updated_at
            FROM workspace_memory_items
-           WHERE id = ?`,
+           WHERE id = $1`,
+          duplicateId,
         )
-        .get(duplicateId),
-      onboarding: restarted
-        .prepare(
-          `SELECT state, revision, updated_at
-           FROM workspace_onboarding_states
-           WHERE workspace_jid = ? AND flow_key = ?`,
-        )
-        .get(workspaceJid, ownerProfile.COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY),
-      artifacts: restarted
-        .prepare(
-          `SELECT
-            (SELECT COUNT(*) FROM workspace_memory_versions WHERE item_id = ?) AS versions,
-            (SELECT COUNT(*) FROM workspace_memory_audit_events WHERE item_id = ?) AS audits,
-            (SELECT COUNT(*) FROM workspace_memory_outbox WHERE item_id = ?) AS outbox`,
-        )
-        .get(duplicateId, duplicateId, duplicateId),
+      )[0],
+      onboarding: ownerOnboardingRow(workspaceJid),
+      artifacts: await itemArtifacts(duplicateId),
     }).toEqual(onceOnlySnapshot);
-    restarted.close();
   });
 
-  test('legacy generic idempotency replay records cannot disclose the reserved item', () => {
+  test('legacy generic idempotency replay records cannot disclose the reserved item', async () => {
     const workspaceJid = createWorkspace('legacy-idempotency-replay');
-    ownerProfile.setCommerceAgentOwnerPreferredAddress({
+    await ownerProfile.setCommerceAgentOwnerPreferredAddress({
       workspaceJid,
       preferredAddress: '绝不能由 generic replay 返回',
       expectedRevision: 0,
       context: mutationContext(),
     });
 
-    const raw = rawDatabase();
-    const item = raw
-      .prepare(
+    const item = (
+      await memoryRows<{ id: string; store_id: string; revision: number }>(
         `SELECT id, store_id, revision
          FROM workspace_memory_items
-         WHERE workspace_jid = ? AND canonical_key = ?`,
-      )
-      .get(
+         WHERE workspace_jid = $1 AND canonical_key = $2`,
         workspaceJid,
         memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-      ) as { id: string; store_id: string; revision: number };
+      )
+    )[0];
     const createIdempotencyKey = 'legacy-generic-create-replay';
     const updateIdempotencyKey = 'legacy-generic-update-replay';
     const forgetIdempotencyKey = 'legacy-generic-forget-replay';
@@ -1340,13 +1303,13 @@ describe('reserved canonical-key integrity', () => {
       expectedRevision: item.revision,
       reason: null,
     });
-    raw
-      .prepare(
-        `UPDATE workspace_memory_items
-       SET create_idempotency_key = ?, create_request_hash = NULL
-       WHERE id = ?`,
-      )
-      .run(createIdempotencyKey, item.id);
+    await memoryRun(
+      `UPDATE workspace_memory_items
+       SET create_idempotency_key = $1, create_request_hash = NULL
+       WHERE id = $2`,
+      createIdempotencyKey,
+      item.id,
+    );
     const leakedReplay = JSON.stringify({
       store: { id: item.store_id, workspaceJid, revision: 1 },
       item: {
@@ -1358,30 +1321,26 @@ describe('reserved canonical-key integrity', () => {
         revision: item.revision,
       },
     });
-    raw
-      .prepare(
-        `INSERT INTO workspace_memory_mutation_requests (
+    await memoryRun(
+      `INSERT INTO workspace_memory_mutation_requests (
         store_id, idempotency_key, operation, item_id, request_hash,
         response_json, created_at
       ) VALUES
-        (?, ?, 'update', ?, ?, ?, ?),
-        (?, ?, 'forget', ?, ?, ?, ?)`,
-      )
-      .run(
-        item.store_id,
-        updateIdempotencyKey,
-        item.id,
-        updateHash,
-        leakedReplay,
-        '2026-07-28T15:00:00.000Z',
-        item.store_id,
-        forgetIdempotencyKey,
-        item.id,
-        forgetHash,
-        leakedReplay,
-        '2026-07-28T15:00:00.000Z',
-      );
-    raw.close();
+        ($1, $2, 'update', $3, $4, $5, $6),
+        ($7, $8, 'forget', $9, $10, $11, $12)`,
+      item.store_id,
+      updateIdempotencyKey,
+      item.id,
+      updateHash,
+      leakedReplay,
+      '2026-07-28T15:00:00.000Z',
+      item.store_id,
+      forgetIdempotencyKey,
+      item.id,
+      forgetHash,
+      leakedReplay,
+      '2026-07-28T15:00:00.000Z',
+    );
 
     const storeOperations = [
       () =>
@@ -1416,9 +1375,9 @@ describe('reserved canonical-key integrity', () => {
         }),
     ];
     for (const operation of storeOperations) {
-      expect(operation).toThrowError(
-        expect.objectContaining({ code: 'reserved_canonical_key' }),
-      );
+      await expect(operation()).rejects.toMatchObject({
+        code: 'reserved_canonical_key',
+      });
     }
 
     const actor = { id: OWNER_ID, role: 'member' as const };
@@ -1453,13 +1412,12 @@ describe('reserved canonical-key integrity', () => {
         }),
     ];
     for (const operation of serviceOperations) {
-      expect(operation).toThrowError(
-        expect.objectContaining({ code: 'reserved_canonical_key' }),
-      );
+      await expect(operation()).rejects.toMatchObject({
+        code: 'reserved_canonical_key',
+      });
     }
 
-    const verified = rawDatabase();
-    expect(reservedRows(verified, workspaceJid)).toMatchObject([
+    expect(await reservedRows(workspaceJid)).toMatchObject([
       {
         id: item.id,
         content: '绝不能由 generic replay 返回',
@@ -1468,12 +1426,10 @@ describe('reserved canonical-key integrity', () => {
       },
     ]);
     expect(
-      verified
-        .prepare(
-          'SELECT COUNT(*) AS count FROM workspace_memory_versions WHERE item_id = ?',
-        )
-        .get(item.id),
-    ).toEqual({ count: 1 });
-    verified.close();
+      await memoryRows(
+        'SELECT COUNT(*)::int AS count FROM workspace_memory_versions WHERE item_id = $1',
+        item.id,
+      ),
+    ).toEqual([{ count: 1 }]);
   });
 });

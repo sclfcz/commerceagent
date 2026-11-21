@@ -258,11 +258,11 @@ export function createOwnerProfileSchema(db: SqliteDatabase): void {
   }
 }
 
-export function getCommerceAgentOwnerProfileProjection(
+export async function getCommerceAgentOwnerProfileProjection(
   workspaceJid: string,
-): CommerceAgentOwnerProfileProjection {
+): Promise<CommerceAgentOwnerProfileProjection> {
   requireHomeWorkspace(workspaceJid);
-  const { item } = getCommerceAgentOwnerAddressMemoryItem(workspaceJid);
+  const { item } = await getCommerceAgentOwnerAddressMemoryItem(workspaceJid);
   const onboarding = onboardingRow(workspaceJid);
   return {
     workspaceJid,
@@ -295,91 +295,108 @@ function completeIntroduction(workspaceJid: string, at: string): void {
     .run(at, at, workspaceJid, COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY);
 }
 
-export function setCommerceAgentOwnerPreferredAddress(input: {
+/**
+ * The preferred address lives in Workspace Memory (PostgreSQL) while the
+ * first-wake marker lives in `workspace_onboarding_states` (SQLite). The two
+ * cannot share a transaction, so every mutation below follows one order:
+ * Memory first, SQLite second.
+ *
+ * Failure semantics, identical for set/clear/skip:
+ *
+ * - Memory fails → nothing else happened; the caller sees the Memory error and
+ *   the onboarding row is untouched.
+ * - Memory commits, SQLite fails → the address is stored but onboarding stays
+ *   pending. Retrying with the same idempotency key replays the Memory
+ *   mutation (`replayed: true`, no new revision) and completes the marker, so
+ *   the pair converges without a compensating write.
+ *
+ * The reverse order would be worse: a recorded "onboarding completed" with no
+ * stored address would make the first-wake ritual disappear permanently.
+ */
+export async function setCommerceAgentOwnerPreferredAddress(input: {
   workspaceJid: string;
   preferredAddress: string;
   expectedRevision?: number;
   idempotencyKey?: string | null;
   context: WorkspaceMemoryMutationContext;
-}): {
+}): Promise<{
   projection: CommerceAgentOwnerProfileProjection;
   replayed: boolean;
   changed: boolean;
-} {
+}> {
   requireHomeWorkspace(input.workspaceJid);
   const preferredAddress = normalizeAddress(input.preferredAddress);
-  const db = requireDatabase();
+  let mutation: Awaited<
+    ReturnType<typeof mutateCommerceAgentOwnerAddressMemory>
+  >;
   try {
-    return db.transaction(() => {
-      const mutation = mutateCommerceAgentOwnerAddressMemory({
-        workspaceJid: input.workspaceJid,
+    mutation = await mutateCommerceAgentOwnerAddressMemory({
+      workspaceJid: input.workspaceJid,
+      preferredAddress,
+      expectedRevision: input.expectedRevision,
+      idempotencyKey: input.idempotencyKey,
+      requestHash: requestHash('set', {
         preferredAddress,
-        expectedRevision: input.expectedRevision,
-        idempotencyKey: input.idempotencyKey,
-        requestHash: requestHash('set', {
-          preferredAddress,
-          expectedRevision: input.expectedRevision ?? null,
-        }),
-        context: input.context,
-      });
-      completeIntroduction(input.workspaceJid, nowIso());
-      return {
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-        replayed: mutation.replayed,
-        changed: mutation.changed,
-      };
-    })();
+        expectedRevision: input.expectedRevision ?? null,
+      }),
+      context: input.context,
+    });
   } catch (error) {
     translateMemoryError(error);
   }
+  completeIntroduction(input.workspaceJid, nowIso());
+  return {
+    projection: await getCommerceAgentOwnerProfileProjection(
+      input.workspaceJid,
+    ),
+    replayed: mutation.replayed,
+    changed: mutation.changed,
+  };
 }
 
-export function clearCommerceAgentOwnerPreferredAddress(input: {
+export async function clearCommerceAgentOwnerPreferredAddress(input: {
   workspaceJid: string;
   expectedRevision: number;
   idempotencyKey?: string | null;
   context: WorkspaceMemoryMutationContext;
-}): {
+}): Promise<{
   projection: CommerceAgentOwnerProfileProjection;
   replayed: boolean;
   changed: boolean;
-} {
+}> {
   requireHomeWorkspace(input.workspaceJid);
-  const db = requireDatabase();
+  let mutation: Awaited<
+    ReturnType<typeof mutateCommerceAgentOwnerAddressMemory>
+  >;
   try {
-    return db.transaction(() => {
-      const mutation = mutateCommerceAgentOwnerAddressMemory({
-        workspaceJid: input.workspaceJid,
-        clear: true,
+    mutation = await mutateCommerceAgentOwnerAddressMemory({
+      workspaceJid: input.workspaceJid,
+      clear: true,
+      expectedRevision: input.expectedRevision,
+      idempotencyKey: input.idempotencyKey,
+      requestHash: requestHash('clear', {
         expectedRevision: input.expectedRevision,
-        idempotencyKey: input.idempotencyKey,
-        requestHash: requestHash('clear', {
-          expectedRevision: input.expectedRevision,
-        }),
-        context: input.context,
-      });
-      // Clearing a value is not consent to restart first-wake onboarding.
-      const row = ensureOnboardingRow(input.workspaceJid, nowIso());
-      if (row.state === 'pending' || row.state === 'claimed') {
-        completeIntroduction(input.workspaceJid, nowIso());
-      }
-      return {
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-        replayed: mutation.replayed,
-        changed: mutation.changed,
-      };
-    })();
+      }),
+      context: input.context,
+    });
   } catch (error) {
     translateMemoryError(error);
   }
+  // Clearing a value is not consent to restart first-wake onboarding.
+  const row = ensureOnboardingRow(input.workspaceJid, nowIso());
+  if (row.state === 'pending' || row.state === 'claimed') {
+    completeIntroduction(input.workspaceJid, nowIso());
+  }
+  return {
+    projection: await getCommerceAgentOwnerProfileProjection(
+      input.workspaceJid,
+    ),
+    replayed: mutation.replayed,
+    changed: mutation.changed,
+  };
 }
 
-export function claimCommerceAgentOwnerIntroduction(input: {
-  workspaceJid: string;
-  leaseOwner: string;
-  leaseMs?: number;
-  now?: string;
-}): {
+export interface CommerceAgentOwnerIntroductionClaim {
   claimed: boolean;
   leaseAcquired: boolean;
   firstWake: boolean;
@@ -388,7 +405,21 @@ export function claimCommerceAgentOwnerIntroduction(input: {
   leaseToken: number | null;
   leaseExpiresAt: string | null;
   projection: CommerceAgentOwnerProfileProjection;
-} {
+}
+
+/**
+ * The lease itself is pure SQLite, so it is decided in one local transaction.
+ * The Owner Profile memory item is read first, outside that transaction: it is
+ * only used to decide "onboarding already done", and a concurrent address
+ * write that lands in between is picked up by the next claim (which then takes
+ * the completed branch) instead of corrupting the lease state.
+ */
+export async function claimCommerceAgentOwnerIntroduction(input: {
+  workspaceJid: string;
+  leaseOwner: string;
+  leaseMs?: number;
+  now?: string;
+}): Promise<CommerceAgentOwnerIntroductionClaim> {
   requireHomeWorkspace(input.workspaceJid);
   const leaseOwner = input.leaseOwner.trim();
   if (!leaseOwner) {
@@ -410,75 +441,74 @@ export function claimCommerceAgentOwnerIntroduction(input: {
     3_600_000,
   );
   const expiresAt = new Date(atMs + leaseMs).toISOString();
+  const profile = await getCommerceAgentOwnerAddressMemoryItem(
+    input.workspaceJid,
+  );
   const db = requireDatabase();
-  return db.transaction(() => {
-    const profile = getCommerceAgentOwnerAddressMemoryItem(input.workspaceJid);
-    if (profile.item?.status === 'active') {
-      completeIntroduction(input.workspaceJid, at);
-      return {
-        claimed: false,
-        leaseAcquired: false,
-        firstWake: false,
-        newlyClaimed: false,
-        leaseToken: null,
-        leaseExpiresAt: null,
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-      };
-    }
-    const row = ensureOnboardingRow(input.workspaceJid, at);
-    if (row.state === 'completed' || row.state === 'skipped') {
-      return {
-        claimed: false,
-        leaseAcquired: false,
-        firstWake: false,
-        newlyClaimed: false,
-        leaseToken: null,
-        leaseExpiresAt: null,
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-      };
-    }
-    const leaseIsCurrent =
-      row.state === 'claimed' &&
-      !!row.lease_expires_at &&
-      Date.parse(row.lease_expires_at) > atMs;
-    if (leaseIsCurrent && row.lease_owner !== leaseOwner) {
-      return {
-        claimed: false,
-        leaseAcquired: false,
-        firstWake: false,
-        newlyClaimed: false,
-        leaseToken: Number(row.lease_token),
-        leaseExpiresAt: row.lease_expires_at,
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-      };
-    }
-    if (leaseIsCurrent && row.lease_owner === leaseOwner) {
-      db.prepare(
-        `UPDATE workspace_onboarding_states
+  const outcome = db.transaction(
+    (): Omit<CommerceAgentOwnerIntroductionClaim, 'projection'> => {
+      if (profile.item?.status === 'active') {
+        completeIntroduction(input.workspaceJid, at);
+        return {
+          claimed: false,
+          leaseAcquired: false,
+          firstWake: false,
+          newlyClaimed: false,
+          leaseToken: null,
+          leaseExpiresAt: null,
+        };
+      }
+      const row = ensureOnboardingRow(input.workspaceJid, at);
+      if (row.state === 'completed' || row.state === 'skipped') {
+        return {
+          claimed: false,
+          leaseAcquired: false,
+          firstWake: false,
+          newlyClaimed: false,
+          leaseToken: null,
+          leaseExpiresAt: null,
+        };
+      }
+      const leaseIsCurrent =
+        row.state === 'claimed' &&
+        !!row.lease_expires_at &&
+        Date.parse(row.lease_expires_at) > atMs;
+      if (leaseIsCurrent && row.lease_owner !== leaseOwner) {
+        return {
+          claimed: false,
+          leaseAcquired: false,
+          firstWake: false,
+          newlyClaimed: false,
+          leaseToken: Number(row.lease_token),
+          leaseExpiresAt: row.lease_expires_at,
+        };
+      }
+      if (leaseIsCurrent && row.lease_owner === leaseOwner) {
+        db.prepare(
+          `UPDATE workspace_onboarding_states
          SET lease_expires_at = ?, updated_at = ?
          WHERE workspace_jid = ? AND flow_key = ?
            AND state = 'claimed' AND lease_owner = ?`,
-      ).run(
-        expiresAt,
-        at,
-        input.workspaceJid,
-        COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY,
-        leaseOwner,
-      );
-      return {
-        claimed: true,
-        leaseAcquired: false,
-        firstWake: row.first_wake_at === null,
-        newlyClaimed: row.first_wake_at === null,
-        leaseToken: Number(row.lease_token),
-        leaseExpiresAt: expiresAt,
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-      };
-    }
-    const firstWake = row.first_wake_at === null;
-    const acquisition = db
-      .prepare(
-        `UPDATE workspace_onboarding_states
+        ).run(
+          expiresAt,
+          at,
+          input.workspaceJid,
+          COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY,
+          leaseOwner,
+        );
+        return {
+          claimed: true,
+          leaseAcquired: false,
+          firstWake: row.first_wake_at === null,
+          newlyClaimed: row.first_wake_at === null,
+          leaseToken: Number(row.lease_token),
+          leaseExpiresAt: expiresAt,
+        };
+      }
+      const firstWake = row.first_wake_at === null;
+      const acquisition = db
+        .prepare(
+          `UPDATE workspace_onboarding_states
        SET state = 'claimed', revision = revision + 1, lease_owner = ?,
            lease_token = lease_token + 1, lease_expires_at = ?,
            updated_at = ?
@@ -490,32 +520,38 @@ export function claimCommerceAgentOwnerIntroduction(input: {
              AND (lease_expires_at IS NULL OR julianday(lease_expires_at) <= julianday(?))
            )
          )`,
-      )
-      .run(
-        leaseOwner,
-        expiresAt,
-        at,
-        input.workspaceJid,
-        COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY,
-        at,
-      );
-    const claimed = onboardingRow(input.workspaceJid)!;
-    const leaseAcquired =
-      acquisition.changes === 1 &&
-      claimed.state === 'claimed' &&
-      claimed.lease_owner === leaseOwner;
-    const isFirstWake = leaseAcquired && firstWake;
-    return {
-      claimed:
-        claimed.state === 'claimed' && claimed.lease_owner === leaseOwner,
-      leaseAcquired,
-      firstWake: isFirstWake,
-      newlyClaimed: isFirstWake,
-      leaseToken: Number(claimed.lease_token),
-      leaseExpiresAt: claimed.lease_expires_at,
-      projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-    };
-  })();
+        )
+        .run(
+          leaseOwner,
+          expiresAt,
+          at,
+          input.workspaceJid,
+          COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY,
+          at,
+        );
+      const claimed = onboardingRow(input.workspaceJid)!;
+      const leaseAcquired =
+        acquisition.changes === 1 &&
+        claimed.state === 'claimed' &&
+        claimed.lease_owner === leaseOwner;
+      const isFirstWake = leaseAcquired && firstWake;
+      return {
+        claimed:
+          claimed.state === 'claimed' && claimed.lease_owner === leaseOwner,
+        leaseAcquired,
+        firstWake: isFirstWake,
+        newlyClaimed: isFirstWake,
+        leaseToken: Number(claimed.lease_token),
+        leaseExpiresAt: claimed.lease_expires_at,
+      };
+    },
+  )();
+  return {
+    ...outcome,
+    projection: await getCommerceAgentOwnerProfileProjection(
+      input.workspaceJid,
+    ),
+  };
 }
 
 /**
@@ -523,15 +559,15 @@ export function claimCommerceAgentOwnerIntroduction(input: {
  * healthy top-level Assistant progress for the claiming turn. Both fences are
  * required so a stale/overlapping runner cannot acknowledge another lease.
  */
-export function acknowledgeCommerceAgentOwnerIntroduction(input: {
+export async function acknowledgeCommerceAgentOwnerIntroduction(input: {
   workspaceJid: string;
   leaseOwner: string;
   leaseToken: number;
   now?: string;
-}): {
+}): Promise<{
   acknowledged: boolean;
   projection: CommerceAgentOwnerProfileProjection;
-} {
+}> {
   requireHomeWorkspace(input.workspaceJid);
   const leaseOwner = input.leaseOwner.trim();
   if (
@@ -552,7 +588,7 @@ export function acknowledgeCommerceAgentOwnerIntroduction(input: {
     );
   }
   const db = requireDatabase();
-  return db.transaction(() => {
+  const acknowledged = db.transaction((): boolean => {
     const row = ensureOnboardingRow(input.workspaceJid, at);
     if (
       row.state !== 'claimed' ||
@@ -564,12 +600,7 @@ export function acknowledgeCommerceAgentOwnerIntroduction(input: {
         'Owner introduction acknowledgement lease no longer matches',
       );
     }
-    if (row.first_wake_at !== null) {
-      return {
-        acknowledged: false,
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-      };
-    }
+    if (row.first_wake_at !== null) return false;
     const result = db
       .prepare(
         `UPDATE workspace_onboarding_states
@@ -592,11 +623,14 @@ export function acknowledgeCommerceAgentOwnerIntroduction(input: {
         'Owner introduction acknowledgement lease no longer matches',
       );
     }
-    return {
-      acknowledged: true,
-      projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-    };
+    return true;
   })();
+  return {
+    acknowledged,
+    projection: await getCommerceAgentOwnerProfileProjection(
+      input.workspaceJid,
+    ),
+  };
 }
 
 /**
@@ -620,33 +654,32 @@ export function releaseCommerceAgentOwnerIntroductionLease(
   return result.changes;
 }
 
-export function skipCommerceAgentOwnerIntroduction(input: {
+/**
+ * Skipping is Memory-read then SQLite-write, like set/clear: the memory read
+ * only decides whether an address already exists, and a concurrent set that
+ * lands afterwards simply wins on the next projection.
+ */
+export async function skipCommerceAgentOwnerIntroduction(input: {
   workspaceJid: string;
   expectedOnboardingRevision?: number;
   context: WorkspaceMemoryMutationContext;
-}): {
+}): Promise<{
   projection: CommerceAgentOwnerProfileProjection;
   changed: boolean;
-} {
+}> {
   requireHomeWorkspace(input.workspaceJid);
   const db = requireDatabase();
-  return db.transaction(() => {
+  const profile = await getCommerceAgentOwnerAddressMemoryItem(
+    input.workspaceJid,
+  );
+  const changed = db.transaction((): boolean => {
     const at = nowIso();
-    const profile = getCommerceAgentOwnerAddressMemoryItem(input.workspaceJid);
     if (profile.item?.status === 'active') {
       completeIntroduction(input.workspaceJid, at);
-      return {
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-        changed: false,
-      };
+      return false;
     }
     const row = ensureOnboardingRow(input.workspaceJid, at);
-    if (row.state === 'skipped') {
-      return {
-        projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-        changed: false,
-      };
-    }
+    if (row.state === 'skipped') return false;
     if (
       input.expectedOnboardingRevision !== undefined &&
       input.expectedOnboardingRevision !== row.revision
@@ -663,12 +696,20 @@ export function skipCommerceAgentOwnerIntroduction(input: {
            lease_owner = NULL, lease_expires_at = NULL,
            completed_at = NULL, skipped_at = ?, updated_at = ?
        WHERE workspace_jid = ? AND flow_key = ?`,
-    ).run(at, at, input.workspaceJid, COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY);
-    return {
-      projection: getCommerceAgentOwnerProfileProjection(input.workspaceJid),
-      changed: true,
-    };
+    ).run(
+      at,
+      at,
+      input.workspaceJid,
+      COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY,
+    );
+    return true;
   })();
+  return {
+    projection: await getCommerceAgentOwnerProfileProjection(
+      input.workspaceJid,
+    ),
+    changed,
+  };
 }
 
 function legacyAddressMeansSkip(content: string): boolean {
@@ -679,51 +720,56 @@ function legacyAddressMeansSkip(content: string): boolean {
 /**
  * v66 migration coordinator. Reconcile duplicates first, infer onboarding from
  * the surviving reserved-memory lineage, then install the unique index.
+ *
+ * This runs as the Memory store's bootstrap hook (see
+ * `bindWorkspaceMemoryDatabase`), so the legacy rows are already imported into
+ * PostgreSQL. Memory writes commit independently of the SQLite onboarding
+ * updates below; both steps are idempotent, so an interrupted run converges on
+ * the next start: an address already cleared is a no-op replay, and an
+ * onboarding row already completed/skipped is skipped.
  */
-export function reconcileLegacyOwnerProfileMemory(): {
+export async function reconcileLegacyOwnerProfileMemory(): Promise<{
   workspaces: number;
   retiredItems: number;
-} {
+}> {
   const db = requireDatabase();
-  return db.transaction(() => {
-    const reconciled = reconcileCommerceAgentOwnerAddressCanonicalKey();
-    const homes = db
-      .prepare(`SELECT jid FROM workspaces WHERE is_home = 1`)
-      .all() as Array<{ jid: string }>;
-    for (const home of homes) {
-      const at = nowIso();
-      const { item } = getCommerceAgentOwnerAddressMemoryItem(home.jid);
-      const onboarding = ensureOnboardingRow(home.jid, at);
-      // A prior explicit outcome is authoritative. In particular, a normal
-      // restart must never reinterpret an already-skipped row as completed.
-      if (onboarding.state === 'completed' || onboarding.state === 'skipped') {
-        continue;
-      }
-      if (!item) continue;
-      if (item.status === 'active' && legacyAddressMeansSkip(item.content)) {
-        mutateCommerceAgentOwnerAddressMemory({
-          workspaceJid: home.jid,
-          clear: true,
-          expectedRevision: item.revision,
-          context: {
-            actorId: 'schema-v66-owner-profile-reconciliation',
-            sourceType: 'migration',
-            sourceId: COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
-            observedAt: at,
-          },
-        });
-        db.prepare(
-          `UPDATE workspace_onboarding_states
-           SET state = 'skipped', revision = revision + 1,
-               lease_owner = NULL, lease_expires_at = NULL,
-               skipped_at = ?, updated_at = ?
-           WHERE workspace_jid = ? AND flow_key = ?`,
-        ).run(at, at, home.jid, COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY);
-      } else {
-        completeIntroduction(home.jid, at);
-      }
+  const reconciled = await reconcileCommerceAgentOwnerAddressCanonicalKey();
+  const homes = db
+    .prepare(`SELECT jid FROM workspaces WHERE is_home = 1`)
+    .all() as Array<{ jid: string }>;
+  for (const home of homes) {
+    const at = nowIso();
+    const { item } = await getCommerceAgentOwnerAddressMemoryItem(home.jid);
+    const onboarding = ensureOnboardingRow(home.jid, at);
+    // A prior explicit outcome is authoritative. In particular, a normal
+    // restart must never reinterpret an already-skipped row as completed.
+    if (onboarding.state === 'completed' || onboarding.state === 'skipped') {
+      continue;
     }
-    enforceCommerceAgentOwnerAddressCanonicalInvariant();
-    return reconciled;
-  })();
+    if (!item) continue;
+    if (item.status === 'active' && legacyAddressMeansSkip(item.content)) {
+      await mutateCommerceAgentOwnerAddressMemory({
+        workspaceJid: home.jid,
+        clear: true,
+        expectedRevision: item.revision,
+        context: {
+          actorId: 'schema-v66-owner-profile-reconciliation',
+          sourceType: 'migration',
+          sourceId: COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+          observedAt: at,
+        },
+      });
+      db.prepare(
+        `UPDATE workspace_onboarding_states
+         SET state = 'skipped', revision = revision + 1,
+             lease_owner = NULL, lease_expires_at = NULL,
+             skipped_at = ?, updated_at = ?
+         WHERE workspace_jid = ? AND flow_key = ?`,
+      ).run(at, at, home.jid, COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY);
+    } else {
+      completeIntroduction(home.jid, at);
+    }
+  }
+  await enforceCommerceAgentOwnerAddressCanonicalInvariant();
+  return reconciled;
 }

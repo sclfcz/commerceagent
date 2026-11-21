@@ -359,21 +359,22 @@ CommerceAgent 优先通过 Web 设置管理配置，不要求用户维护一组�
 
 ### 可选环境变量
 
-| 变量                         | 默认值                            | 说明                                                                               |
-| ---------------------------- | --------------------------------- | ---------------------------------------------------------------------------------- |
-| `WEB_PORT`                   | `3000`                            | Web、REST API 与 WebSocket 端口                                                    |
-| `WEB_SESSION_SECRET`         | 自动生成并持久化                  | Web 登录会话签名密钥                                                               |
-| `CONTAINER_IMAGE`            | `riba2534/happyclaw-agent:latest` | 智能体容器镜像                                                                     |
-| `CONTAINER_TIMEOUT`          | `1800000`                         | 容器硬超时，毫秒                                                                   |
-| `IDLE_TIMEOUT`               | `1800000`                         | 容器空闲保活时间，毫秒                                                             |
-| `ADMIN_HOST_ONLY_MODE`       | `false`                           | 管理员工作区与任务强制使用宿主机                                                   |
-| `MAX_CONCURRENT_CONTAINERS`  | `20`                              | 最大并发容器数                                                                     |
-| `MAX_FILE_SIZE_MB`           | `50`                              | Web 和 IM 入站文件大小上限                                                         |
-| `CORS_ALLOWED_ORIGINS`       | 仅 localhost                      | 公网部署的 WebSocket Origin 白名单                                                 |
-| `TRUST_PROXY`                | `false`                           | 位于可信反向代理后时设为 `true`                                                    |
-| `TZ`                         | 系统时区                          | 日志与定时任务时区                                                                 |
-| `HTTPS_PROXY` / `HTTP_PROXY` | 未设置                            | 独立配置 HTTPS/HTTP 出站代理；主进程与每个智能体容器都会使用，也接受对应的小写变量 |
-| `NO_PROXY`                   | 未设置                            | 独立配置不走代理的地址列表，也接受 `no_proxy`                                      |
+| 变量                         | 默认值                            | 说明                                                                                  |
+| ---------------------------- | --------------------------------- | ------------------------------------------------------------------------------------- |
+| `WEB_PORT`                   | `3000`                            | Web、REST API 与 WebSocket 端口                                                       |
+| `WEB_SESSION_SECRET`         | 自动生成并持久化                  | Web 登录会话签名密钥                                                                  |
+| `CONTAINER_IMAGE`            | `riba2534/happyclaw-agent:latest` | 智能体容器镜像                                                                        |
+| `MEMORY_DATABASE_URL`        | 未设置                            | Workspace Memory 的 PostgreSQL 连接串；未设置时使用 `data/memory-pg/` 的嵌入式 PGlite |
+| `CONTAINER_TIMEOUT`          | `1800000`                         | 容器硬超时，毫秒                                                                      |
+| `IDLE_TIMEOUT`               | `1800000`                         | 容器空闲保活时间，毫秒                                                                |
+| `ADMIN_HOST_ONLY_MODE`       | `false`                           | 管理员工作区与任务强制使用宿主机                                                      |
+| `MAX_CONCURRENT_CONTAINERS`  | `20`                              | 最大并发容器数                                                                        |
+| `MAX_FILE_SIZE_MB`           | `50`                              | Web 和 IM 入站文件大小上限                                                            |
+| `CORS_ALLOWED_ORIGINS`       | 仅 localhost                      | 公网部署的 WebSocket Origin 白名单                                                    |
+| `TRUST_PROXY`                | `false`                           | 位于可信反向代理后时设为 `true`                                                       |
+| `TZ`                         | 系统时区                          | 日志与定时任务时区                                                                    |
+| `HTTPS_PROXY` / `HTTP_PROXY` | 未设置                            | 独立配置 HTTPS/HTTP 出站代理；主进程与每个智能体容器都会使用，也接受对应的小写变量    |
+| `NO_PROXY`                   | 未设置                            | 独立配置不走代理的地址列表，也接受 `no_proxy`                                         |
 
 Provider 与渠道凭据建议只在 Web 设置中填写。它们使用 AES-256-GCM 加密存储，相关 API 只返回是否已配置，不返回密钥明文。
 
@@ -385,7 +386,8 @@ Provider 与渠道凭据建议只在 Web 设置中填写。它们使用 AES-256-
 
 ```text
 data/
-├── db/messages.db     # SQLite 主数据库（含 Workspace Memory v2）
+├── db/messages.db     # SQLite 主数据库（用户、工作区、会话、任务）
+├── memory-pg/         # Workspace Memory v2 的嵌入式 PostgreSQL 数据目录
 ├── config/            # 加密配置、密钥与系统设置
 ├── groups/            # 工作区目录和项目文件
 ├── memory/            # 旧版文件记忆，仅供离线迁移/归档
@@ -397,6 +399,11 @@ data/
 ├── plugins/           # Plugin catalog、用户状态与运行快照
 └── extra/             # Container 工作区持久工具数据
 ```
+
+Workspace Memory v2 使用独立的 PostgreSQL 库：设置 `MEMORY_DATABASE_URL` 时连接
+外部实例，未设置时使用 `data/memory-pg/` 下的嵌入式 PGlite，无需额外部署。首次
+启动会把 SQLite 中遗留的 `workspace_memory_*` 数据一次性导入并记录完成标记，
+之后只读写 PostgreSQL；旧表保留作备份，不会被再次读取或双写。
 
 不要把 `data/` 提交到 Git。迁移实例时优先使用 `make backup` 和 `make restore`；恢复流程会检查归档路径、文件类型、符号链接、清单和数据库完整性。
 

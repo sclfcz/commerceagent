@@ -2211,12 +2211,18 @@ function toSystemSettingsResponse(
     loginLockoutMinutes: settings.loginLockoutMinutes,
     fallbackModel: settings.fallbackModel,
     blockUnverifiedModelConfigs: settings.blockUnverifiedModelConfigs,
+    memoryExtractionEnabled: settings.memoryExtractionEnabled,
+    memoryExtractionIdleMs: settings.memoryExtractionIdleMs,
     observabilityEnabled: settings.observabilityEnabled,
     observabilityEndpoint: settings.observabilityEndpoint,
     observabilityPublicKey: settings.observabilityPublicKey,
     observabilitySampleRate: settings.observabilitySampleRate,
     observabilityIncludeContent: settings.observabilityIncludeContent,
     observabilityHasSecretKey: hasObservabilitySecret(),
+    memoryConsolidationEnabled: settings.memoryConsolidationEnabled,
+    memoryConsolidationTime: settings.memoryConsolidationTime,
+    memoryConsolidationBatchSize: settings.memoryConsolidationBatchSize,
+    memoryConsolidationMaxRuntimeMs: settings.memoryConsolidationMaxRuntimeMs,
   };
 }
 
@@ -3137,7 +3143,7 @@ configRoutes.get('/user-im/telegram/paired-chats', authMiddleware, (c) => {
 configRoutes.delete(
   '/user-im/telegram/paired-chats/:jid',
   authMiddleware,
-  (c) => {
+  async (c) => {
     const user = c.get('user') as AuthUser;
     const jid = decodeURIComponent(c.req.param('jid'));
 
@@ -3457,34 +3463,38 @@ configRoutes.put('/user-im/qq/paired-chats/:jid', authMiddleware, async (c) => {
 });
 
 // Remove (unpair) a QQ chat
-configRoutes.delete('/user-im/qq/paired-chats/:jid', authMiddleware, (c) => {
-  const user = c.get('user') as AuthUser;
-  const jid = decodeURIComponent(c.req.param('jid'));
+configRoutes.delete(
+  '/user-im/qq/paired-chats/:jid',
+  authMiddleware,
+  async (c) => {
+    const user = c.get('user') as AuthUser;
+    const jid = decodeURIComponent(c.req.param('jid'));
 
-  if (!jid.startsWith('qq:')) {
-    return c.json({ error: 'Invalid QQ chat JID' }, 400);
-  }
+    if (!jid.startsWith('qq:')) {
+      return c.json({ error: 'Invalid QQ chat JID' }, 400);
+    }
 
-  const groups = deps?.getRegisteredGroups() ?? {};
-  const group = groups[jid];
-  if (!group) {
-    return c.json({ error: 'Chat not found' }, 404);
-  }
-  if (group.created_by !== user.id) {
-    return c.json({ error: 'Not authorized to remove this chat' }, 403);
-  }
-  const legacy = getLegacyChannelAccount(user.id, 'qq');
-  const address = parseChannelAddress(jid);
-  if (!address?.legacy && group.channel_account_id !== legacy?.id) {
-    return c.json({ error: 'Not authorized to remove this chat' }, 403);
-  }
+    const groups = deps?.getRegisteredGroups() ?? {};
+    const group = groups[jid];
+    if (!group) {
+      return c.json({ error: 'Chat not found' }, 404);
+    }
+    if (group.created_by !== user.id) {
+      return c.json({ error: 'Not authorized to remove this chat' }, 403);
+    }
+    const legacy = getLegacyChannelAccount(user.id, 'qq');
+    const address = parseChannelAddress(jid);
+    if (!address?.legacy && group.channel_account_id !== legacy?.id) {
+      return c.json({ error: 'Not authorized to remove this chat' }, 403);
+    }
 
-  deleteRegisteredGroup(jid);
-  deleteChatHistory(jid);
-  delete groups[jid];
-  logger.info({ jid, userId: user.id }, 'QQ chat unpaired');
-  return c.json({ success: true });
-});
+    await deleteRegisteredGroup(jid);
+    deleteChatHistory(jid);
+    delete groups[jid];
+    logger.info({ jid, userId: user.id }, 'QQ chat unpaired');
+    return c.json({ success: true });
+  },
+);
 
 // ─── Per-user DingTalk IM config ──────────────────────────────────
 

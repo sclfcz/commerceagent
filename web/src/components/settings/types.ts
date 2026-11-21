@@ -102,6 +102,8 @@ export interface SystemSettings {
   loginLockoutMinutes: number;
   fallbackModel: string;
   blockUnverifiedModelConfigs: boolean;
+  memoryExtractionEnabled: boolean;
+  memoryExtractionIdleMs: number;
   observabilityEnabled: boolean;
   observabilityEndpoint: string;
   observabilityPublicKey: string;

@@ -19,6 +19,8 @@ function memoryItem(
     title: null,
     content: id,
     canonicalKey: null,
+    searchKeys: [],
+    pinned: false,
     status: 'active',
     importance: 0.5,
     confidence: 1,

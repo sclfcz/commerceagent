@@ -91,11 +91,11 @@ beforeAll(() => {
   db.initDatabase();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   asUser('alice');
   for (const jid of [WORKSPACE_A, WORKSPACE_B]) {
     try {
-      db.deleteRegisteredGroup(jid);
+      await db.deleteRegisteredGroup(jid);
     } catch {
       // absent
     }
@@ -109,9 +109,10 @@ beforeEach(() => {
   }
 });
 
-afterAll(() => {
+afterAll(async () => {
   delete process.env.COMMERCEAGENT_MEMORY_TEST_USER;
   delete process.env.COMMERCEAGENT_MEMORY_TEST_ROLE;
+  await memoryStore.closeWorkspaceMemoryStore();
   db.closeDatabase();
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -119,21 +120,22 @@ afterAll(() => {
 describe('Workspace Memory v2 routes', () => {
   test('generic memory route cannot write the reserved Owner Profile key', async () => {
     expect(
-      memoryStore.hasRecallableWorkspaceMemoryCanonicalKey(
+      await memoryStore.hasRecallableWorkspaceMemoryCanonicalKey(
         WORKSPACE_A,
         memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
       ),
     ).toBe(false);
     const created = await create(WORKSPACE_A, '主人希望被称为小何', {
       title: '主人称呼',
-      canonicalKey: memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
+      canonicalKey:
+        memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
     });
     expect(created).toMatchObject({
       status: 400,
       body: { error: 'reserved_canonical_key' },
     });
     expect(
-      memoryStore.hasRecallableWorkspaceMemoryCanonicalKey(
+      await memoryStore.hasRecallableWorkspaceMemoryCanonicalKey(
         WORKSPACE_A,
         memoryStore.COMMERCEAGENT_OWNER_PREFERRED_ADDRESS_CANONICAL_KEY,
       ),
@@ -203,7 +205,7 @@ describe('Workspace Memory v2 routes', () => {
       },
     );
 
-    const snapshot = memoryService.getWorkspaceMemorySnapshot({
+    const snapshot = await memoryService.getWorkspaceMemorySnapshot({
       actor: { id: 'alice', role: 'member' },
       workspaceJid: WORKSPACE_A,
       limit: 10,
@@ -223,7 +225,7 @@ describe('Workspace Memory v2 routes', () => {
 
   test('workspace deletion and JID reuse cannot inherit the deleted store', async () => {
     await create(WORKSPACE_A, 'belongs only to the deleted workspace');
-    db.deleteRegisteredGroup(WORKSPACE_A);
+    await db.deleteRegisteredGroup(WORKSPACE_A);
     db.setRegisteredGroup(WORKSPACE_A, {
       name: 'Recreated workspace',
       folder: 'memory-a-recreated',
@@ -309,7 +311,7 @@ describe('Workspace Memory v2 routes', () => {
     ).toBe('winning decision');
   });
 
-  test('FTS is transactionally updated and isolated by workspace', async () => {
+  test('search is updated transactionally and isolated by workspace', async () => {
     const first = await create(
       WORKSPACE_A,
       'SQLite canonical storage makes local recovery simple',

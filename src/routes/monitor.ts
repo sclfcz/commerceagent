@@ -26,6 +26,11 @@ import {
 } from '../channel-reliability-store.js';
 import { CONTAINER_IMAGE } from '../config.js';
 import { getSystemSettings, getProviders } from '../runtime-config.js';
+import {
+  listConsolidationStates,
+  resolveConsolidationSettings,
+} from '../memory-consolidation/index.js';
+import { withWorkspaceMemoryDatabase } from '../memory-store.js';
 import { logger } from '../logger.js';
 
 const execFileAsync = promisify(execFile);
@@ -342,8 +347,42 @@ monitorRoutes.get('/status', authMiddleware, async (c) => {
   });
 });
 
-// Provider selection is owned by the top-level Agent. Keep the retired route
-// explicit so stale admin pages fail visibly instead of pretending a one-shot
+// GET /api/status/memory-consolidation - 每个工作区最近一次夜间整理结果
+//
+// Workspace Memory maintenance is host-side background work, not a scheduled
+// task, so its outcome is reported here instead of in the task list. The
+// payload is counters only: no memory content leaves this endpoint.
+monitorRoutes.get(
+  '/status/memory-consolidation',
+  authMiddleware,
+  systemConfigMiddleware,
+  async (c) => {
+    try {
+      const settings = resolveConsolidationSettings();
+      const workspaces = await withWorkspaceMemoryDatabase((db) =>
+        listConsolidationStates(db),
+      );
+      return c.json({
+        enabled: settings.enabled,
+        time: settings.time,
+        batchSize: settings.batchSize,
+        maxRuntimeMs: settings.maxRuntimeMs,
+        workspaces,
+      });
+    } catch (err) {
+      logger.warn(
+        { err },
+        'Failed to read Workspace Memory consolidation status',
+      );
+      return c.json(
+        { error: 'Workspace Memory consolidation status unavailable' },
+        500,
+      );
+    }
+  },
+);
+
+// Provider selection is owned by the top-level Agent. Keep the retired route// explicit so stale admin pages fail visibly instead of pretending a one-shot
 // Workspace override took effect.
 monitorRoutes.post(
   '/status/groups/:folder/switch-provider',

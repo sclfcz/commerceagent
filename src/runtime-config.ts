@@ -3972,11 +3972,28 @@ export interface SystemSettings {
   // false = 关闭定时扫描，admin 仍可手点 POST /api/plugins/catalog/scan。
   // 适用于不希望本机私有 plugin 自动入共享 catalog 的环境。
   pluginAutoScan: boolean;
+  // Post-session Workspace Memory extraction (phase C). When enabled, a
+  // top-level interactive session that has been idle for `memoryExtractionIdleMs`
+  // (or that is about to compact) is asked once for candidate memories. The
+  // candidates are written as `proposed` and only become active after a human
+  // confirms them, so disabling this only stops new suggestions.
+  memoryExtractionEnabled: boolean;
+  // Idle threshold for extraction. Deliberately separate from `idleTimeout`,
+  // which governs warm-runner reclamation and is far longer.
+  memoryExtractionIdleMs: number;
   observabilityEnabled: boolean;
   observabilityEndpoint: string;
   observabilityPublicKey: string;
   observabilitySampleRate: number;
   observabilityIncludeContent: boolean;
+  // Workspace Memory 夜间整理（去重合并 + 过期降级）。宿主后台任务，不进入用户
+  // 可见的 scheduled_tasks；按 TZ 的本地时间每天运行一次。
+  memoryConsolidationEnabled: boolean;
+  // 本地时间 HH:MM（24 小时制），默认凌晨 03:30。
+  memoryConsolidationTime: string;
+  // 每批处理的条目数上限；单次运行时长上限由下一个配置决定。
+  memoryConsolidationBatchSize: number;
+  memoryConsolidationMaxRuntimeMs: number;
 }
 
 // Upper bound for the login lockout window. auth.ts reclaims login-attempt
@@ -4007,11 +4024,17 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   fallbackModel: '',
   blockUnverifiedModelConfigs: false,
   pluginAutoScan: true,
+  memoryExtractionEnabled: true,
+  memoryExtractionIdleMs: 900_000,
   observabilityEnabled: false,
   observabilityEndpoint: '',
   observabilityPublicKey: '',
   observabilitySampleRate: 1,
   observabilityIncludeContent: false,
+  memoryConsolidationEnabled: true,
+  memoryConsolidationTime: '03:30',
+  memoryConsolidationBatchSize: 200,
+  memoryConsolidationMaxRuntimeMs: 600_000,
 };
 
 type SystemSettingsSource = 'file' | 'env' | 'api';
@@ -4183,6 +4206,21 @@ function normalizeSystemSettings(
     }
   }
 
+  // Local wall-clock time for the nightly Workspace Memory consolidation. A
+  // malformed value falls back to 03:30 rather than disabling the worker, so a
+  // typo in the settings file cannot silently stop cleanup.
+  let memoryConsolidationTime = DEFAULT_SYSTEM_SETTINGS.memoryConsolidationTime;
+  if (raw.memoryConsolidationTime !== undefined) {
+    if (
+      typeof raw.memoryConsolidationTime === 'string' &&
+      /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(raw.memoryConsolidationTime.trim())
+    ) {
+      memoryConsolidationTime = raw.memoryConsolidationTime.trim();
+    } else {
+      invalidFields.add('memoryConsolidationTime');
+    }
+  }
+
   const normalized: SystemSettings = {
     containerTimeout: numberField(
       'containerTimeout',
@@ -4258,6 +4296,16 @@ function normalizeSystemSettings(
       'pluginAutoScan',
       DEFAULT_SYSTEM_SETTINGS.pluginAutoScan,
     ),
+    memoryExtractionEnabled: booleanField(
+      'memoryExtractionEnabled',
+      DEFAULT_SYSTEM_SETTINGS.memoryExtractionEnabled,
+    ),
+    memoryExtractionIdleMs: numberField(
+      'memoryExtractionIdleMs',
+      DEFAULT_SYSTEM_SETTINGS.memoryExtractionIdleMs,
+      60_000,
+      86_400_000,
+    ),
     observabilityEnabled: booleanField(
       'observabilityEnabled',
       DEFAULT_SYSTEM_SETTINGS.observabilityEnabled,
@@ -4276,6 +4324,23 @@ function normalizeSystemSettings(
     observabilityIncludeContent: booleanField(
       'observabilityIncludeContent',
       DEFAULT_SYSTEM_SETTINGS.observabilityIncludeContent,
+    ),
+    memoryConsolidationEnabled: booleanField(
+      'memoryConsolidationEnabled',
+      DEFAULT_SYSTEM_SETTINGS.memoryConsolidationEnabled,
+    ),
+    memoryConsolidationTime,
+    memoryConsolidationBatchSize: numberField(
+      'memoryConsolidationBatchSize',
+      DEFAULT_SYSTEM_SETTINGS.memoryConsolidationBatchSize,
+      1,
+      1000,
+    ),
+    memoryConsolidationMaxRuntimeMs: numberField(
+      'memoryConsolidationMaxRuntimeMs',
+      DEFAULT_SYSTEM_SETTINGS.memoryConsolidationMaxRuntimeMs,
+      10_000,
+      3_600_000,
     ),
   };
 
@@ -4297,37 +4362,22 @@ function readSystemSettingsFromFile(): SystemSettings | null {
   const raw = JSON.parse(
     fs.readFileSync(SYSTEM_SETTINGS_FILE, 'utf-8'),
   ) as Record<string, unknown>;
+  // A persisted file only owns the keys it actually contains. Everything else
+  // still follows the documented "Web 持久设置 > 环境变量 > 代码默认值"
+  // precedence, so `MEMORY_EXTRACTION_ENABLED=false` or `CONTAINER_TIMEOUT`
+  // keep working on an install that has saved some unrelated setting.
+  if (
+    raw.mainAgentAutoCompactWindow === undefined &&
+    raw.autoCompactWindow !== undefined
+  ) {
+    // The former system-wide alias must win for upgraded files even though the
+    // env-derived settings below always define the new key.
+    raw.mainAgentAutoCompactWindow = raw.autoCompactWindow;
+  }
   return normalizeSystemSettings(
-    {
-      observabilityEnabled:
-        raw.observabilityEnabled ??
-        parseEnvBoolean(process.env.COMMERCEAGENT_OTEL_ENABLED),
-      observabilityEndpoint:
-        raw.observabilityEndpoint ?? process.env.COMMERCEAGENT_OTEL_ENDPOINT,
-      observabilityPublicKey:
-        raw.observabilityPublicKey ?? process.env.COMMERCEAGENT_OTEL_PUBLIC_KEY,
-      observabilitySampleRate:
-        raw.observabilitySampleRate ??
-        parseEnvNumber(process.env.COMMERCEAGENT_OTEL_SAMPLE_RATE),
-      observabilityIncludeContent:
-        raw.observabilityIncludeContent ??
-        parseEnvBoolean(process.env.COMMERCEAGENT_OTEL_INCLUDE_CONTENT),
-      ...raw,
-    },
+    { ...buildEnvFallbackSettings(), ...raw },
     'file',
   );
-}
-
-function parseEnvBoolean(value: string | undefined): boolean | undefined {
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  return undefined;
-}
-
-function parseEnvNumber(value: string | undefined): number | undefined {
-  if (!value?.trim()) return undefined;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 export function isSafeOtelEndpoint(value: string): boolean {
@@ -4413,12 +4463,19 @@ function buildEnvFallbackSettings(): SystemSettings {
         process.env.AUTO_COMPACT_PERCENTAGE,
       fallbackModel: process.env.FALLBACK_MODEL,
       pluginAutoScan: process.env.PLUGIN_AUTO_SCAN,
+      memoryExtractionEnabled: process.env.MEMORY_EXTRACTION_ENABLED,
+      memoryExtractionIdleMs: process.env.MEMORY_EXTRACTION_IDLE_MS,
       observabilityEnabled: process.env.COMMERCEAGENT_OTEL_ENABLED,
       observabilityEndpoint: process.env.COMMERCEAGENT_OTEL_ENDPOINT,
       observabilityPublicKey: process.env.COMMERCEAGENT_OTEL_PUBLIC_KEY,
       observabilitySampleRate: process.env.COMMERCEAGENT_OTEL_SAMPLE_RATE,
       observabilityIncludeContent:
         process.env.COMMERCEAGENT_OTEL_INCLUDE_CONTENT,
+      memoryConsolidationEnabled: process.env.MEMORY_CONSOLIDATION_ENABLED,
+      memoryConsolidationTime: process.env.MEMORY_CONSOLIDATION_TIME,
+      memoryConsolidationBatchSize: process.env.MEMORY_CONSOLIDATION_BATCH_SIZE,
+      memoryConsolidationMaxRuntimeMs:
+        process.env.MEMORY_CONSOLIDATION_MAX_RUNTIME_MS,
     },
     'env',
   );

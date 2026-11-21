@@ -5,6 +5,7 @@ import {
   forgetWorkspaceMemoryItem,
   getMutableWorkspaceMemoryItem,
   getWorkspaceMemoryItem,
+  getWorkspaceMemoryStore,
   listRecallableWorkspaceMemoryItems,
   listWorkspaceMemoryItems,
   listWorkspaceMemoryVersions as listVersionsFromStore,
@@ -18,6 +19,19 @@ import {
   type WorkspaceMemoryValue,
 } from './memory-store.js';
 import { getRegisteredGroup, getWorkspaceRecord } from './db.js';
+import {
+  deriveQueryKeywords,
+  deriveSearchKeys,
+  searchKeysInputError,
+} from './memory-keywords.js';
+import {
+  planWorkspaceMemoryRecall,
+  type WorkspaceMemoryRecallSegment,
+} from './memory-recall.js';
+import {
+  listProposedWorkspaceMemoryCandidates,
+  setWorkspaceMemoryCandidateState,
+} from './memory-candidate-store.js';
 import { canAccessGroup, canModifyGroup } from './web-context.js';
 import type { UserRole } from './types.js';
 
@@ -29,6 +43,8 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 const MAX_QUERY_LENGTH = 500;
 const MAX_PAGE_SIZE = 100;
 const MAX_SNAPSHOT_CHARS = 64_000;
+const RECALL_CANDIDATE_LIMIT = 200;
+const RECALL_HIT_LIMIT = 50;
 
 const KINDS = new Set<WorkspaceMemoryKind>([
   'fact',
@@ -54,6 +70,8 @@ const SOURCE_TYPES = new Set<WorkspaceMemorySourceType>([
   'agent_runtime',
   'scheduled_task',
   'migration',
+  'agent_extraction',
+  'system',
 ]);
 
 export interface WorkspaceMemoryActor {
@@ -143,6 +161,11 @@ function validateValue(
     'canonicalKey',
     MAX_CANONICAL_KEY_LENGTH,
   );
+  const searchKeysError = searchKeysInputError(value.searchKeys);
+  if (searchKeysError) invalid(searchKeysError);
+  if (value.pinned !== undefined && typeof value.pinned !== 'boolean') {
+    invalid('pinned must be a boolean');
+  }
   if (
     value.status !== undefined &&
     !WRITABLE_STATUSES.has(
@@ -283,7 +306,7 @@ function requestHash(value: unknown): string {
     .digest('hex');
 }
 
-export function listWorkspaceMemory(
+export async function listWorkspaceMemory(
   input: WorkspaceMemoryBaseRequest & {
     status?: WorkspaceMemoryStatus;
     kind?: WorkspaceMemoryKind;
@@ -308,7 +331,7 @@ export function listWorkspaceMemory(
     invalid('Invalid list cursor');
   }
   try {
-    const result = listWorkspaceMemoryItems({
+    const result = await listWorkspaceMemoryItems({
       workspaceJid: input.workspaceJid,
       status: input.status,
       kind: input.kind,
@@ -331,7 +354,7 @@ export function listWorkspaceMemory(
   }
 }
 
-export function searchWorkspaceMemory(
+export async function searchWorkspaceMemory(
   input: WorkspaceMemoryBaseRequest & {
     query: string;
     kind?: WorkspaceMemoryKind;
@@ -345,7 +368,7 @@ export function searchWorkspaceMemory(
   }
   if (input.kind && !KINDS.has(input.kind)) invalid('Invalid kind');
   try {
-    const result = searchWorkspaceMemoryItems({
+    const result = await searchWorkspaceMemoryItems({
       workspaceJid: input.workspaceJid,
       query,
       kind: input.kind,
@@ -360,14 +383,17 @@ export function searchWorkspaceMemory(
   }
 }
 
-export function getWorkspaceMemory(
+export async function getWorkspaceMemory(
   input: WorkspaceMemoryBaseRequest & {
     itemId: string;
   },
 ) {
   authorizeWorkspace(input, 'read');
   try {
-    const result = getWorkspaceMemoryItem(input.workspaceJid, input.itemId);
+    const result = await getWorkspaceMemoryItem(
+      input.workspaceJid,
+      input.itemId,
+    );
     return {
       storeRevision: result.store.revision,
       item: result.item,
@@ -377,7 +403,7 @@ export function getWorkspaceMemory(
   }
 }
 
-export function createWorkspaceMemory(
+export async function createWorkspaceMemory(
   input: WorkspaceMemoryMutationRequest &
     WorkspaceMemoryValue & {
       idempotencyKey?: string | null;
@@ -395,6 +421,8 @@ export function createWorkspaceMemory(
     title: input.title,
     content: input.content,
     canonicalKey: input.canonicalKey,
+    searchKeys: input.searchKeys,
+    pinned: input.pinned,
     status: input.status,
     importance: input.importance,
     confidence: input.confidence,
@@ -403,7 +431,7 @@ export function createWorkspaceMemory(
     expiresAt: input.expiresAt,
   };
   try {
-    const result = createWorkspaceMemoryItem({
+    const result = await createWorkspaceMemoryItem({
       workspaceJid: input.workspaceJid,
       value,
       context: mutationContext(input),
@@ -422,7 +450,7 @@ export function createWorkspaceMemory(
 
 type WorkspaceMemoryPatch = Partial<WorkspaceMemoryValue>;
 
-export function updateWorkspaceMemory(
+export async function updateWorkspaceMemory(
   input: WorkspaceMemoryMutationRequest &
     WorkspaceMemoryPatch & {
       itemId: string;
@@ -445,6 +473,8 @@ export function updateWorkspaceMemory(
     'title',
     'content',
     'canonicalKey',
+    'searchKeys',
+    'pinned',
     'status',
     'importance',
     'confidence',
@@ -459,9 +489,8 @@ export function updateWorkspaceMemory(
   if (Object.keys(patch).length === 0) invalid('No memory fields to update');
   validateValue(patch, false);
   try {
-    const current = getMutableWorkspaceMemoryItem(
-      input.workspaceJid,
-      input.itemId,
+    const current = (
+      await getMutableWorkspaceMemoryItem(input.workspaceJid, input.itemId)
     ).item;
     validateValue(
       {
@@ -478,7 +507,7 @@ export function updateWorkspaceMemory(
     translateStoreError(error);
   }
   try {
-    const result = updateWorkspaceMemoryItem({
+    const result = await updateWorkspaceMemoryItem({
       workspaceJid: input.workspaceJid,
       itemId: input.itemId,
       expectedRevision: input.expectedRevision,
@@ -501,7 +530,7 @@ export function updateWorkspaceMemory(
   }
 }
 
-export function forgetWorkspaceMemory(
+export async function forgetWorkspaceMemory(
   input: WorkspaceMemoryMutationRequest & {
     itemId: string;
     expectedRevision: number;
@@ -520,7 +549,7 @@ export function forgetWorkspaceMemory(
     MAX_IDEMPOTENCY_KEY_LENGTH,
   );
   try {
-    const result = forgetWorkspaceMemoryItem({
+    const result = await forgetWorkspaceMemoryItem({
       workspaceJid: input.workspaceJid,
       itemId: input.itemId,
       expectedRevision: input.expectedRevision,
@@ -543,7 +572,204 @@ export function forgetWorkspaceMemory(
   }
 }
 
-export function listWorkspaceMemoryVersions(
+/**
+ * Pending extraction candidates with their extraction-only annotations.
+ *
+ * This is the "待确认" view: proposed items are deliberately excluded from
+ * every active list, search and Runtime snapshot, so they need their own read
+ * path that also surfaces `appliesWhen` and the evidence message IDs a human
+ * needs in order to judge a suggestion.
+ */
+export async function listWorkspaceMemoryCandidates(
+  input: WorkspaceMemoryBaseRequest & { limit?: number },
+) {
+  authorizeWorkspace(input, 'read');
+  const limit = clampLimit(input.limit, 50);
+  const candidates = await listProposedWorkspaceMemoryCandidates({
+    workspaceJid: input.workspaceJid,
+    limit,
+  });
+  return {
+    storeRevision:
+      (await getWorkspaceMemoryStore(input.workspaceJid))?.revision ?? 0,
+    candidates,
+  };
+}
+
+function assertProposed(
+  item: WorkspaceMemoryItem,
+  action: 'confirm' | 'reject',
+): void {
+  if (item.status !== 'proposed') {
+    invalid(`Only proposed memory candidates can be ${action}ed`);
+  }
+}
+
+/**
+ * Confirm a proposed candidate: it becomes an active memory in the same CAS
+ * transaction that edits it, so the confirmation is a normal revision with full
+ * version/audit history. The candidate row records who decided and when; its
+ * `agent_extraction` provenance stays on the create revision.
+ */
+export async function confirmWorkspaceMemoryCandidate(
+  input: WorkspaceMemoryMutationRequest & {
+    itemId: string;
+    expectedRevision: number;
+    kind?: WorkspaceMemoryKind;
+    title?: string | null;
+    content?: string;
+    canonicalKey?: string | null;
+    importance?: number;
+    confidence?: number;
+    idempotencyKey?: string | null;
+  },
+) {
+  authorizeWorkspace(input, 'write');
+  if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    invalid('expectedRevision must be a positive integer');
+  }
+  validateBoundedOptional(
+    input.idempotencyKey,
+    'idempotencyKey',
+    MAX_IDEMPOTENCY_KEY_LENGTH,
+  );
+  const patch: WorkspaceMemoryPatch = { status: 'active' };
+  for (const key of [
+    'kind',
+    'title',
+    'content',
+    'canonicalKey',
+    'importance',
+    'confidence',
+  ] as const) {
+    if (input[key] !== undefined) {
+      (patch as Record<string, unknown>)[key] = input[key];
+    }
+  }
+  validateValue(patch, false);
+  try {
+    const current = (
+      await getMutableWorkspaceMemoryItem(input.workspaceJid, input.itemId)
+    ).item;
+    assertProposed(current, 'confirm');
+    // Confirming is the moment a candidate becomes recallable, so its retrieval
+    // keys must exist regardless of how it was written: a candidate row from
+    // before phase B has none, and an edit changes the text the keys describe.
+    // Explicit keys supplied by the caller (or by extraction at create time)
+    // are never overwritten.
+    if (patch.searchKeys === undefined) {
+      const nextTitle = patch.title === undefined ? current.title : patch.title;
+      const nextContent =
+        patch.content === undefined ? current.content : patch.content;
+      const nextCanonicalKey =
+        patch.canonicalKey === undefined
+          ? current.canonicalKey
+          : patch.canonicalKey;
+      const textChanged =
+        nextTitle !== current.title ||
+        nextContent !== current.content ||
+        nextCanonicalKey !== current.canonicalKey;
+      if (current.searchKeys.length === 0 || textChanged) {
+        patch.searchKeys = deriveSearchKeys({
+          title: nextTitle,
+          canonicalKey: nextCanonicalKey,
+          content: nextContent,
+        });
+      }
+    }
+    const result = await updateWorkspaceMemoryItem({
+      workspaceJid: input.workspaceJid,
+      itemId: input.itemId,
+      expectedRevision: input.expectedRevision,
+      patch,
+      context: mutationContext(input),
+      idempotencyKey: input.idempotencyKey,
+      requestHash: requestHash({
+        itemId: input.itemId,
+        expectedRevision: input.expectedRevision,
+        patch,
+        action: 'confirm',
+      }),
+    });
+    if (!result.replayed) {
+      await setWorkspaceMemoryCandidateState({
+        workspaceJid: input.workspaceJid,
+        itemId: result.item.id,
+        state: 'confirmed',
+        decidedBy: input.actor.id,
+        at: result.item.updatedAt,
+      });
+    }
+    return {
+      storeRevision: result.store.revision,
+      item: result.item,
+      replayed: result.replayed,
+    };
+  } catch (error) {
+    translateStoreError(error);
+  }
+}
+
+/**
+ * Reject a proposed candidate. Rejection is a forget: the item is soft-deleted
+ * with a tombstone whose reason is the fixed marker `rejected`, so audit and
+ * version history keep the suggestion that was turned down without resurrecting
+ * it in the active list.
+ */
+export async function rejectWorkspaceMemoryCandidate(
+  input: WorkspaceMemoryMutationRequest & {
+    itemId: string;
+    expectedRevision: number;
+    idempotencyKey?: string | null;
+  },
+) {
+  authorizeWorkspace(input, 'write');
+  if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 1) {
+    invalid('expectedRevision must be a positive integer');
+  }
+  validateBoundedOptional(
+    input.idempotencyKey,
+    'idempotencyKey',
+    MAX_IDEMPOTENCY_KEY_LENGTH,
+  );
+  try {
+    const current = (
+      await getMutableWorkspaceMemoryItem(input.workspaceJid, input.itemId)
+    ).item;
+    assertProposed(current, 'reject');
+    const result = await forgetWorkspaceMemoryItem({
+      workspaceJid: input.workspaceJid,
+      itemId: input.itemId,
+      expectedRevision: input.expectedRevision,
+      reason: 'rejected',
+      context: mutationContext(input),
+      idempotencyKey: input.idempotencyKey,
+      requestHash: requestHash({
+        itemId: input.itemId,
+        expectedRevision: input.expectedRevision,
+        action: 'reject',
+      }),
+    });
+    if (!result.replayed) {
+      await setWorkspaceMemoryCandidateState({
+        workspaceJid: input.workspaceJid,
+        itemId: result.item.id,
+        state: 'rejected',
+        decidedBy: input.actor.id,
+        at: result.item.updatedAt,
+      });
+    }
+    return {
+      storeRevision: result.store.revision,
+      item: result.item,
+      replayed: result.replayed,
+    };
+  } catch (error) {
+    translateStoreError(error);
+  }
+}
+
+export async function listWorkspaceMemoryVersions(
   input: WorkspaceMemoryBaseRequest & {
     itemId: string;
     limit?: number;
@@ -560,7 +786,7 @@ export function listWorkspaceMemoryVersions(
     invalid('Invalid version cursor');
   }
   try {
-    const result = listVersionsFromStore({
+    const result = await listVersionsFromStore({
       workspaceJid: input.workspaceJid,
       itemId: input.itemId,
       limit: limit + 1,
@@ -590,7 +816,7 @@ function xmlEscape(value: string): string {
     .replaceAll("'", '&apos;');
 }
 
-export function getWorkspaceMemorySnapshot(
+export async function getWorkspaceMemorySnapshot(
   input: WorkspaceMemoryBaseRequest & {
     query?: string | null;
     kind?: WorkspaceMemoryKind;
@@ -603,69 +829,79 @@ export function getWorkspaceMemorySnapshot(
     256,
     Math.min(MAX_SNAPSHOT_CHARS, Math.trunc(input.maxChars ?? 12_000)),
   );
-  let storeRevision: number;
-  let items: WorkspaceMemoryItem[];
-  if (input.query?.trim()) {
-    const searched = searchWorkspaceMemory({
-      ...input,
-      query: input.query,
+  authorizeWorkspace(input, 'read');
+  const now = new Date().toISOString();
+  const query = input.query?.trim() || null;
+  let storeRevision = 0;
+  let candidates: WorkspaceMemoryItem[] = [];
+  let searchHits: Array<{ item: WorkspaceMemoryItem; rank: number }> = [];
+  try {
+    const recalled = await listRecallableWorkspaceMemoryItems({
+      workspaceJid: input.workspaceJid,
       kind: input.kind,
-      limit,
+      limit: RECALL_CANDIDATE_LIMIT,
+      now,
     });
-    storeRevision = searched.storeRevision;
-    items = searched.hits.map((hit) => hit.item);
-    if (items.length < limit) {
-      // A turn prompt is not a search query. In particular, an exact FTS
-      // phrase for a long natural-language/Chinese prompt often returns zero
-      // even though the Workspace has important standing context. Preserve
-      // relevance hits first, then fill the remaining budget with the most
-      // important currently-valid memories.
-      try {
-        const recalled = listRecallableWorkspaceMemoryItems({
-          workspaceJid: input.workspaceJid,
-          kind: input.kind,
-          limit,
-        });
-        storeRevision = recalled.store.revision;
-        const seen = new Set(items.map((item) => item.id));
-        for (const item of recalled.items) {
-          if (items.length >= limit) break;
-          if (seen.has(item.id)) continue;
-          seen.add(item.id);
-          items.push(item);
-        }
-      } catch (error) {
-        translateStoreError(error);
-      }
-    }
-  } else {
-    authorizeWorkspace(input, 'read');
-    try {
-      const recalled = listRecallableWorkspaceMemoryItems({
+    storeRevision = recalled.store.revision;
+    candidates = recalled.items;
+    if (query) {
+      const searched = await searchWorkspaceMemoryItems({
         workspaceJid: input.workspaceJid,
+        query,
         kind: input.kind,
-        limit,
+        limit: RECALL_HIT_LIMIT,
+        now,
       });
-      storeRevision = recalled.store.revision;
-      items = recalled.items;
-    } catch (error) {
-      translateStoreError(error);
+      storeRevision = searched.store.revision;
+      searchHits = searched.hits.map((hit) => ({
+        item: hit.item,
+        rank: hit.rank,
+      }));
     }
+  } catch (error) {
+    translateStoreError(error);
   }
 
-  const lines = [
-    `<workspace_memory workspace="${xmlEscape(input.workspaceJid)}" revision="${storeRevision}">`,
-  ];
-  const included: WorkspaceMemoryItem[] = [];
-  let size = lines[0].length;
-  for (const item of items) {
-    const line = `<memory id="${xmlEscape(item.id)}" revision="${item.revision}" kind="${item.kind}">${xmlEscape(item.content)}</memory>`;
-    if (size + line.length + '</workspace_memory>'.length > maxChars) break;
-    lines.push(line);
-    included.push(item);
-    size += line.length;
+  const segmentTags: Record<WorkspaceMemoryRecallSegment, [string, string]> = {
+    profile: ['<profile>', '</profile>'],
+    relevant: ['<relevant>', '</relevant>'],
+    proactive: ['<proactive>', '</proactive>'],
+  };
+  const openTag = `<workspace_memory workspace="${xmlEscape(input.workspaceJid)}" revision="${storeRevision}">`;
+  const closeTag = '</workspace_memory>';
+  // The snapshot is rendered as one block separated by newlines; the wrapper
+  // tags are outside the segment budget but still count against `maxChars`.
+  const budgetChars = Math.max(
+    0,
+    maxChars - openTag.length - closeTag.length - 2,
+  );
+  const plan = planWorkspaceMemoryRecall({
+    candidates,
+    searchHits,
+    now,
+    maxChars: budgetChars,
+    limit,
+    measureLine: (item) => renderMemoryLine(item).length + 1,
+    measureSegmentOverhead: (segment) => {
+      const [open, close] = segmentTags[segment];
+      return open.length + close.length + 2;
+    },
+  });
+  const segments = plan.segments.filter(
+    (segment) => segment.entries.length > 0,
+  );
+  const lines = [openTag];
+  for (const segment of segments) {
+    const [open, close] = segmentTags[segment.segment];
+    lines.push(open);
+    for (const entry of segment.entries)
+      lines.push(renderMemoryLine(entry.item));
+    lines.push(close);
   }
-  lines.push('</workspace_memory>');
+  lines.push(closeTag);
+  const included = plan.segments.flatMap((segment) =>
+    segment.entries.map((entry) => entry.item),
+  );
   const generatedAt = new Date().toISOString();
   return {
     workspaceJid: input.workspaceJid,
@@ -673,12 +909,30 @@ export function getWorkspaceMemorySnapshot(
     items: included,
     renderedText: included.length > 0 ? lines.join('\n') : '',
     retrievalTrace: {
-      query: input.query?.trim() || null,
+      query,
+      queryKeywords: query ? deriveQueryKeywords(query) : [],
       itemRevisions: included.map((item) => ({
         id: item.id,
         revision: item.revision,
       })),
+      segments: Object.fromEntries(
+        plan.segments.map((segment) => [
+          segment.segment,
+          {
+            budgetChars: segment.budgetChars,
+            usedChars: segment.usedChars,
+            included: segment.entries.length,
+            truncated: segment.truncated,
+            itemIds: segment.entries.map((entry) => entry.item.id),
+          },
+        ]),
+      ),
       generatedAt,
     },
   };
+}
+
+function renderMemoryLine(item: WorkspaceMemoryItem): string {
+  const pinned = item.pinned ? ' pinned="true"' : '';
+  return `<memory id="${xmlEscape(item.id)}" revision="${item.revision}" kind="${item.kind}"${pinned}>${xmlEscape(item.content)}</memory>`;
 }

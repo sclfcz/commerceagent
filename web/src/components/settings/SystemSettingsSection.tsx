@@ -20,6 +20,7 @@ type NumericSettingKey =
   | 'idleTimeout'
   | 'containerMaxOutputSize'
   | 'maxConcurrentContainers'
+  | 'memoryExtractionIdleMs'
   | 'maxLoginAttempts'
   | 'loginLockoutMinutes';
 
@@ -95,6 +96,18 @@ const fieldGroups: FieldGroup[] = [
         toStored: (value) => value,
         min: 1,
         max: 100,
+        step: 1,
+      },
+      {
+        key: 'memoryExtractionIdleMs',
+        label: '记忆候选提炼空闲阈值',
+        description:
+          '顶层交互会话最后一次消息后持续无活动达到该时长时，自动提炼一次候选记忆。候选在人工确认前不生效。',
+        unit: '分钟',
+        toDisplay: (value) => Math.round(value / 60_000),
+        toStored: (value) => value * 60_000,
+        min: 1,
+        max: 1440,
         step: 1,
       },
     ],
@@ -278,6 +291,7 @@ export function SystemSettingsSection({
   const [initialFallbackModel, setInitialFallbackModel] = useState('');
   const [blockUnverifiedModelConfigs, setBlockUnverifiedModelConfigs] =
     useState(false);
+  const [memoryExtractionEnabled, setMemoryExtractionEnabled] = useState(true);
   const [observabilityEnabled, setObservabilityEnabled] = useState(false);
   const [observabilityEndpoint, setObservabilityEndpoint] = useState('');
   const [observabilityPublicKey, setObservabilityPublicKey] = useState('');
@@ -301,6 +315,7 @@ export function SystemSettingsSection({
       setFallbackModel(data.fallbackModel ?? '');
       setInitialFallbackModel(data.fallbackModel ?? '');
       setBlockUnverifiedModelConfigs(data.blockUnverifiedModelConfigs ?? false);
+      setMemoryExtractionEnabled(data.memoryExtractionEnabled ?? true);
       setObservabilityEnabled(data.observabilityEnabled ?? false);
       setObservabilityEndpoint(data.observabilityEndpoint ?? '');
       setObservabilityPublicKey(data.observabilityPublicKey ?? '');
@@ -346,6 +361,9 @@ export function SystemSettingsSection({
   const modelContinuityGateDirty =
     scope === 'runtime' &&
     blockUnverifiedModelConfigs !== !!settings?.blockUnverifiedModelConfigs;
+  const memoryExtractionDirty =
+    scope === 'runtime' &&
+    memoryExtractionEnabled !== !!settings?.memoryExtractionEnabled;
   const observabilityDirty =
     scope === 'runtime' &&
     (!!observabilityEnabled !== !!settings?.observabilityEnabled ||
@@ -367,6 +385,7 @@ export function SystemSettingsSection({
         )) ||
       fallbackModelDirty ||
       modelContinuityGateDirty ||
+      memoryExtractionDirty ||
       observabilityDirty,
     [
       activeFields,
@@ -374,6 +393,7 @@ export function SystemSettingsSection({
       values,
       fallbackModelDirty,
       modelContinuityGateDirty,
+      memoryExtractionDirty,
       observabilityDirty,
     ],
   );
@@ -400,6 +420,7 @@ export function SystemSettingsSection({
     if (scope === 'runtime') {
       payload.fallbackModel = fallbackModel.trim();
       payload.blockUnverifiedModelConfigs = blockUnverifiedModelConfigs;
+      payload.memoryExtractionEnabled = memoryExtractionEnabled;
       payload.observabilityEnabled = observabilityEnabled;
       payload.observabilityEndpoint = observabilityEndpoint.trim();
       payload.observabilityPublicKey = observabilityPublicKey.trim();
@@ -420,6 +441,7 @@ export function SystemSettingsSection({
       setFallbackModel(data.fallbackModel ?? '');
       setInitialFallbackModel(data.fallbackModel ?? '');
       setBlockUnverifiedModelConfigs(data.blockUnverifiedModelConfigs ?? false);
+      setMemoryExtractionEnabled(data.memoryExtractionEnabled ?? true);
       setObservabilityEnabled(data.observabilityEnabled ?? false);
       setObservabilityEndpoint(data.observabilityEndpoint ?? '');
       setObservabilityPublicKey(data.observabilityPublicKey ?? '');
@@ -537,6 +559,39 @@ export function SystemSettingsSection({
               id="block-unverified-model-configs"
               checked={blockUnverifiedModelConfigs}
               onCheckedChange={setBlockUnverifiedModelConfigs}
+            />
+          </div>
+        </section>
+      )}
+
+      {scope === 'runtime' && (
+        <section className="border-t border-border py-6">
+          <header className="mb-5 max-w-2xl">
+            <h2 className="text-base font-semibold text-foreground">
+              记忆候选提炼
+            </h2>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              顶层交互会话在空闲达到上面的“记忆候选提炼空闲阈值”后，由宿主用一次轻量
+              模型调用提炼候选记忆，并在上下文压缩前再触发一次。候选一律以“待确认”
+              状态保存，不进入检索，只有人工确认后才生效；定时任务与子智能体只能
+              提交候选，不能自行确认。关闭后不再自动提炼，已有候选仍保留在
+              Memory 页面等待处理。
+            </p>
+          </header>
+          <div className="flex items-start justify-between gap-4 max-w-2xl">
+            <div>
+              <Label htmlFor="memory-extraction-enabled">
+                启用自动提炼候选记忆
+              </Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                默认开启。仅影响自动提炼，不影响 Agent 主动提议、Web
+                写入或人工确认。
+              </p>
+            </div>
+            <Switch
+              id="memory-extraction-enabled"
+              checked={memoryExtractionEnabled}
+              onCheckedChange={setMemoryExtractionEnabled}
             />
           </div>
         </section>

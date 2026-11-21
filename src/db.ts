@@ -84,9 +84,7 @@ import {
 } from './channel-reliability-store.js';
 import {
   bindWorkspaceMemoryDatabase,
-  createWorkspaceMemorySchema,
   deleteWorkspaceMemoryData,
-  enforceCommerceAgentOwnerAddressCanonicalInvariant,
   resetWorkspaceMemoryData,
 } from './memory-store.js';
 import {
@@ -785,10 +783,11 @@ export function initDatabase(): void {
   `);
 
   // v64 -> v65: Workspace is the only durable memory continuity boundary.
-  // Create and bind this before canonical projection reconciliation because
-  // that pass can delete ghost workspaces and must also purge their memory
-  // even when legacy FK violations forced foreign_keys=OFF.
-  createWorkspaceMemorySchema(db);
+  // Workspace Memory now lives in PostgreSQL (see src/memory-pg/). Its schema
+  // is created by its own migration framework at store bootstrap, so this only
+  // hands the store its legacy SQLite handle (used for the one-time import and
+  // for orphaned-store cleanup). The bootstrap options are completed below,
+  // once the pre-init schema version is known.
   bindWorkspaceMemoryDatabase(db);
 
   // Auth tables
@@ -875,16 +874,17 @@ export function initDatabase(): void {
   // installed.
   createOwnerProfileSchema(db);
   bindOwnerProfileDatabase(db);
-  if (
-    rawSchemaVersionBeforeInit !== null &&
-    Number(rawSchemaVersionBeforeInit) < 66
-  ) {
-    reconcileLegacyOwnerProfileMemory();
-  } else {
-    // Fresh and already-v66 databases need the structural invariant, but must
-    // not re-run legacy sentinel inference on every normal restart.
-    enforceCommerceAgentOwnerAddressCanonicalInvariant();
-  }
+  // The reserved Memory item itself (preferred address) lives in PostgreSQL.
+  // Legacy sentinel inference therefore runs as the Memory store's bootstrap
+  // hook, after the SQLite rows have been imported. Fresh and already-v66
+  // databases never run it, so a normal restart cannot reinterpret an
+  // onboarding outcome.
+  bindWorkspaceMemoryDatabase(db, {
+    legacyOwnerProfileReconcilePending:
+      rawSchemaVersionBeforeInit !== null &&
+      Number(rawSchemaVersionBeforeInit) < 66,
+    reconcileLegacyOwnerProfile: reconcileLegacyOwnerProfileMemory,
+  });
 
   // Sub-agents table for multi-agent parallel execution
   db.exec(`
@@ -4288,6 +4288,81 @@ export function getMessagesSince(
     cursor.id,
   ) as NewMessage[];
   return rows.map((row) => normalizeMessageRow(row));
+}
+
+export interface MemoryExtractionMessage {
+  id: string;
+  sender: string;
+  sender_name: string;
+  content: string;
+  timestamp: string;
+  is_from_me: boolean;
+  source_kind: string | null;
+}
+
+/**
+ * Messages after an extraction cursor for one conversational session.
+ *
+ * Unlike `getMessagesSince` (inbound only) this includes the assistant's own
+ * final answers, because a session summary has to describe what was concluded,
+ * not just what was asked. Scheduled-task turns, slash commands and queued
+ * follow-ups are excluded here so a scheduled run can never become the source
+ * of a candidate — extraction is for human-initiated conversation only. The
+ * task's terminal summary row carries `task_id = NULL` but
+ * `source_kind = 'scheduled_task_result'`, so the source-kind filter (not the
+ * task filter) is what keeps it out of the transcript.
+ */
+export function getMemoryExtractionMessages(
+  chatJid: string,
+  cursor: MessageCursor,
+  limit: number,
+): MemoryExtractionMessage[] {
+  const rows = db
+    .prepare(
+      `SELECT id, sender, sender_name, content, timestamp, is_from_me, source_kind
+       FROM messages
+       WHERE chat_jid = ?
+         AND (timestamp > ? OR (timestamp = ? AND id > ?))
+         AND task_id IS NULL
+         AND COALESCE(source_kind, '') NOT IN (
+           'user_command', 'scheduled_task_prompt', 'scheduled_task_result'
+         )
+         AND COALESCE(delivery_status, '') NOT IN ('queued', 'promoting', 'cancelled')
+       ORDER BY timestamp ASC, id ASC
+       LIMIT ?`,
+    )
+    .all(
+      chatJid,
+      cursor.timestamp,
+      cursor.timestamp,
+      cursor.id,
+      limit,
+    ) as Array<{
+    id: string;
+    sender: string;
+    sender_name: string;
+    content: unknown;
+    timestamp: string;
+    is_from_me: number;
+    source_kind: string | null;
+  }>;
+  return rows.map((row) => ({
+    id: row.id,
+    sender: row.sender,
+    sender_name: row.sender_name,
+    content: toUtf8String(row.content, 'messages.content'),
+    timestamp: row.timestamp,
+    is_from_me: row.is_from_me === 1,
+    source_kind: row.source_kind,
+  }));
+}
+
+/** Latest stored message timestamp for a chat, or null when it has none. */
+export function getChatLatestMessageTimestamp(chatJid: string): string | null {
+  const row = db
+    .prepare('SELECT MAX(timestamp) AS latest FROM messages WHERE chat_jid = ?')
+    .get(chatJid) as { latest: string | null } | undefined;
+  return row?.latest ?? null;
 }
 
 type CreateTaskInput = Omit<
@@ -9790,7 +9865,7 @@ function syncWorkspaceFromRegisteredGroup(
 }
 
 function deleteWorkspaceMirror(jid: string, folder?: string): void {
-  deleteWorkspaceMemoryData(jid);
+  // Memory is deleted by the caller, before this SQLite transaction opens.
   db.prepare('DELETE FROM workspaces WHERE jid = ?').run(jid);
   db.prepare(
     'DELETE FROM workspace_runtime_sessions WHERE workspace_jid = ?',
@@ -10056,18 +10131,9 @@ export function syncAllWorkspaceRuntimeSessionsFromSessions(): void {
  */
 export function reconcileCanonicalRuntimeProjections(): void {
   db.transaction(() => {
-    const ghostWorkspaces = db
-      .prepare(
-        `SELECT jid FROM workspaces
-         WHERE NOT EXISTS (
-           SELECT 1 FROM registered_groups rg
-           WHERE rg.jid = workspaces.jid AND rg.jid LIKE 'web:%'
-         )`,
-      )
-      .all() as Array<{ jid: string }>;
-    for (const workspace of ghostWorkspaces) {
-      deleteWorkspaceMemoryData(workspace.jid);
-    }
+    // Ghost workspaces are removed from SQLite here; their PostgreSQL Memory
+    // stores are purged by the Memory store bootstrap, which deletes stores
+    // whose workspace no longer exists (see purgeOrphanedWorkspaceMemory).
     db.exec(`
       DELETE FROM workspaces
       WHERE NOT EXISTS (
@@ -10550,7 +10616,17 @@ export function updateRegisteredGroupAvatar(
   return result.changes > 0;
 }
 
-export function deleteRegisteredGroup(jid: string): void {
+/**
+ * Delete a workspace registration and its SQLite projections.
+ *
+ * Memory is a different database, so it is deleted first and commits on its
+ * own; the SQLite transaction then removes everything else. A crash in between
+ * leaves the workspace intact with empty Memory, which the retry (and the
+ * startup orphan purge, if the SQLite delete had committed) repairs. The
+ * reverse order could leave another workspace's memory behind on a reused JID.
+ */
+export async function deleteRegisteredGroup(jid: string): Promise<void> {
+  await deleteWorkspaceMemoryData(jid);
   db.transaction(() => {
     const existing = getRegisteredGroup(jid);
     deleteChannelMount(jid);
@@ -11231,35 +11307,54 @@ export function deleteChatHistory(chatJid: string): void {
 }
 
 /**
+ * SQLite half of a knowledge reset. Callers must have reset the PostgreSQL
+ * Memory store for this workspace already (see
+ * `resetWorkspaceKnowledgeForRebuild`).
+ */
+function resetWorkspaceOnboardingForRebuild(
+  workspaceJid: string,
+  isHome: number,
+): void {
+  db.prepare(
+    `DELETE FROM workspace_onboarding_states
+     WHERE workspace_jid = ? AND flow_key = ?`,
+  ).run(workspaceJid, COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY);
+
+  if (isHome === 1) {
+    const at = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO workspace_onboarding_states (
+        workspace_jid, flow_key, state, revision, lease_owner, lease_token,
+        lease_expires_at, first_wake_at, completed_at, skipped_at,
+        created_at, updated_at
+      ) VALUES (?, ?, 'pending', 0, NULL, 0, NULL, NULL, NULL, NULL, ?, ?)`,
+    ).run(workspaceJid, COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY, at, at);
+  }
+}
+
+/**
  * Clear all knowledge owned by a retained workspace during a content rebuild.
  * The generic Memory lineage and the hidden Home Owner Profile lifecycle are
- * reset atomically, while the workspace identity/configuration remains intact.
+ * both reset while the workspace identity/configuration remains intact.
+ *
+ * They live in different databases, so this is not one transaction: Memory is
+ * reset first (its own commit), then the SQLite onboarding row. An interruption
+ * in between leaves an empty Memory store with the old onboarding row, and
+ * re-running the rebuild converges.
  */
-export function resetWorkspaceKnowledgeForRebuild(workspaceJid: string): void {
+export async function resetWorkspaceKnowledgeForRebuild(
+  workspaceJid: string,
+): Promise<void> {
+  const workspace = db
+    .prepare('SELECT is_home FROM workspaces WHERE jid = ?')
+    .get(workspaceJid) as { is_home: number } | undefined;
+  if (!workspace) {
+    throw new Error(`Workspace not found: ${workspaceJid}`);
+  }
+
+  await resetWorkspaceMemoryData(workspaceJid);
   db.transaction(() => {
-    const workspace = db
-      .prepare('SELECT is_home FROM workspaces WHERE jid = ?')
-      .get(workspaceJid) as { is_home: number } | undefined;
-    if (!workspace) {
-      throw new Error(`Workspace not found: ${workspaceJid}`);
-    }
-
-    resetWorkspaceMemoryData(workspaceJid);
-    db.prepare(
-      `DELETE FROM workspace_onboarding_states
-       WHERE workspace_jid = ? AND flow_key = ?`,
-    ).run(workspaceJid, COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY);
-
-    if (workspace.is_home === 1) {
-      const at = new Date().toISOString();
-      db.prepare(
-        `INSERT INTO workspace_onboarding_states (
-          workspace_jid, flow_key, state, revision, lease_owner, lease_token,
-          lease_expires_at, first_wake_at, completed_at, skipped_at,
-          created_at, updated_at
-        ) VALUES (?, ?, 'pending', 0, NULL, 0, NULL, NULL, NULL, NULL, ?, ?)`,
-      ).run(workspaceJid, COMMERCEAGENT_OWNER_INTRODUCTION_FLOW_KEY, at, at);
-    }
+    resetWorkspaceOnboardingForRebuild(workspaceJid, workspace.is_home);
   })();
 }
 
@@ -11284,57 +11379,77 @@ export interface WorkspaceRebuildPersistentStateResult {
  * Filesystem staging is handled by the route before this call; throwing here
  * leaves all database state untouched so the route can restore staged files.
  */
-export function rebuildWorkspacePersistentState(input: {
+function assertWorkspaceRebuildPreconditions(
+  groupFolder: string,
+  workspaceJids: string[],
+): void {
+  for (const workspaceJid of workspaceJids) {
+    const workspace = db
+      .prepare('SELECT folder FROM workspaces WHERE jid = ?')
+      .get(workspaceJid) as { folder: string } | undefined;
+    if (!workspace || workspace.folder !== groupFolder) {
+      throw new WorkspaceRebuildPersistentStateError(
+        'workspace_missing',
+        `Workspace changed while rebuilding: ${workspaceJid}`,
+      );
+    }
+  }
+
+  const activeRunIds = (
+    db
+      .prepare(
+        `SELECT tr.id
+         FROM task_runs tr
+         JOIN scheduled_tasks st ON st.id = tr.task_id
+         WHERE st.group_folder = ?
+           AND (
+             tr.status IN ('queued','running','retry_wait')
+             OR (
+               tr.status = 'delivered'
+               AND json_valid(tr.definition_snapshot)
+               AND json_extract(
+                 tr.definition_snapshot,
+                 '$.context_mode'
+               ) = 'group'
+             )
+           )
+         ORDER BY tr.created_at, tr.id`,
+      )
+      .all(groupFolder) as Array<{ id: string }>
+  ).map((row) => row.id);
+  if (activeRunIds.length > 0) {
+    throw new WorkspaceRebuildPersistentStateError(
+      'active_task_runs',
+      'Scheduled task runs are still active during workspace rebuild',
+      activeRunIds,
+    );
+  }
+}
+
+/**
+ * Wipe a workspace's knowledge and running state so its content can be rebuilt.
+ *
+ * Preconditions are checked first (they must still surface as
+ * `workspace_missing` / `active_task_runs`, not as a Memory error). Then the
+ * PostgreSQL Memory stores are reset — each in its own transaction — before
+ * the single SQLite transaction below removes sessions, tasks and onboarding
+ * state. A failure after the Memory reset leaves empty Memory with the
+ * workspace otherwise untouched, which is exactly the state a retry expects,
+ * so the whole operation is idempotent.
+ */
+export async function rebuildWorkspacePersistentState(input: {
   groupFolder: string;
   workspaceJids: string[];
   siblingJids: string[];
-}): WorkspaceRebuildPersistentStateResult {
+}): Promise<WorkspaceRebuildPersistentStateResult> {
+  const workspaceJids = [...new Set(input.workspaceJids)];
+  const siblingJids = [...new Set(input.siblingJids)];
+  assertWorkspaceRebuildPreconditions(input.groupFolder, workspaceJids);
+  for (const workspaceJid of workspaceJids) {
+    await resetWorkspaceMemoryData(workspaceJid);
+  }
   return db
     .transaction((): WorkspaceRebuildPersistentStateResult => {
-      const workspaceJids = [...new Set(input.workspaceJids)];
-      const siblingJids = [...new Set(input.siblingJids)];
-      for (const workspaceJid of workspaceJids) {
-        const workspace = db
-          .prepare('SELECT folder FROM workspaces WHERE jid = ?')
-          .get(workspaceJid) as { folder: string } | undefined;
-        if (!workspace || workspace.folder !== input.groupFolder) {
-          throw new WorkspaceRebuildPersistentStateError(
-            'workspace_missing',
-            `Workspace changed while rebuilding: ${workspaceJid}`,
-          );
-        }
-      }
-
-      const activeRunIds = (
-        db
-          .prepare(
-            `SELECT tr.id
-             FROM task_runs tr
-             JOIN scheduled_tasks st ON st.id = tr.task_id
-             WHERE st.group_folder = ?
-               AND (
-                 tr.status IN ('queued','running','retry_wait')
-                 OR (
-                   tr.status = 'delivered'
-                   AND json_valid(tr.definition_snapshot)
-                   AND json_extract(
-                     tr.definition_snapshot,
-                     '$.context_mode'
-                   ) = 'group'
-                 )
-               )
-             ORDER BY tr.created_at, tr.id`,
-          )
-          .all(input.groupFolder) as Array<{ id: string }>
-      ).map((row) => row.id);
-      if (activeRunIds.length > 0) {
-        throw new WorkspaceRebuildPersistentStateError(
-          'active_task_runs',
-          'Scheduled task runs are still active during workspace rebuild',
-          activeRunIds,
-        );
-      }
-
       const recycledTaskIds = (
         db
           .prepare(
@@ -11394,7 +11509,14 @@ export function rebuildWorkspacePersistentState(input: {
       }
 
       for (const workspaceJid of workspaceJids) {
-        resetWorkspaceKnowledgeForRebuild(workspaceJid);
+        const workspace = db
+          .prepare('SELECT is_home FROM workspaces WHERE jid = ?')
+          .get(workspaceJid) as { is_home: number } | undefined;
+        // Memory was already reset before this transaction opened.
+        resetWorkspaceOnboardingForRebuild(
+          workspaceJid,
+          workspace?.is_home ?? 0,
+        );
         db.prepare(
           'DELETE FROM im_context_bindings WHERE workspace_jid = ?',
         ).run(workspaceJid);
@@ -11496,7 +11618,7 @@ export function deleteImGroupRecord(jid: string): void {
   tx();
 }
 
-export function deleteGroupData(
+export async function deleteGroupData(
   jid: string,
   folder: string,
   options: {
@@ -11507,7 +11629,12 @@ export function deleteGroupData(
      */
     channelUpdates?: Array<{ jid: string; group: RegisteredGroup }>;
   } = {},
-): void {
+): Promise<void> {
+  // Memory first: it is a separate database and cannot join this transaction.
+  // Deleting it first keeps the failure mode "workspace still exists, memory
+  // already empty" (idempotent, retryable) instead of "workspace gone, memory
+  // orphaned".
+  await deleteWorkspaceMemoryData(jid);
   const tx = db.transaction(() => {
     const legacyMainJid = `web:${folder}`;
     for (const update of options.channelUpdates ?? []) {
@@ -11560,8 +11687,7 @@ export function deleteGroupData(
     db.prepare(
       'DELETE FROM workspace_agent_profiles WHERE group_folder = ?',
     ).run(folder);
-    // 3b. 删除 canonical workspace/session 镜像
-    deleteWorkspaceMemoryData(jid);
+    // 3b. 删除 canonical workspace/session 镜像（Memory 已在上方先行删除）
     db.prepare('DELETE FROM workspaces WHERE jid = ?').run(jid);
     db.prepare(
       'DELETE FROM workspace_runtime_sessions WHERE group_folder = ?',

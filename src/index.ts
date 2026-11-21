@@ -68,6 +68,7 @@ import {
   ContainerOutput,
   cleanupContainerTaskRuntimeEnvDirs,
   closeRunnerAfterRotatingProviderTurn,
+  isAgentRunnerContainerName,
   runContainerAgent,
   runHostAgent,
   runAgentWithModelFallback,
@@ -196,15 +197,37 @@ import {
   updateQueuedFollowUpContent,
 } from './db.js';
 import {
+  confirmWorkspaceMemoryCandidate,
   createWorkspaceMemory,
   forgetWorkspaceMemory,
   getWorkspaceMemory,
   getWorkspaceMemorySnapshot,
+  listWorkspaceMemoryCandidates,
+  rejectWorkspaceMemoryCandidate,
   searchWorkspaceMemory,
   updateWorkspaceMemory,
   WorkspaceMemoryServiceError,
 } from './memory-service.js';
-import { type WorkspaceMemoryMutationContext } from './memory-store.js';
+import {
+  MEMORY_EXTRACTION_CANDIDATE_TTL_DAYS,
+  MEMORY_EXTRACTION_MAX_CONTENT_CHARS,
+  MEMORY_EXTRACTION_MAX_TITLE_CHARS,
+} from './memory-extraction/config.js';
+import { containsSensitiveContent } from './memory-extraction/filters.js';
+import { createWorkspaceMemoryCandidate } from './memory-candidate-store.js';
+import {
+  extractBeforeCompaction,
+  startMemoryExtractionLoop,
+} from './memory-extraction/index.js';
+import {
+  closeWorkspaceMemoryStore,
+  initWorkspaceMemoryStore,
+  type WorkspaceMemoryMutationContext,
+} from './memory-store.js';
+import {
+  startMemoryConsolidationWorker,
+  type MemoryConsolidationWorkerHandle,
+} from './memory-consolidation/index.js';
 import {
   isCommerceAgentBootstrapTurn,
   isCommerceAgentOwnerProfileRuntimeStructurallyEligible,
@@ -2234,14 +2257,14 @@ function toContainerAgentProfile(
   };
 }
 
-function resolveCommerceAgentOwnerProfileForTurn(input: {
+async function resolveCommerceAgentOwnerProfileForTurn(input: {
   group: RegisteredGroup;
   profile: AgentProfile | undefined;
   turnId?: string;
   isScheduledTask?: boolean;
   runtimeAgentId?: string | null;
   runtimeAgentKind?: 'task' | 'conversation' | 'spawn' | null;
-}): CommerceAgentOwnerProfileProjection | undefined {
+}): Promise<CommerceAgentOwnerProfileProjection | undefined> {
   if (
     !isCommerceAgentBootstrapTurn({
       turnId: input.turnId,
@@ -2278,7 +2301,7 @@ function resolveCommerceAgentOwnerProfileForTurn(input: {
   );
   if (!workspaceJid) return undefined;
   try {
-    return getCommerceAgentOwnerProfileProjection(workspaceJid);
+    return await getCommerceAgentOwnerProfileProjection(workspaceJid);
   } catch {
     return undefined;
   }
@@ -7150,6 +7173,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
               broadcastStreamEvent(chatJid, result.streamEvent);
             }
 
+            // Context compaction is about to drop detail from this session.
+            // Extract what the cursor has not consumed yet, once, before the
+            // detail is gone. Scheduled-task turns are not extraction sources.
+            if (
+              result.streamEvent.eventType === 'compact_boundary' &&
+              !lastProcessed.task_id
+            ) {
+              void extractBeforeCompaction(chatJid);
+            }
+
             // ── 累积 text_delta / thinking_delta 文本（中断时用于保存已输出内容）──
             // 仅累积主 Agent 文本（无 parentToolUseId）。子 Agent（SDK Task）的
             // 中间文本带 parentToolUseId，混入会污染飞书主卡片正文与 interrupt_partial。
@@ -9368,12 +9401,13 @@ async function runAgentTurn(
   );
   let rotatingTurnCompleted = false;
   let selectedProviderIdForRun: string | null = null;
-  const commerceAgentOwnerProfile = resolveCommerceAgentOwnerProfileForTurn({
-    group,
-    profile: resolvedAgentProfile,
-    turnId,
-    isScheduledTask: Boolean(messageTaskId),
-  });
+  const commerceAgentOwnerProfile =
+    await resolveCommerceAgentOwnerProfileForTurn({
+      group,
+      profile: resolvedAgentProfile,
+      turnId,
+      isScheduledTask: Boolean(messageTaskId),
+    });
   const commerceAgentBootstrapPending =
     commerceAgentOwnerProfile?.onboarding.state === 'pending' ||
     commerceAgentOwnerProfile?.onboarding.state === 'claimed';
@@ -11518,11 +11552,18 @@ async function processTaskIpc(
     title?: string;
     content?: string;
     canonicalKey?: string | null;
+    searchKeys?: string[] | null;
+    pinned?: boolean;
     importance?: number;
     confidence?: number;
     validFrom?: string | null;
     validUntil?: string | null;
     expiresAt?: string | null;
+    // Candidate-only annotations (lesson applicability and the messages a
+    // proposal was derived from). `searchKeys` above is shared by both the
+    // item fields and candidate annotations.
+    appliesWhen?: string;
+    evidenceMessageIds?: string[];
     patch?: Record<string, unknown>;
     sessionId?: string;
     timestamp?: string;
@@ -11761,7 +11802,7 @@ async function processTaskIpc(
                 'Owner Profile runner identity is required',
               );
             }
-            const claim = claimCommerceAgentOwnerIntroduction({
+            const claim = await claimCommerceAgentOwnerIntroduction({
               workspaceJid: principal.workspaceJid,
               leaseOwner: data.runnerInstanceId,
             });
@@ -11796,7 +11837,7 @@ async function processTaskIpc(
                 'Owner Profile lease token is required',
               );
             }
-            result = acknowledgeCommerceAgentOwnerIntroduction({
+            result = await acknowledgeCommerceAgentOwnerIntroduction({
               workspaceJid: principal.workspaceJid,
               leaseOwner: data.runnerInstanceId,
               leaseToken: data.leaseToken!,
@@ -11804,7 +11845,7 @@ async function processTaskIpc(
             break;
           }
           case 'set':
-            result = setCommerceAgentOwnerPreferredAddress({
+            result = await setCommerceAgentOwnerPreferredAddress({
               workspaceJid: principal.workspaceJid,
               preferredAddress: data.preferredAddress ?? '',
               expectedRevision: data.expectedRevision,
@@ -11819,7 +11860,7 @@ async function processTaskIpc(
                 'expectedRevision is required to clear the Owner Profile',
               );
             }
-            result = clearCommerceAgentOwnerPreferredAddress({
+            result = await clearCommerceAgentOwnerPreferredAddress({
               workspaceJid: principal.workspaceJid,
               expectedRevision: data.expectedRevision!,
               idempotencyKey: data.idempotencyKey,
@@ -11827,7 +11868,7 @@ async function processTaskIpc(
             });
             break;
           case 'skip':
-            result = skipCommerceAgentOwnerIntroduction({
+            result = await skipCommerceAgentOwnerIntroduction({
               workspaceJid: principal.workspaceJid,
               expectedOnboardingRevision: data.expectedOnboardingRevision,
               context: principal.context,
@@ -11923,7 +11964,9 @@ async function processTaskIpc(
         const mutationOperation =
           data.operation === 'create' ||
           data.operation === 'update' ||
-          data.operation === 'delete';
+          data.operation === 'delete' ||
+          data.operation === 'review_confirm' ||
+          data.operation === 'review_reject';
         const capabilityValid =
           mutationOperation &&
           (!ipcAgentId || runtimeAgentKind === 'conversation') &&
@@ -11955,7 +11998,7 @@ async function processTaskIpc(
         let result: Record<string, unknown>;
         switch (data.operation) {
           case 'snapshot': {
-            const snapshot = getWorkspaceMemorySnapshot({
+            const snapshot = await getWorkspaceMemorySnapshot({
               ...base,
               query: data.query,
               kind: data.kind as
@@ -11980,7 +12023,7 @@ async function processTaskIpc(
             break;
           }
           case 'search':
-            result = searchWorkspaceMemory({
+            result = await searchWorkspaceMemory({
               ...base,
               query: data.query ?? '',
               kind: data.kind as
@@ -11993,19 +12036,21 @@ async function processTaskIpc(
             });
             break;
           case 'get':
-            result = getWorkspaceMemory({
+            result = await getWorkspaceMemory({
               ...base,
               itemId: data.itemId ?? '',
             });
             break;
           case 'create':
-            result = createWorkspaceMemory({
+            result = await createWorkspaceMemory({
               ...base,
               ...mutation,
               kind: data.kind as 'fact' | 'decision' | 'lesson' | 'open_loop',
               title: data.title,
               content: data.content ?? '',
               canonicalKey: data.canonicalKey,
+              searchKeys: data.searchKeys,
+              pinned: data.pinned,
               importance: data.importance,
               confidence: data.confidence,
               validFrom: data.validFrom,
@@ -12015,7 +12060,7 @@ async function processTaskIpc(
             });
             break;
           case 'update': {
-            result = updateWorkspaceMemory(
+            result = await updateWorkspaceMemory(
               buildWorkspaceMemoryUpdateInput(data, {
                 ...base,
                 ...mutation,
@@ -12024,7 +12069,7 @@ async function processTaskIpc(
             break;
           }
           case 'delete':
-            result = forgetWorkspaceMemory({
+            result = await forgetWorkspaceMemory({
               ...base,
               ...mutation,
               itemId: data.itemId ?? '',
@@ -12032,6 +12077,177 @@ async function processTaskIpc(
               idempotencyKey: data.idempotencyKey,
             });
             break;
+          case 'propose': {
+            // Model-initiated proposal: allowed from any admitted runner turn
+            // (interactive, scheduled, task/spawn sub-agent) because it can
+            // only create a `proposed` candidate. It never becomes active
+            // without a human confirmation through Web or review_confirm.
+            const kind = data.kind;
+            if (
+              kind !== 'fact' &&
+              kind !== 'decision' &&
+              kind !== 'lesson' &&
+              kind !== 'open_loop'
+            ) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'Invalid memory kind',
+              );
+            }
+            const content =
+              typeof data.content === 'string' ? data.content.trim() : '';
+            if (
+              !content ||
+              content.length > MEMORY_EXTRACTION_MAX_CONTENT_CHARS
+            ) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'Proposed memory content is empty or too long',
+              );
+            }
+            const title =
+              typeof data.title === 'string' && data.title.trim()
+                ? data.title.trim().slice(0, MEMORY_EXTRACTION_MAX_TITLE_CHARS)
+                : null;
+            const appliesWhen =
+              typeof data.appliesWhen === 'string' && data.appliesWhen.trim()
+                ? data.appliesWhen.trim().slice(0, 400)
+                : null;
+            if (kind === 'lesson' && !appliesWhen) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'A lesson proposal must include appliesWhen',
+              );
+            }
+            if (containsSensitiveContent(`${title ?? ''}\n${content}`)) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'Proposed memory contains secrets or personal data',
+              );
+            }
+            const confidence =
+              typeof data.confidence === 'number' &&
+              data.confidence >= 0 &&
+              data.confidence <= 1
+                ? data.confidence
+                : 0.6;
+            const importance =
+              typeof data.importance === 'number' &&
+              data.importance >= 0 &&
+              data.importance <= 1
+                ? data.importance
+                : 0.5;
+            const searchKeys = Array.isArray(data.searchKeys)
+              ? data.searchKeys
+                  .filter((key): key is string => typeof key === 'string')
+                  .slice(0, 6)
+              : [];
+            const evidenceMessageIds = Array.isArray(data.evidenceMessageIds)
+              ? data.evidenceMessageIds
+                  .filter((id): id is string => typeof id === 'string')
+                  .slice(0, 20)
+              : [];
+            const created = await createWorkspaceMemoryCandidate({
+              workspaceJid,
+              // Host-derived session key; never trust a model-supplied JID.
+              sessionKey: `${workspaceJid}${ipcAgentId ? `#agent:${ipcAgentId}` : ''}`,
+              sessionId:
+                typeof data.sessionId === 'string' ? data.sessionId : null,
+              runId: `agent_propose_${String(data.requestId)}`,
+              kind,
+              title,
+              content,
+              confidence,
+              importance,
+              appliesWhen,
+              searchKeys,
+              evidenceMessageIds,
+              ttlDays: MEMORY_EXTRACTION_CANDIDATE_TTL_DAYS,
+              sourceType,
+              actorId: actor.id,
+              idempotencyKey:
+                typeof data.idempotencyKey === 'string'
+                  ? data.idempotencyKey
+                  : `propose:${String(data.requestId)}`,
+              requestHash: crypto
+                .createHash('sha256')
+                .update(JSON.stringify({ kind, title, content }))
+                .digest('hex'),
+            });
+            result = {
+              item: created.item,
+              candidate: created.candidate,
+              replayed: created.replayed,
+            };
+            break;
+          }
+          case 'review_list':
+            result = await listWorkspaceMemoryCandidates({
+              ...base,
+              limit:
+                typeof data.limit === 'number'
+                  ? Math.trunc(data.limit)
+                  : undefined,
+            });
+            break;
+          case 'review_confirm': {
+            if (
+              !Number.isInteger(data.expectedRevision) ||
+              (data.expectedRevision ?? 0) < 1
+            ) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'expectedRevision must be a positive integer',
+              );
+            }
+            result = await confirmWorkspaceMemoryCandidate({
+              ...base,
+              ...mutation,
+              itemId: data.itemId ?? '',
+              expectedRevision: data.expectedRevision as number,
+              kind: data.kind as
+                | 'fact'
+                | 'decision'
+                | 'lesson'
+                | 'open_loop'
+                | undefined,
+              title:
+                data.title === undefined
+                  ? undefined
+                  : (data.title as string | null),
+              content:
+                data.content === undefined
+                  ? undefined
+                  : (data.content as string),
+              idempotencyKey:
+                typeof data.idempotencyKey === 'string'
+                  ? data.idempotencyKey
+                  : undefined,
+            });
+            break;
+          }
+          case 'review_reject': {
+            if (
+              !Number.isInteger(data.expectedRevision) ||
+              (data.expectedRevision ?? 0) < 1
+            ) {
+              throw new WorkspaceMemoryServiceError(
+                'invalid_request',
+                'expectedRevision must be a positive integer',
+              );
+            }
+            result = await rejectWorkspaceMemoryCandidate({
+              ...base,
+              ...mutation,
+              itemId: data.itemId ?? '',
+              expectedRevision: data.expectedRevision as number,
+              idempotencyKey:
+                typeof data.idempotencyKey === 'string'
+                  ? data.idempotencyKey
+                  : undefined,
+            });
+            break;
+          }
           default:
             throw new WorkspaceMemoryServiceError(
               'invalid_request',
@@ -15390,6 +15606,12 @@ async function processAgentConversationTurn(
         broadcastStreamEvent(chatJid, output.streamEvent, agentId);
       }
 
+      // Runtime Sessions compact their own context; extract the not-yet-
+      // consumed window before that detail is summarized away.
+      if (output.streamEvent?.eventType === 'compact_boundary') {
+        void extractBeforeCompaction(virtualChatJid);
+      }
+
       // ── Feed stream events into Feishu streaming card ──
       if (agentStreamingSession) {
         const se = output.streamEvent;
@@ -16290,14 +16512,15 @@ async function processAgentConversationTurn(
       });
     };
 
-    const commerceAgentOwnerProfile = resolveCommerceAgentOwnerProfileForTurn({
-      group: effectiveGroup,
-      profile: agentProfile,
-      turnId: lastProcessed.id,
-      isScheduledTask: Boolean(lastProcessed.task_id),
-      runtimeAgentId: agentId,
-      runtimeAgentKind: agent.kind,
-    });
+    const commerceAgentOwnerProfile =
+      await resolveCommerceAgentOwnerProfileForTurn({
+        group: effectiveGroup,
+        profile: agentProfile,
+        turnId: lastProcessed.id,
+        isScheduledTask: Boolean(lastProcessed.task_id),
+        runtimeAgentId: agentId,
+        runtimeAgentKind: agent.kind,
+      });
     const commerceAgentOwnerProfileEnabled =
       isCommerceAgentOwnerProfileRuntimeEligible({
         group: effectiveGroup,
@@ -17654,7 +17877,11 @@ async function ensureDockerRunning(): Promise<void> {
     }
   }
 
-  // Kill and clean up orphaned commerceagent containers from previous runs
+  // Kill and clean up orphaned commerceagent agent-runner containers from
+  // previous runs. The name filter is a cheap server-side narrowing; the actual
+  // selection uses the runner naming scheme so unrelated containers that merely
+  // start with "commerceagent-" (docker-compose.distributed.yml services, for
+  // example) are left alone.
   try {
     const { stdout } = await execFileAsync(
       'docker',
@@ -17662,7 +17889,11 @@ async function ensureDockerRunning(): Promise<void> {
       { timeout: 10000 },
     );
     const output = typeof stdout === 'string' ? stdout : String(stdout);
-    const orphans = output.trim().split('\n').filter(Boolean);
+    const orphans = output
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .filter(isAgentRunnerContainerName);
     for (const name of orphans) {
       try {
         await execFileAsync('docker', ['stop', name], { timeout: 10000 });
@@ -19675,6 +19906,10 @@ function migrateDataDirectories(): void {
 async function main(): Promise<void> {
   migrateDataDirectories();
   initDatabase();
+  // Workspace Memory lives in PostgreSQL. Open, migrate, import any legacy
+  // SQLite memory and reconcile it now, so a broken Memory database fails the
+  // boot instead of the first user request.
+  await initWorkspaceMemoryStore();
   logger.info('Database initialized');
 
   const migratedAutoCompactProfiles = migrateAgentProfileAutoCompactWindow(
@@ -19827,6 +20062,7 @@ async function main(): Promise<void> {
     typeof startChannelReliabilityRecoveryLoop
   > | null = null;
   let unsubscribeChannelReadyRecovery: (() => void) | null = null;
+  let memoryConsolidationWorker: MemoryConsolidationWorkerHandle | null = null;
   if (getSystemSettings().pluginAutoScan) {
     startupPluginScanTimer = setTimeout(() => {
       scanHostMarketplaces().catch((err) =>
@@ -19961,6 +20197,18 @@ async function main(): Promise<void> {
       );
 
     clearTimeout(forceExitTimer);
+
+    // Stop the Memory worker before its database closes. A run interrupted by
+    // the bounded wait is abandoned mid-pass; every write it made is a complete
+    // transaction, and the workspace is caught up at the next start.
+    await memoryConsolidationWorker?.stop();
+    memoryConsolidationWorker = null;
+
+    try {
+      await closeWorkspaceMemoryStore();
+    } catch (err) {
+      logger.warn({ err }, 'Error closing Workspace Memory database');
+    }
 
     try {
       closeDatabase();
@@ -21163,7 +21411,12 @@ async function main(): Promise<void> {
     }
   }
 
-  startSchedulerLoop(schedulerDeps);
+  await startSchedulerLoop(schedulerDeps);
+
+  // Workspace Memory nightly consolidation: host-side maintenance, not a
+  // user-visible scheduled task. Its first check also covers the restart
+  // catch-up for a night missed while the service was down.
+  memoryConsolidationWorker = startMemoryConsolidationWorker();
 
   // Inject triggerTaskRun into WebDeps (schedulerDeps must exist first)
   const webDeps = getWebDeps();
@@ -21458,6 +21711,9 @@ async function main(): Promise<void> {
   startIpcWatcher();
   startStreamingBuffer();
   startMessageLoop();
+  // Post-session Workspace Memory extraction (idle sweep + 14-day candidate
+  // expiry). It only ever writes `proposed` candidates.
+  startMemoryExtractionLoop();
 
   // Start Feishu group sync if any connection is active
   if (anyFeishuConnected) {

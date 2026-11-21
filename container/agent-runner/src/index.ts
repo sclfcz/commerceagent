@@ -1786,6 +1786,15 @@ async function runQueryAttempt(
   ): void => {
     if (!emitOutput) return;
     const trace = workspaceMemorySnapshot.retrievalTrace;
+    const segmentTrace = trace.segments ?? {};
+    const segmentSummary = ['profile', 'relevant', 'proactive']
+      .map((segment) => {
+        const value = segmentTrace[segment];
+        if (!value) return `${segment}:0`;
+        const truncated = value.truncated > 0 ? `(${value.truncated} cut)` : '';
+        return `${segment}:${value.included}${truncated}`;
+      })
+      .join(' ');
     writeOutput({
       status: 'stream',
       result: null,
@@ -1796,7 +1805,7 @@ async function runQueryAttempt(
         isSynthetic: true,
         displayLevel: 'detail',
         title: 'Workspace memory snapshot',
-        summary: `revision ${workspaceMemorySnapshot.storeRevision}; ${trace.itemRevisions.length} item(s)`,
+        summary: `revision ${workspaceMemorySnapshot.storeRevision}; ${trace.itemRevisions.length} item(s); ${segmentSummary}`,
         detail: trace.itemRevisions
           .map((item) => `${item.id}@${item.revision}`)
           .slice(0, 10)
@@ -1807,7 +1816,7 @@ async function runQueryAttempt(
       },
     });
     log(
-      `Workspace memory snapshot revision=${workspaceMemorySnapshot.storeRevision} items=${trace.itemRevisions.length} generatedAt=${trace.generatedAt}`,
+      `Workspace memory snapshot revision=${workspaceMemorySnapshot.storeRevision} items=${trace.itemRevisions.length} segments=${segmentSummary} keywords=${(trace.queryKeywords ?? []).join(',')} generatedAt=${trace.generatedAt}`,
     );
   };
   if (workspaceMemoryTurn.snapshot) {
@@ -2298,7 +2307,9 @@ async function runQueryAttempt(
       tool === 'mcp__commerceagent__workspace_memory_get' ||
       tool === 'mcp__commerceagent__workspace_memory_remember' ||
       tool === 'mcp__commerceagent__workspace_memory_update' ||
-      tool === 'mcp__commerceagent__workspace_memory_forget',
+      tool === 'mcp__commerceagent__workspace_memory_forget' ||
+      tool === 'mcp__commerceagent__workspace_memory_propose' ||
+      tool === 'mcp__commerceagent__workspace_memory_review',
   );
   const hasWebTools = allowedTools.some(
     (tool) => tool === 'WebSearch' || tool === 'WebFetch',
