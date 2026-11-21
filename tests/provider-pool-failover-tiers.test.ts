@@ -79,7 +79,7 @@ describe('failover sticky binding vs. per-model tier walls', () => {
     const result = trySelectPoolProvider('failover-model-wall', null, null);
     expect(result).not.toBeNull();
     expect(result!.profileId).not.toBe(created[0]);
-    expect(result!.resetSession).toBe(true);
+    expect(result!.stripSessionThinking).toBe(true);
   });
 
   test('a fully walled primary tier escalates the bound session to the fallback model', () => {
@@ -96,6 +96,6 @@ describe('failover sticky binding vs. per-model tier walls', () => {
 
     const result = trySelectPoolProvider('failover-sticky-ok', null, null);
     expect(result?.profileId).toBe(created[1]);
-    expect(result?.resetSession ?? false).toBe(false);
+    expect(result?.stripSessionThinking ?? false).toBe(false);
   });
 });

@@ -18,6 +18,7 @@
     "docs:check": "node scripts/check-docs.mjs",
     "test": "vitest",
     "test:real-model": "tsx scripts/test-real-model-smoke.ts",
+    "probe:session-continuity": "tsx scripts/probe-session-continuity.ts",
     "dist:worker": "tsx src/distributed/cli-worker.ts",
     "dist:migrate": "tsx src/distributed/migrate.ts",
     "dist:chaos": "node scripts/dist-chaos.mjs",
@@ -54,7 +55,8 @@
     "bench:selftest": "npm --prefix benchmarks run selftest --",
     "bench:review": "npm --prefix benchmarks run review --",
     "dist:chaos:im": "node scripts/dist-chaos-im.mjs",
-    "dist:demo": "node --import tsx scripts/dist-demo.mjs"
+    "dist:demo": "node --import tsx scripts/dist-demo.mjs",
+    "e2e:session-continuity": "tsx scripts/e2e-session-continuity.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.205",
